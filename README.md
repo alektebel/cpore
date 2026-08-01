@@ -5,9 +5,15 @@ reinforcement learning environment rather than a game.
 
 ![cell stage](docs/hero.png)
 
-Dependencies: `libc` and `libm`. No SDL, no OpenGL, no zlib, no stb. The
-renderer in that screenshot is a software rasteriser in this repo, and the PNG
-it wrote was compressed by a DEFLATE implementation in this repo.
+Dependencies: `libc` and `libm`. No SDL, no OpenGL, no zlib, no stb.
+
+That screenshot is a full pixel-art pipeline written from scratch: the scene is
+rasterised into a 320x180 buffer with hard-edged primitives (coverage is
+thresholded at the pixel centre, never blended), quantised to a fixed 32-colour
+palette with 4x4 ordered dithering, then blown up 4x with nearest-neighbour.
+The PNG it wrote was compressed by a DEFLATE implementation in this repo — the
+palette also cut the file from ~500KB to ~64KB, since 32 colours is very
+friendly to LZ77.
 
 ```
 make && make test && make bench
@@ -101,7 +107,7 @@ src/genome.c            parts, costs, budgets, the editor's action decoding
 src/world.c             the simulation (no I/O, no allocation, no globals)
 src/policy.c            scripted baseline, design head included
 src/env.c               RL wrapper: reset/step/observe/save/load
-src/render.c            software rasteriser (optional, links separately)
+src/render.c            pixel-art rasteriser: 320x180, 32 colours, dithered
 src/png.c               PNG + DEFLATE encoder
 python/cpore/           ctypes binding, works without numpy
 apps/                   cpore_shot, cpore_bench
@@ -221,6 +227,24 @@ All of it found by running the table, not by reading the code:
    membrane-mounted parts, and pack behaviour. The stage transition carries
    state forward rather than restarting.
 4. Tribal, Civ, Space as further rule sets over the same state.
+
+## Rendering
+
+The renderer is a debug view, not a product, and that shaped the choices. At
+320x180 there is no room for soft shading, so every cell gets a hard dark
+keyline, a fill and one highlight — without the keyline everything dissolves
+into the water. The player is marked with four corner brackets rather than
+concentric rings, because a ring drawn around a 10px cell is just noise on top
+of the cell. Cells under 4px across skip their appendages entirely and draw as
+blobs; there is nothing to be gained from a 1px spike.
+
+Two HUD elements exist to make the editor legible: a swatch-and-count strip for
+the parts owned, and a **placement dial** showing where each part actually sits
+on the membrane, front pointing right. Since the simulation resolves damage,
+armour and thrust against those angles, the dial is a readout of live state,
+not decoration.
+
+The whole file links separately from the sim, so a training build drops it.
 
 ## Legal
 

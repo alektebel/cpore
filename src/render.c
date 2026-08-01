@@ -2,13 +2,26 @@
 #include <math.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 /* Software rasteriser. Reads world state and writes RGBA8; it never touches
  * the simulation, so training runs can skip this translation unit entirely. */
 
+/* Pixel-art pipeline. Everything is drawn into a small fixed-size buffer with
+ * hard edges, quantised to a 32-colour palette with ordered dithering, then
+ * blown up with nearest-neighbour. No analytic antialiasing anywhere: a pixel
+ * is either the shape's colour or it is not. */
 #define PI 3.14159265358979f
 
+#define PIX_W   320
+#define PIX_H   180
+#define WSCALE  0.30f          /* pixels per world unit */
+
 typedef struct { uint8_t *fb; int W, H; } Canvas;
+
+/* Coverage is thresholded at the pixel centre rather than blended, which is
+ * the entire difference between a soft vector look and a pixel one. */
+static inline float hard(float cov) { return cov >= 0.5f ? 1.0f : 0.0f; }
 
 static inline float clampf(float v, float a, float b) { return v < a ? a : (v > b ? b : v); }
 static inline float mixf(float a, float b, float t) { return a + (b - a) * t; }
@@ -55,8 +68,8 @@ static void disc(Canvas *c, float cx, float cy, float rad, float r, float g, flo
         for (int x = x0; x <= x1; x++) {
             float dx = (float)x + 0.5f - cx;
             float d = sqrtf(dx * dx + dy * dy);
-            float cov = clampf(rad + 0.5f - d, 0.0f, 1.0f);
-            if (cov > 0.0f) px_blend(c, x, y, r, g, b, a * cov);
+            float cov = hard(clampf(rad + 0.5f - d, 0.0f, 1.0f));
+            if (cov > 0.0f) px_blend(c, x, y, r, g, b, a);
         }
     }
 }
@@ -76,29 +89,35 @@ static void ring(Canvas *c, float cx, float cy, float rad, float th,
         for (int x = x0; x <= x1; x++) {
             float dx = (float)x + 0.5f - cx;
             float d = fabsf(sqrtf(dx * dx + dy * dy) - rad);
-            float cov = clampf(th * 0.5f + 0.5f - d, 0.0f, 1.0f);
-            if (cov > 0.0f) px_blend(c, x, y, r, g, b, a * cov);
+            float cov = hard(clampf(th * 0.5f + 0.5f - d, 0.0f, 1.0f));
+            if (cov > 0.0f) px_blend(c, x, y, r, g, b, a);
         }
     }
 }
 
+/* A stepped halo rather than a falloff. Three hard bands read as deliberate
+ * shading at this resolution; a smooth gradient just reads as blur. */
 static void glow(Canvas *c, float cx, float cy, float rad, float r, float g, float b, float inten)
 {
-    int x0 = (int)floorf(cx - rad), x1 = (int)ceilf(cx + rad);
-    int y0 = (int)floorf(cy - rad), y1 = (int)ceilf(cy + rad);
-    if (x0 < 0) x0 = 0;
-    if (y0 < 0) y0 = 0;
-    if (x1 >= c->W) x1 = c->W - 1;
-    if (y1 >= c->H) y1 = c->H - 1;
-    float inv = 1.0f / rad;
-    for (int y = y0; y <= y1; y++) {
-        float dy = ((float)y + 0.5f - cy) * inv;
-        for (int x = x0; x <= x1; x++) {
-            float dx = ((float)x + 0.5f - cx) * inv;
-            float d2 = dx * dx + dy * dy;
-            if (d2 >= 1.0f) continue;
-            float f = 1.0f - d2;
-            px_add(c, x, y, r, g, b, inten * f * f);
+    if (rad < 1.0f || inten <= 0.0f) return;
+    static const float band[3] = { 1.00f, 0.72f, 0.44f };
+    static const float amt[3]  = { 0.16f, 0.30f, 0.52f };
+    for (int k = 0; k < 3; k++) {
+        float rr = rad * band[k];
+        int x0 = (int)floorf(cx - rr), x1 = (int)ceilf(cx + rr);
+        int y0 = (int)floorf(cy - rr), y1 = (int)ceilf(cy + rr);
+        if (x0 < 0) x0 = 0;
+        if (y0 < 0) y0 = 0;
+        if (x1 >= c->W) x1 = c->W - 1;
+        if (y1 >= c->H) y1 = c->H - 1;
+        float rr2 = rr * rr;
+        for (int y = y0; y <= y1; y++) {
+            float dy = (float)y + 0.5f - cy;
+            for (int x = x0; x <= x1; x++) {
+                float dx = (float)x + 0.5f - cx;
+                if (dx * dx + dy * dy > rr2) continue;
+                px_add(c, x, y, r, g, b, inten * amt[k] * 0.5f);
+            }
         }
     }
 }
@@ -125,8 +144,8 @@ static void capsule(Canvas *c, float ax, float ay, float bx, float by,
             float dx = wx - t * vx, dy = wy - t * vy;
             float d = sqrtf(dx * dx + dy * dy);
             float rr = r0 + (r1 - r0) * t;
-            float cov = clampf(rr + 0.5f - d, 0.0f, 1.0f);
-            if (cov > 0.0f) px_blend(c, x, y, r, g, b, a * cov);
+            float cov = hard(clampf(rr + 0.5f - d, 0.0f, 1.0f));
+            if (cov > 0.0f) px_blend(c, x, y, r, g, b, a);
         }
     }
 }
@@ -267,19 +286,19 @@ static void draw_part(Canvas *c, float cx, float cy, float rad, float wa,
         break;
     }
     case CP_PART_CILIA: {                       /* a little oar */
-        float ln = rad * 0.42f * (0.75f + 0.35f * wave);
-        float bend = wave * 0.45f;
+        float ln = rad * 0.30f * (0.78f + 0.30f * wave);
+        float bend = wave * 0.40f;
         capsule(c, bx, by, bx + cosf(wa + bend) * ln, by + sinf(wa + bend) * ln,
-                rad * 0.055f + 0.5f, 0.35f, acc.r, acc.g, acc.b, 0.78f);
+                0.9f, 0.5f, acc.r, acc.g, acc.b, 1.0f);
         break;
     }
     case CP_PART_FLAGELLA: {                    /* a long trailing whip */
-        float x = bx, y = by, a = wa, seg = rad * 0.50f;
-        for (int k = 0; k < 5; k++) {
-            a += sinf(phase * 3.0f - k * 0.9f) * 0.42f;
+        float x = bx, y = by, a = wa, seg = rad * 0.38f;
+        for (int k = 0; k < 4; k++) {
+            a += sinf(phase * 3.0f - k * 0.9f) * 0.40f;
             float nx = x + cosf(a) * seg, ny = y + sinf(a) * seg;
-            float wdt = rad * 0.10f * (1.0f - k * 0.16f);
-            capsule(c, x, y, nx, ny, wdt, wdt * 0.7f, acc.r, acc.g, acc.b, 0.70f);
+            float wdt = 1.4f - k * 0.25f;
+            capsule(c, x, y, nx, ny, wdt, wdt * 0.75f, acc.r, acc.g, acc.b, 1.0f);
             x = nx; y = ny;
         }
         break;
@@ -341,39 +360,45 @@ static void draw_part(Canvas *c, float cx, float cy, float rad, float wa,
 static void draw_body(Canvas *c, float sx, float sy, float rad, float heading,
                       Col body, Col acc, int is_player)
 {
-    disc(c, sx, sy, rad, body.r * 0.55f, body.g * 0.55f, body.b * 0.55f, 0.92f);
-    disc(c, sx - rad * 0.12f, sy - rad * 0.14f, rad * 0.88f, body.r, body.g, body.b, 0.80f);
-    ring(c, sx, sy, rad - 0.6f, 2.0f, acc.r, acc.g, acc.b, 0.85f);
-    ring(c, sx + rad * 0.10f, sy + rad * 0.12f, rad * 0.90f, 1.6f, 1.0f, 1.0f, 1.0f, 0.14f);
+    /* hard dark keyline, then the fill, then one highlight - the classic
+     * three-step pixel read. Without the keyline everything dissolves into
+     * the water at this resolution. */
+    disc(c, sx, sy, rad, 0.02f, 0.05f, 0.08f, 1.0f);
+    disc(c, sx, sy, rad - 1.0f, body.r * 0.62f, body.g * 0.62f, body.b * 0.62f, 1.0f);
+    disc(c, sx - rad * 0.16f, sy - rad * 0.18f, rad * 0.76f, body.r, body.g, body.b, 1.0f);
 
-    disc(c, sx + rad * 0.18f, sy + rad * 0.10f, rad * 0.34f,
-         acc.r * 0.75f, acc.g * 0.75f, acc.b * 0.85f, 0.62f);
-    disc(c, sx - rad * 0.26f, sy + rad * 0.22f, rad * 0.15f, 1.0f, 1.0f, 1.0f, 0.22f);
-    disc(c, sx - rad * 0.30f, sy - rad * 0.30f, rad * 0.20f, 1.0f, 1.0f, 1.0f, 0.30f);
+    if (rad >= 5.0f) {
+        disc(c, sx + rad * 0.20f, sy + rad * 0.16f, rad * 0.32f,
+             acc.r * 0.60f, acc.g * 0.60f, acc.b * 0.72f, 1.0f);
+        disc(c, sx - rad * 0.34f, sy - rad * 0.34f, rad * 0.17f, 1.0f, 1.0f, 1.0f, 0.85f);
+    }
 
     if (is_player) {
-        /* the agent's cell has to be findable at a glance in a crowded pool */
-        ring(c, sx, sy, rad + 7.0f, 1.8f, 0.60f, 1.0f, 0.95f, 0.70f);
-        ring(c, sx, sy, rad + 13.0f, 1.0f, 0.60f, 1.0f, 0.95f, 0.28f);
-        for (int i = 0; i < 4; i++) {
-            float a = PI * 0.25f + i * PI * 0.5f;
-            capsule(c, sx + cosf(a) * (rad + 10.0f), sy + sinf(a) * (rad + 10.0f),
-                    sx + cosf(a) * (rad + 17.0f), sy + sinf(a) * (rad + 17.0f),
-                    1.1f, 1.1f, 0.60f, 1.0f, 0.95f, 0.55f);
+        /* Four corner brackets rather than concentric rings: at 320x180 a ring
+         * around a 10px cell is just noise on top of the cell. */
+        int d = (int)(rad + 4.0f);
+        int cx = (int)sx, cy = (int)sy;
+        for (int qy = -1; qy <= 1; qy += 2) {
+            for (int qx = -1; qx <= 1; qx += 2) {
+                rect_fill(c, cx + qx * d - (qx < 0 ? 0 : 2), cy + qy * d, 3, 1,
+                          0.78f, 1.0f, 0.98f, 1.0f);
+                rect_fill(c, cx + qx * d, cy + qy * d - (qy < 0 ? 0 : 2), 1, 3,
+                          0.78f, 1.0f, 0.98f, 1.0f);
+            }
         }
-        capsule(c, sx + cosf(heading) * (rad + 3.0f), sy + sinf(heading) * (rad + 3.0f),
-                sx + cosf(heading) * (rad + 13.0f), sy + sinf(heading) * (rad + 13.0f),
-                2.0f, 0.6f, 0.7f, 1.0f, 1.0f, 0.85f);
+        /* facing pip */
+        rect_fill(c, (int)(sx + cosf(heading) * (rad + 2.0f)) - 1,
+                  (int)(sy + sinf(heading) * (rad + 2.0f)) - 1, 2, 2,
+                  1.0f, 1.0f, 1.0f, 1.0f);
     }
 }
 
 /* the player: parts come straight off the genome, at their real angles */
-static void draw_player(Canvas *c, const CpWorld *w, float sx, float sy)
+static void draw_player(Canvas *c, const CpWorld *w, float sx, float sy, float rad)
 {
     const CpCell *p = &w->player;
-    Col body = { 0.16f, 0.72f, 0.88f }, acc = { 0.60f, 1.0f, 0.98f };
+    Col body = { 0.36f, 0.86f, 0.94f }, acc = { 0.82f, 0.98f, 1.0f };
     if (!p->alive) { body.r = 0.35f; body.g = 0.35f; body.b = 0.40f; }
-    float rad = p->r;
     float flash = w->elec_flash > 0.0f ? w->elec_flash * 5.0f : 0.0f;
 
     glow(c, sx, sy, rad * 3.1f, body.r * 0.5f, body.g * 0.5f, body.b * 0.5f, 0.30f);
@@ -392,14 +417,14 @@ static void draw_player(Canvas *c, const CpWorld *w, float sx, float sy)
     /* discharge shockwave, at the radius the simulation actually used */
     if (w->elec_flash > 0.0f && w->stats.elec_radius > 0.0f) {
         float k = w->elec_flash / 0.20f;
-        ring(c, sx, sy, w->stats.elec_radius * (1.15f - 0.15f * k), 2.5f,
-             0.65f, 0.92f, 1.0f, 0.85f * k);
-        glow(c, sx, sy, w->stats.elec_radius * 1.2f, 0.30f, 0.65f, 1.0f, 0.55f * k);
+        float er = w->stats.elec_radius * WSCALE;
+        ring(c, sx, sy, er * (1.15f - 0.15f * k), 1.5f, 0.65f, 0.92f, 1.0f, 0.9f);
+        ring(c, sx, sy, er * 0.72f, 1.0f, 0.85f, 0.96f, 1.0f, 0.6f * k);
     }
 }
 
 /* npc cells get the same part vocabulary, synthesised from their counts */
-static void draw_npc(Canvas *c, const CpCell *n, float sx, float sy)
+static void draw_npc(Canvas *c, const CpCell *n, float sx, float sy, float rad)
 {
     Col body, acc;
     hsv(n->hue, 0.58f, 0.72f, &body.r, &body.g, &body.b);
@@ -407,12 +432,17 @@ static void draw_npc(Canvas *c, const CpCell *n, float sx, float sy)
 
     float head = (n->vx * n->vx + n->vy * n->vy) > 1.0f
                ? atan2f(n->vy, n->vx) : n->wander_a;
-    float rad = n->r;
 
     glow(c, sx, sy, rad * 3.1f, body.r * 0.5f, body.g * 0.5f, body.b * 0.5f, 0.16f);
 
-    int ncil = 8 + n->cilia * 3;
-    if (ncil > 26) ncil = 26;
+    if (rad < 4.0f) {          /* too small to carry detail at this resolution */
+        disc(c, sx, sy, rad, 0.02f, 0.05f, 0.08f, 1.0f);
+        disc(c, sx, sy, rad - 1.0f, body.r, body.g, body.b, 1.0f);
+        return;
+    }
+
+    int ncil = 6 + n->cilia * 2;
+    if (ncil > 18) ncil = 18;
     for (int i = 0; i < ncil; i++)
         draw_part(c, sx, sy, rad, head + (float)i / ncil * 2.0f * PI,
                   CP_PART_CILIA, n->phase, acc, 0.0f);
@@ -435,179 +465,232 @@ static void draw_npc(Canvas *c, const CpCell *n, float sx, float sy)
 
 /* ---------------- HUD ---------------- */
 
-static void panel(Canvas *c, int x, int y, int w, int h, float a)
+static void panel(Canvas *c, int x, int y, int w, int h)
 {
-    rect_fill(c, x, y, w, h, 0.02f, 0.06f, 0.09f, a);
-    rect_fill(c, x, y, w, 1, 0.35f, 0.85f, 0.90f, 0.35f);
-    rect_fill(c, x, y + h - 1, w, 1, 0.35f, 0.85f, 0.90f, 0.16f);
+    rect_fill(c, x, y, w, h, 0.04f, 0.09f, 0.13f, 0.86f);
+    rect_fill(c, x, y, w, 1, 0.32f, 0.62f, 0.66f, 0.55f);
+    rect_fill(c, x, y + h - 1, w, 1, 0.10f, 0.24f, 0.30f, 0.9f);
 }
 
 static void bar(Canvas *c, int x, int y, int w, int h, float frac,
                 float r, float g, float b)
 {
     frac = clampf(frac, 0.0f, 1.0f);
-    rect_fill(c, x - 1, y - 1, w + 2, h + 2, 0.0f, 0.0f, 0.0f, 0.45f);
-    rect_fill(c, x, y, w, h, 0.10f, 0.14f, 0.17f, 0.9f);
-    int fw = (int)(w * frac);
-    for (int i = 0; i < fw; i++) {
-        float t = (float)i / (float)(w > 1 ? w - 1 : 1);
-        rect_fill(c, x + i, y, 1, h, r * (0.72f + 0.38f * t), g * (0.72f + 0.38f * t),
-                  b * (0.72f + 0.38f * t), 0.98f);
+    rect_fill(c, x, y, w, h, 0.06f, 0.12f, 0.15f, 1.0f);
+    int fw = (int)(w * frac + 0.5f);
+    if (fw > 0) {
+        rect_fill(c, x, y, fw, h, r, g, b, 1.0f);
+        rect_fill(c, x, y, fw, 1, r * 1.35f + 0.15f, g * 1.35f + 0.15f, b * 1.35f + 0.15f, 1.0f);
     }
-    if (fw > 0) rect_fill(c, x, y, fw, 1, 1.0f, 1.0f, 1.0f, 0.22f);
 }
 
-static void draw_minimap(Canvas *c, const CpWorld *w, float camx, float camy)
+static void draw_minimap(Canvas *c, const CpWorld *w, float camx, float camy,
+                         float viewW, float viewH)
 {
-    const int mw = 214, mh = 128;
-    const int mx = c->W - mw - 18, my = c->H - mh - 18;
-    panel(c, mx - 4, my - 16, mw + 8, mh + 24, 0.62f);
-    text(c, mx, my - 12, 1, "POOL", 0.55f, 0.88f, 0.92f, 0.85f);
+    const int mw = 62, mh = 36;
+    const int mx = c->W - mw - 3, my = 3;
+    panel(c, mx - 1, my - 1, mw + 2, mh + 2);
 
     float sx = (float)mw / CP_WORLD_W, sy = (float)mh / CP_WORLD_H;
-    rect_fill(c, mx, my, mw, mh, 0.03f, 0.09f, 0.12f, 0.85f);
+    rect_fill(c, mx, my, mw, mh, 0.03f, 0.08f, 0.11f, 1.0f);
 
-    for (int i = 0; i < CP_MAX_FOOD; i += 3) {
+    for (int i = 0; i < CP_MAX_FOOD; i += 4) {
         const CpFood *f = &w->food[i];
         if (f->type == CP_FOOD_NONE) continue;
-        int px_ = mx + (int)(f->x * sx), py_ = my + (int)(f->y * sy);
-        if (f->type == CP_FOOD_PLANT) px_blend(c, px_, py_, 0.35f, 0.85f, 0.40f, 0.65f);
-        else                          px_blend(c, px_, py_, 0.95f, 0.45f, 0.30f, 0.75f);
+        int px_ = mx + (int)(f->x * sx), py = my + (int)(f->y * sy);
+        if (f->type == CP_FOOD_PLANT) px_blend(c, px_, py, 0.30f, 0.62f, 0.34f, 1.0f);
+        else                          px_blend(c, px_, py, 0.75f, 0.36f, 0.24f, 1.0f);
     }
     for (int i = 0; i < CP_MAX_CELLS; i++) {
         const CpCell *cc = &w->cells[i];
         if (!cc->alive) continue;
-        float r, g, b; hsv(cc->hue, 0.62f, 0.95f, &r, &g, &b);
-        disc(c, mx + cc->x * sx, my + cc->y * sy, cc->r * sx * 1.6f + 0.8f, r, g, b, 0.85f);
+        float r, g, b;
+        hsv(cc->hue, 0.62f, 0.92f, &r, &g, &b);
+        rect_fill(c, mx + (int)(cc->x * sx), my + (int)(cc->y * sy), 1, 1, r, g, b, 1.0f);
     }
-    disc(c, mx + w->player.x * sx, my + w->player.y * sy, 3.0f, 0.6f, 1.0f, 0.95f, 1.0f);
-    ring(c, mx + w->player.x * sx, my + w->player.y * sy, 5.5f, 1.2f, 0.6f, 1.0f, 0.95f, 0.7f);
 
-    /* current viewport */
+    /* viewport box */
     int vx = mx + (int)(camx * sx), vy = my + (int)(camy * sy);
-    int vw = (int)(c->W * sx), vh = (int)(c->H * sy);
-    rect_fill(c, vx, vy, vw, 1, 0.8f, 1.0f, 1.0f, 0.30f);
-    rect_fill(c, vx, vy + vh, vw, 1, 0.8f, 1.0f, 1.0f, 0.30f);
-    rect_fill(c, vx, vy, 1, vh, 0.8f, 1.0f, 1.0f, 0.30f);
-    rect_fill(c, vx + vw, vy, 1, vh, 0.8f, 1.0f, 1.0f, 0.30f);
+    int vw = (int)(viewW * sx), vh = (int)(viewH * sy);
+    rect_fill(c, vx, vy, vw, 1, 0.70f, 0.90f, 0.92f, 0.55f);
+    rect_fill(c, vx, vy + vh, vw, 1, 0.70f, 0.90f, 0.92f, 0.55f);
+    rect_fill(c, vx, vy, 1, vh, 0.70f, 0.90f, 0.92f, 0.55f);
+    rect_fill(c, vx + vw, vy, 1, vh, 0.70f, 0.90f, 0.92f, 0.55f);
+
+    int px_ = mx + (int)(w->player.x * sx), py = my + (int)(w->player.y * sy);
+    rect_fill(c, px_ - 1, py, 3, 1, 0.75f, 1.0f, 1.0f, 1.0f);
+    rect_fill(c, px_, py - 1, 1, 3, 0.75f, 1.0f, 1.0f, 1.0f);
 }
 
-static void draw_hud(Canvas *c, const CpWorld *w, float camx, float camy)
+/* one colour per part type, shared by the strip and the placement dial so the
+ * two readouts agree at a glance */
+static void part_colour(int t, float *r, float *g, float *b)
 {
-    char buf[128];
+    switch (t) {
+    case CP_PART_FILTER:    *r=0.55f; *g=0.92f; *b=0.60f; break;
+    case CP_PART_JAW:       *r=0.95f; *g=0.90f; *b=0.72f; break;
+    case CP_PART_PROBOSCIS: *r=0.80f; *g=0.66f; *b=0.95f; break;
+    case CP_PART_CILIA:     *r=0.45f; *g=0.82f; *b=0.90f; break;
+    case CP_PART_FLAGELLA:  *r=0.35f; *g=0.66f; *b=0.92f; break;
+    case CP_PART_JET:       *r=0.60f; *g=0.76f; *b=0.95f; break;
+    case CP_PART_SPIKE:     *r=0.95f; *g=0.82f; *b=0.55f; break;
+    case CP_PART_ELECTRIC:  *r=0.55f; *g=0.88f; *b=1.00f; break;
+    case CP_PART_POISON:    *r=0.60f; *g=0.92f; *b=0.30f; break;
+    case CP_PART_EYE:       *r=0.95f; *g=0.95f; *b=0.98f; break;
+    default:                *r=0.30f; *g=0.36f; *b=0.40f; break;
+    }
+}
+
+static void draw_hud(Canvas *c, const CpWorld *w, float camx, float camy,
+                     float viewW, float viewH)
+{
+    char buf[64];
     const CpCell *p = &w->player;
 
-    /* --- stage / vitals --- */
-    panel(c, 18, 18, 330, 104, 0.66f);
-    text(c, 30, 28, 2, "CELL STAGE", 0.62f, 0.96f, 1.0f, 0.95f);
-    snprintf(buf, sizeof(buf), "SEED %u   T %d   PARTS %d", w->seed, w->step, w->stats.n_parts);
-    text(c, 30, 46, 1, buf, 0.45f, 0.62f, 0.70f, 0.9f);
+    /* --- vitals, top left --- */
+    panel(c, 3, 3, 104, 32);
+    text(c, 6, 6, 1, "CELL STAGE", 0.62f, 0.92f, 0.96f, 1.0f);
+    snprintf(buf, sizeof(buf), "G%d/%d T%d", w->generation + 1, CP_GENERATIONS, w->step);
+    text(c, 6, 15, 1, buf, 0.42f, 0.58f, 0.64f, 1.0f);
+    bar(c, 6, 24, 46, 3, p->hp / p->hp_max, 0.86f, 0.28f, 0.30f);
+    bar(c, 55, 24, 46, 3, w->dna / CP_DNA_GOAL, 0.38f, 0.82f, 0.46f);
 
-    text(c, 30, 64, 1, "HEALTH", 0.75f, 0.80f, 0.82f, 0.9f);
-    bar(c, 92, 63, 236, 9, p->hp / p->hp_max, 0.95f, 0.32f, 0.34f);
+    /* --- body plan, bottom left: a swatch and a count per owned part --- */
+    panel(c, 3, PIX_H - 34, 132, 31);
+    snprintf(buf, sizeof(buf), "%d DNA  %d PARTS", (int)w->stats.cost, w->stats.n_parts);
+    text(c, 6, PIX_H - 31, 1, buf, 0.50f, 0.74f, 0.78f, 1.0f);
 
-    text(c, 30, 84, 1, "DNA", 0.75f, 0.80f, 0.82f, 0.9f);
-    bar(c, 92, 83, 236, 9, w->dna / CP_DNA_GOAL, 0.42f, 0.90f, 0.55f);
-
-    snprintf(buf, sizeof(buf), "%d / %d", (int)w->dna, (int)CP_DNA_GOAL);
-    text(c, 92, 100, 1, buf, 0.55f, 0.85f, 0.62f, 0.9f);
-    snprintf(buf, sizeof(buf), "SIZE %.1f", (double)p->r);
-    text(c, 240, 100, 1, buf, 0.50f, 0.70f, 0.78f, 0.9f);
-
-    /* --- body plan: the editor's output, including where things are --- */
-    panel(c, 18, 134, 330, 186, 0.62f);
-    snprintf(buf, sizeof(buf), "BODY PLAN   GEN %d/%d   %d/%d DNA",
-             w->generation + 1, CP_GENERATIONS,
-             (int)w->stats.cost, CP_GEN_BUDGET[w->generation]);
-    text(c, 30, 142, 1, buf, 0.62f, 0.96f, 1.0f, 0.9f);
-
-    static const char *pn[CP_PART_COUNT] = { "", "FILTR", "JAW", "PROBO", "CILIA",
-                                             "FLGLA", "JET", "SPIKE", "ELECT",
-                                             "POISN", "EYE" };
+    int col = 0;
     for (int t = 1; t < CP_PART_COUNT; t++) {
-        int i = t - 1;
-        int col = i / 5, row = i % 5;
-        int x = 30 + col * 116, y = 160 + row * 15;
         int n = w->stats.n[t];
-        float lum = n ? 1.0f : 0.34f;
-        text(c, x, y, 1, pn[t], 0.70f * lum, 0.80f * lum, 0.84f * lum, 0.95f);
-        for (int k = 0; k < 4; k++) {
-            int on = k < n;
-            rect_fill(c, x + 38 + k * 8, y, 6, 7,
-                      on ? 0.40f : 0.14f, on ? 0.92f : 0.18f, on ? 0.86f : 0.22f, 0.95f);
-        }
+        if (!n) continue;
+        int x = 6 + (col % 5) * 19;
+        int y = PIX_H - 21 + (col / 5) * 9;
+        float r, g, b;
+        part_colour(t, &r, &g, &b);
+        rect_fill(c, x, y, 5, 5, r, g, b, 1.0f);
+        rect_fill(c, x, y, 5, 1, r * 1.3f, g * 1.3f, b * 1.3f, 1.0f);
+        snprintf(buf, sizeof(buf), "%d", n);
+        text(c, x + 7, y - 1, 1, buf, 0.78f, 0.86f, 0.88f, 1.0f);
+        col++;
     }
 
-    /* placement dial - where each part actually sits on the membrane.
-     * Front of the cell is to the right, matching the facing tick in-world. */
+    /* --- placement dial: where the parts actually sit. Front points right,
+     *     matching the facing tick on the cell itself. --- */
     {
-        float dx = 296.0f, dy = 218.0f, dr = 30.0f;
-        ring(c, dx, dy, dr, 1.0f, 0.35f, 0.62f, 0.68f, 0.55f);
-        capsule(c, dx + dr * 0.55f, dy, dx + dr * 0.95f, dy, 1.0f, 1.0f,
-                0.55f, 0.85f, 0.90f, 0.75f);
-        text(c, (int)(dx - 12), (int)(dy + dr + 5), 1, "FWD", 0.45f, 0.70f, 0.76f, 0.8f);
+        float dx = 118.0f, dy = (float)PIX_H - 18.0f, dr = 12.0f;
+        ring(c, dx, dy, dr, 1.0f, 0.24f, 0.44f, 0.50f, 1.0f);
+        rect_fill(c, (int)(dx + dr - 3), (int)dy, 5, 1, 0.55f, 0.82f, 0.86f, 1.0f);
         for (int i = 0; i < CP_MAX_PARTS; i++) {
             int t = w->genome.part[i].type;
             if (t == CP_PART_NONE) continue;
             float a = (float)w->genome.part[i].angle * (2.0f * PI / 256.0f);
             float r, g, b;
-            hsv(0.08f + 0.085f * (float)t, 0.70f, 1.0f, &r, &g, &b);
-            disc(c, dx + cosf(a) * dr, dy + sinf(a) * dr, 3.2f, r, g, b, 0.95f);
+            part_colour(t, &r, &g, &b);
+            rect_fill(c, (int)(dx + cosf(a) * dr) - 1, (int)(dy + sinf(a) * dr) - 1,
+                      3, 3, r, g, b, 1.0f);
         }
     }
 
-    /* --- episode stats --- */
-    panel(c, c->W - 232, 18, 214, 106, 0.62f);
-    text(c, c->W - 220, 26, 1, "EPISODE", 0.62f, 0.96f, 1.0f, 0.9f);
-    snprintf(buf, sizeof(buf), "PLANTS EATEN  %d", w->ate_plant);
-    text(c, c->W - 220, 44, 1, buf, 0.72f, 0.80f, 0.82f, 0.9f);
-    snprintf(buf, sizeof(buf), "MEAT EATEN    %d", w->ate_meat);
-    text(c, c->W - 220, 58, 1, buf, 0.72f, 0.80f, 0.82f, 0.9f);
-    snprintf(buf, sizeof(buf), "CELLS KILLED  %d", w->kills);
-    text(c, c->W - 220, 72, 1, buf, 0.72f, 0.80f, 0.82f, 0.9f);
-    snprintf(buf, sizeof(buf), "HITS TAKEN    %d", w->hits_taken);
-    text(c, c->W - 220, 86, 1, buf, 0.72f, 0.80f, 0.82f, 0.9f);
-    snprintf(buf, sizeof(buf), "DISCHARGES    %d", w->discharges);
-    text(c, c->W - 220, 100, 1, buf, 0.72f, 0.80f, 0.82f, 0.9f);
+    draw_minimap(c, w, camx, camy, viewW, viewH);
 
-    draw_minimap(c, w, camx, camy);
+    /* --- episode counters, under the minimap --- */
+    {
+        int x = c->W - 65, y = 43;
+        panel(c, x - 1, y - 1, 64, 32);
+        snprintf(buf, sizeof(buf), "EAT %d", w->ate_plant + w->ate_meat);
+        text(c, x + 2, y + 2, 1, buf, 0.66f, 0.76f, 0.78f, 1.0f);
+        snprintf(buf, sizeof(buf), "KILL %d", w->kills);
+        text(c, x + 2, y + 10, 1, buf, 0.66f, 0.76f, 0.78f, 1.0f);
+        snprintf(buf, sizeof(buf), "HIT %d", w->hits_taken);
+        text(c, x + 2, y + 18, 1, buf, 0.66f, 0.76f, 0.78f, 1.0f);
+    }
 
     /* --- terminal banner --- */
     if (w->status != CP_RUN) {
         const char *msg = w->status == CP_EVOLVED ? "EVOLVE - CREATURE STAGE"
                         : w->status == CP_DEAD    ? "CONSUMED"
                                                   : "TIME UP";
-        int tw = text_w(msg, 3);
-        int bx = (c->W - tw) / 2 - 24, by = c->H / 2 - 34;
-        panel(c, bx, by, tw + 48, 62, 0.78f);
-        text(c, (c->W - tw) / 2, by + 20, 3,
-             msg, w->status == CP_EVOLVED ? 0.5f : 1.0f,
-             w->status == CP_EVOLVED ? 1.0f : 0.45f, 0.6f, 0.97f);
+        int tw = text_w(msg, 1);
+        int bx = (c->W - tw) / 2, by = c->H / 2 - 7;
+        panel(c, bx - 6, by - 4, tw + 12, 16);
+        text(c, bx, by, 1, msg,
+             w->status == CP_EVOLVED ? 0.52f : 1.0f,
+             w->status == CP_EVOLVED ? 0.95f : 0.46f, 0.60f, 1.0f);
     }
+}
 
-    text(c, 18, c->H - 22, 1, "CPORE  /  CELL STAGE  /  HEADLESS SIM + SOFTWARE RASTERISER",
-         0.34f, 0.48f, 0.54f, 0.85f);
+/* ---------------- palette + dithering ---------------- */
+
+/* 32 colours, grouped as ramps so shading stays inside a hue instead of
+ * wandering across the palette when it is quantised. */
+static const uint8_t PAL[32][3] = {
+    {  6, 12, 20}, { 10, 22, 34}, { 14, 34, 48}, { 20, 48, 62},
+    { 28, 62, 78}, { 38, 80, 94}, { 52,102,114}, { 74,128,138},
+    { 26, 64, 38}, { 44,104, 56}, { 78,158, 74}, {132,206,104},
+    {186,232,140}, { 92, 34, 30}, {148, 54, 40}, {198, 90, 56},
+    {236,148, 96}, { 18, 62, 84}, { 34,104,134}, { 62,160,190},
+    {126,214,232}, {198,244,250}, { 86, 28, 54}, {138, 44, 80},
+    {192, 80,120}, {232,140,172}, { 56, 40, 96}, { 92, 68,148},
+    {142,112,200}, {182,176,152}, {224,220,200}, {252,252,248},
+};
+
+static const uint8_t BAYER[16] = { 0, 8, 2,10, 12, 4,14, 6, 3,11, 1, 9, 15, 7,13, 5 };
+
+static void quantise(uint8_t *fb, int W, int H)
+{
+    for (int y = 0; y < H; y++) {
+        for (int x = 0; x < W; x++) {
+            uint8_t *px_ = fb + 4 * ((size_t)y * W + x);
+            /* ordered dither: nudge each pixel before snapping, so the water
+             * gradient breaks into a woven texture instead of hard bands */
+            float d = ((float)BAYER[(y & 3) * 4 + (x & 3)] / 16.0f - 0.469f) * 26.0f;
+            float pr = px_[0] + d, pg = px_[1] + d, pb = px_[2] + d;
+
+            int best = 0;
+            float bestd = 1e18f;
+            for (int i = 0; i < 32; i++) {
+                float dr = pr - PAL[i][0], dg = pg - PAL[i][1], db = pb - PAL[i][2];
+                /* luma-weighted, so the match tracks perceived brightness */
+                float e = dr * dr * 0.30f + dg * dg * 0.59f + db * db * 0.11f;
+                if (e < bestd) { bestd = e; best = i; }
+            }
+            px_[0] = PAL[best][0];
+            px_[1] = PAL[best][1];
+            px_[2] = PAL[best][2];
+        }
+    }
 }
 
 /* ---------------- main entry ---------------- */
 
 void cp_render(const CpWorld *w, uint8_t *rgba, int W, int H)
 {
-    Canvas cv = { rgba, W, H };
+    int scale = W / PIX_W;
+    if (H / PIX_H < scale) scale = H / PIX_H;
+    if (scale < 1) scale = 1;
 
-    float camx = clampf(w->player.x - W * 0.5f, 0.0f, CP_WORLD_W - (float)W);
-    float camy = clampf(w->player.y - H * 0.5f, 0.0f, CP_WORLD_H - (float)H);
-    if (CP_WORLD_W < (float)W) camx = (CP_WORLD_W - (float)W) * 0.5f;
-    if (CP_WORLD_H < (float)H) camy = (CP_WORLD_H - (float)H) * 0.5f;
+    uint8_t *low = (uint8_t *)malloc((size_t)PIX_W * PIX_H * 4);
+    if (!low) return;
+    Canvas cv = { low, PIX_W, PIX_H };
 
-    /* --- water --- */
-    for (int y = 0; y < H; y++) {
-        float t = (float)y / (float)H;
-        float r = mixf(0.020f, 0.055f, t);
-        float g = mixf(0.090f, 0.150f, t);
-        float b = mixf(0.120f, 0.175f, t);
-        uint8_t *row = rgba + 4 * (size_t)y * W;
-        for (int x = 0; x < W; x++) {
+    const float viewW = PIX_W / WSCALE, viewH = PIX_H / WSCALE;
+    float camx = clampf(w->player.x - viewW * 0.5f, 0.0f, CP_WORLD_W - viewW);
+    float camy = clampf(w->player.y - viewH * 0.5f, 0.0f, CP_WORLD_H - viewH);
+    if (CP_WORLD_W < viewW) camx = (CP_WORLD_W - viewW) * 0.5f;
+    if (CP_WORLD_H < viewH) camy = (CP_WORLD_H - viewH) * 0.5f;
+
+    #define SXW(wx) (((wx) - camx) * WSCALE)
+    #define SYW(wy) (((wy) - camy) * WSCALE)
+
+    /* --- water: a vertical ramp, left to the dither to break up --- */
+    for (int y = 0; y < PIX_H; y++) {
+        float t = (float)y / (float)PIX_H;
+        float r = mixf(0.055f, 0.100f, t);
+        float g = mixf(0.150f, 0.235f, t);
+        float b = mixf(0.200f, 0.290f, t);
+        uint8_t *row = low + 4 * (size_t)y * PIX_W;
+        for (int x = 0; x < PIX_W; x++) {
             row[4 * x + 0] = (uint8_t)(r * 255.0f);
             row[4 * x + 1] = (uint8_t)(g * 255.0f);
             row[4 * x + 2] = (uint8_t)(b * 255.0f);
@@ -615,77 +698,58 @@ void cp_render(const CpWorld *w, uint8_t *rgba, int W, int H)
         }
     }
 
-    /* murk: a few big soft blooms, fixed to the world so they parallax */
+    /* murk, fixed to the world so it parallaxes with the camera */
     CpRng mr; cp_rng_seed(&mr, w->seed ^ 0xA53Cu);
-    for (int i = 0; i < 14; i++) {
+    for (int i = 0; i < 12; i++) {
         float mx = cp_rng_range(&mr, -200.0f, CP_WORLD_W + 200.0f);
         float my = cp_rng_range(&mr, -200.0f, CP_WORLD_H + 200.0f);
-        float mrad = cp_rng_range(&mr, 260.0f, 620.0f);
-        glow(&cv, mx - camx, my - camy, mrad,
-             cp_rng_range(&mr, 0.02f, 0.07f), cp_rng_range(&mr, 0.10f, 0.20f),
-             cp_rng_range(&mr, 0.12f, 0.22f), 0.55f);
+        float mrad = cp_rng_range(&mr, 200.0f, 520.0f) * WSCALE;
+        glow(&cv, SXW(mx), SYW(my), mrad, 0.06f, 0.16f, 0.20f, 0.55f);
     }
 
-    /* pool walls: a soft rim so the bounded world reads as bounded */
+    /* pool walls */
     {
-        struct { float pos; int vertical; int inward; } edges[4] = {
-            { -camx, 1, +1 }, { CP_WORLD_W - camx, 1, -1 },
-            { -camy, 0, +1 }, { CP_WORLD_H - camy, 0, -1 }
-        };
-        for (int e = 0; e < 4; e++) {
-            float p0 = edges[e].pos;
-            for (int d = 0; d < 70; d++) {
-                float a = (1.0f - d / 70.0f);
-                a = a * a * 0.5f;
-                int q = (int)(p0 + edges[e].inward * d);
-                if (edges[e].vertical) {
-                    if (q < 0 || q >= W) continue;
-                    rect_fill(&cv, q, 0, 1, H, 0.01f, 0.03f, 0.05f, a);
-                } else {
-                    if (q < 0 || q >= H) continue;
-                    rect_fill(&cv, 0, q, W, 1, 0.01f, 0.03f, 0.05f, a);
-                }
-            }
-            int q = (int)p0;
-            if (edges[e].vertical) {
-                if (q >= 0 && q < W) rect_fill(&cv, q, 0, 1, H, 0.30f, 0.70f, 0.72f, 0.22f);
-            } else {
-                if (q >= 0 && q < H) rect_fill(&cv, 0, q, W, 1, 0.30f, 0.70f, 0.72f, 0.22f);
-            }
+        int l = (int)SXW(0.0f), r = (int)SXW(CP_WORLD_W);
+        int t = (int)SYW(0.0f), b = (int)SYW(CP_WORLD_H);
+        for (int d = 0; d < 14; d++) {
+            float a = (1.0f - d / 14.0f) * 0.55f;
+            if (l + d >= 0 && l + d < PIX_W) rect_fill(&cv, l + d, 0, 1, PIX_H, 0.02f, 0.05f, 0.08f, a);
+            if (r - d >= 0 && r - d < PIX_W) rect_fill(&cv, r - d, 0, 1, PIX_H, 0.02f, 0.05f, 0.08f, a);
+            if (t + d >= 0 && t + d < PIX_H) rect_fill(&cv, 0, t + d, PIX_W, 1, 0.02f, 0.05f, 0.08f, a);
+            if (b - d >= 0 && b - d < PIX_H) rect_fill(&cv, 0, b - d, PIX_W, 1, 0.02f, 0.05f, 0.08f, a);
         }
+        if (l >= 0 && l < PIX_W) rect_fill(&cv, l, 0, 1, PIX_H, 0.30f, 0.62f, 0.64f, 0.6f);
+        if (r >= 0 && r < PIX_W) rect_fill(&cv, r, 0, 1, PIX_H, 0.30f, 0.62f, 0.64f, 0.6f);
+        if (t >= 0 && t < PIX_H) rect_fill(&cv, 0, t, PIX_W, 1, 0.30f, 0.62f, 0.64f, 0.6f);
+        if (b >= 0 && b < PIX_H) rect_fill(&cv, 0, b, PIX_W, 1, 0.30f, 0.62f, 0.64f, 0.6f);
     }
 
-    /* suspended detritus, parallaxed for depth */
+    /* suspended detritus, parallaxed for depth - single pixels, no blur */
     CpRng dr; cp_rng_seed(&dr, w->seed ^ 0x1234u);
-    for (int i = 0; i < 520; i++) {
+    for (int i = 0; i < 420; i++) {
         float wx = cp_rng_range(&dr, 0.0f, CP_WORLD_W);
         float wy = cp_rng_range(&dr, 0.0f, CP_WORLD_H);
-        float depth = cp_rng_range(&dr, 0.25f, 0.85f);
-        float rad = cp_rng_range(&dr, 0.6f, 2.2f) * depth;
-        float sx = wx - camx * depth, sy = wy - camy * depth;
-        if (sx < -8 || sy < -8 || sx > W + 8 || sy > H + 8) continue;
-        disc(&cv, sx, sy, rad, 0.55f, 0.80f, 0.85f, 0.06f + 0.14f * depth);
+        float depth = cp_rng_range(&dr, 0.30f, 0.85f);
+        int sx = (int)((wx - camx * depth) * WSCALE);
+        int sy = (int)((wy - camy * depth) * WSCALE);
+        px_blend(&cv, sx, sy, 0.55f, 0.78f, 0.82f, 0.10f + 0.22f * depth);
     }
 
     /* --- food --- */
     for (int i = 0; i < CP_MAX_FOOD; i++) {
         const CpFood *f = &w->food[i];
         if (f->type == CP_FOOD_NONE) continue;
-        float sx = f->x - camx, sy = f->y - camy;
-        if (sx < -20 || sy < -20 || sx > W + 20 || sy > H + 20) continue;
-
+        float sx = SXW(f->x), sy = SYW(f->y);
+        if (sx < -8 || sy < -8 || sx > PIX_W + 8 || sy > PIX_H + 8) continue;
+        float rad = f->r * WSCALE + 0.6f;
         if (f->type == CP_FOOD_PLANT) {
-            float pulse = 0.85f + 0.15f * sinf(f->phase + (float)w->step * CP_DT * 1.7f);
-            glow(&cv, sx, sy, f->r * 4.2f, 0.10f, 0.55f, 0.22f, 0.30f * pulse);
-            disc(&cv, sx, sy, f->r * pulse, 0.30f, 0.86f, 0.42f, 0.92f);
-            disc(&cv, sx - f->r * 0.25f, sy - f->r * 0.28f, f->r * 0.42f,
-                 0.80f, 1.0f, 0.85f, 0.55f);
+            disc(&cv, sx, sy, rad + 1.0f, 0.14f, 0.36f, 0.24f, 0.75f);
+            disc(&cv, sx, sy, rad, 0.30f, 0.72f, 0.34f, 1.0f);
+            px_blend(&cv, (int)sx, (int)(sy - 1), 0.66f, 0.92f, 0.55f, 1.0f);
         } else {
-            float fade = clampf(f->phase / 4.0f, 0.25f, 1.0f);
-            glow(&cv, sx, sy, f->r * 4.0f, 0.55f, 0.16f, 0.10f, 0.30f * fade);
-            disc(&cv, sx, sy, f->r, 0.92f, 0.36f, 0.26f, 0.92f * fade);
-            disc(&cv, sx - f->r * 0.22f, sy - f->r * 0.26f, f->r * 0.40f,
-                 1.0f, 0.78f, 0.62f, 0.55f * fade);
+            disc(&cv, sx, sy, rad + 1.0f, 0.36f, 0.14f, 0.10f, 0.75f);
+            disc(&cv, sx, sy, rad, 0.78f, 0.32f, 0.20f, 1.0f);
+            px_blend(&cv, (int)sx, (int)(sy - 1), 0.95f, 0.62f, 0.40f, 1.0f);
         }
     }
 
@@ -693,35 +757,46 @@ void cp_render(const CpWorld *w, uint8_t *rgba, int W, int H)
     for (int i = 0; i < CP_MAX_CELLS; i++) {
         const CpCell *c = &w->cells[i];
         if (!c->alive) continue;
-        float sx = c->x - camx, sy = c->y - camy;
-        if (sx < -120 || sy < -120 || sx > W + 120 || sy > H + 120) continue;
+        float sx = SXW(c->x), sy = SYW(c->y);
+        float rad = c->r * WSCALE;
+        if (sx < -40 || sy < -40 || sx > PIX_W + 40 || sy > PIX_H + 40) continue;
+        draw_npc(&cv, c, sx, sy, rad);
 
-        draw_npc(&cv, c, sx, sy);
-
-        if (c->hp < c->hp_max * 0.995f) {
-            int bw = (int)(c->r * 2.0f);
-            if (bw < 16) bw = 16;
-            bar(&cv, (int)(sx - bw / 2), (int)(sy - c->r - 12), bw, 3,
-                c->hp / c->hp_max, 0.95f, 0.35f, 0.30f);
+        if (c->hp < c->hp_max * 0.995f && rad >= 4.0f) {
+            int bw = (int)(rad * 2.0f);
+            if (bw < 7) bw = 7;
+            bar(&cv, (int)(sx - bw / 2), (int)(sy - rad - 4.0f), bw, 1,
+                c->hp / c->hp_max, 0.86f, 0.30f, 0.26f);
         }
     }
 
     /* --- player --- */
-    draw_player(&cv, w, w->player.x - camx, w->player.y - camy);
+    draw_player(&cv, w, SXW(w->player.x), SYW(w->player.y), w->player.r * WSCALE);
 
-    /* --- vignette --- */
-    {
-        float cx = W * 0.5f, cy = H * 0.5f;
-        float inv = 1.0f / sqrtf(cx * cx + cy * cy);
-        for (int y = 0; y < H; y++) {
-            for (int x = 0; x < W; x++) {
-                float dx = ((float)x - cx), dy = ((float)y - cy);
-                float d = sqrtf(dx * dx + dy * dy) * inv;
-                float v = clampf((d - 0.55f) / 0.45f, 0.0f, 1.0f);
-                if (v > 0.0f) px_blend(&cv, x, y, 0.0f, 0.015f, 0.03f, v * v * 0.72f);
-            }
+    draw_hud(&cv, w, camx, camy, viewW, viewH);
+    quantise(low, PIX_W, PIX_H);
+
+    /* --- nearest-neighbour blow-up, centred --- */
+    int outw = PIX_W * scale, outh = PIX_H * scale;
+    int ox = (W - outw) / 2, oy = (H - outh) / 2;
+    for (int y = 0; y < H; y++) {
+        uint8_t *drow = rgba + 4 * (size_t)y * W;
+        int syi = (y - oy) / scale;
+        for (int x = 0; x < W; x++) {
+            int sxi = (x - ox) / scale;
+            const uint8_t *src;
+            if (x < ox || y < oy || sxi >= PIX_W || syi >= PIX_H)
+                src = PAL[0];
+            else
+                src = low + 4 * ((size_t)syi * PIX_W + sxi);
+            drow[4 * x + 0] = src[0];
+            drow[4 * x + 1] = src[1];
+            drow[4 * x + 2] = src[2];
+            drow[4 * x + 3] = 255;
         }
     }
 
-    draw_hud(&cv, w, camx, camy);
+    #undef SXW
+    #undef SYW
+    free(low);
 }
