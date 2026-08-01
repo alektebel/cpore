@@ -1,0 +1,9 @@
+build/
+*.o
+*.a
+*.so
+*.png
+!docs/*.png
+gmon.out
+__pycache__/
+*.pyc
