@@ -233,6 +233,18 @@ const char *cp_vis_name(int style);
 void cp_render(const CpWorld *w, uint8_t *rgba, int width, int height);
 void cp_render_styled(const CpWorld *w, uint8_t *rgba, int width, int height,
                       int style);
+
+/* Shared pixel pipeline, so stage 2 draws through exactly the same palette,
+ * dither and upscale rather than growing a second look. */
+void cp_vis_dims(int style, int32_t *w, int32_t *h);
+void cp_vis_quantise(uint8_t *fb, int32_t w, int32_t h, int32_t style);
+void cp_vis_blit(const uint8_t *low, int32_t lw, int32_t lh,
+                 uint8_t *out, int32_t W, int32_t H, int32_t style);
+void cp_px_rect(uint8_t *fb, int32_t W, int32_t H, int32_t x, int32_t y,
+                int32_t w, int32_t h, float r, float g, float b, float a);
+void cp_px_text(uint8_t *fb, int32_t W, int32_t H, int32_t x, int32_t y,
+                int32_t sc, const char *s, float r, float g, float b, float a);
+int32_t cp_px_text_w(const char *s, int32_t sc);
 int  cp_png_write(const char *path, const uint8_t *rgba, int width, int height);
 
 #ifdef __cplusplus

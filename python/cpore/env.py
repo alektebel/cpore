@@ -35,7 +35,7 @@ STATUS = ("running", "dead", "evolved", "timeout")
 # render styles; index == the CP_VIS_* enum value
 VIS_STYLES = ("abyss", "dmg", "neon", "petri", "c64")
 VIS = {n: i for i, n in enumerate(VIS_STYLES)}
-DEFAULT_VIS = "petri"
+DEFAULT_VIS = "abyss"
 
 # angle units: 0..255 clockwise from the front of the cell
 FRONT, RIGHT, BACK, LEFT = 0, 64, 128, 192
@@ -327,3 +327,172 @@ def make_gym_env(**kw):
             self._env.close()
 
     return CporeGym(**kw)
+
+
+# ---------------------------------------------------------------------------
+# Stage 2: aquatic
+# ---------------------------------------------------------------------------
+
+AQ_PART_NAMES = ("none", "filter", "jaw", "fin", "tail",
+                 "spike", "eye", "lung", "plate", "light")
+AQ_PART = {n: i for i, n in enumerate(AQ_PART_NAMES)}
+AQ_PART_COST = (0, 5, 12, 6, 8, 10, 6, 10, 12, 14)
+AQ_GEN_BUDGET = (40, 70, 105, 150)
+
+
+def aqua_genome(parts, nseg=3, girth=120):
+    """Build a 3D body plan from (name, segment, yaw, pitch) tuples.
+
+        aqua_genome([("jaw", 0, 0, 0), ("tail", 2, 128, 0)], nseg=3)
+
+    yaw is 0..255 around the body axis, pitch -64..63 up/down. The simulation
+    reads both when it resolves bites, thrust and armour."""
+    out = []
+    for p in parts:
+        t, seg, yaw, pitch = p
+        if isinstance(t, str):
+            t = AQ_PART[t]
+        out.append((int(t), int(seg), int(yaw) & 0xFF, int(pitch)))
+    return {"parts": out, "nseg": int(nseg), "girth": int(girth)}
+
+
+def _bind_aqua(lib):
+    lib.cp3_env_create.argtypes = [c_uint32]
+    lib.cp3_env_create.restype = c_void_p
+    lib.cp3_env_free.argtypes = [c_void_p]
+    lib.cp3_env_reset.argtypes = [c_void_p, c_uint32, POINTER(c_int32), POINTER(c_float)]
+    lib.cp3_env_step.argtypes = [c_void_p, POINTER(c_float), POINTER(c_float),
+                                 POINTER(c_float), POINTER(c_int32), POINTER(c_int32)]
+    lib.cp3_env_obs_dim.restype = c_int32
+    lib.cp3_env_act_dim.restype = c_int32
+    lib.cp3_env_state_size.restype = c_size_t
+    lib.cp3_env_save.argtypes = [c_void_p, c_void_p]
+    lib.cp3_env_load.argtypes = [c_void_p, c_void_p]
+    lib.cp3_env_world.argtypes = [c_void_p]
+    lib.cp3_env_world.restype = c_void_p
+    lib.cp3_policy_greedy.argtypes = [c_void_p, POINTER(c_float)]
+    lib.cp3_render_styled.argtypes = [c_void_p, c_void_p, c_int32, c_int32, c_int32]
+    lib.cp3_part_name.argtypes = [c_int32]
+    lib.cp3_part_name.restype = c_char_p
+    lib.cp3_env_census.argtypes = [c_void_p, POINTER(c_int32), POINTER(c_float)]
+    return lib
+
+
+class AquaEnv:
+    """Stage 2. Same shape as CporeEnv; the NPC population evolves on its own."""
+
+    metadata = {"render_modes": ["rgb_array"]}
+
+    def __init__(self, seed: int = 0, genome=None, render_size=(1280, 720),
+                 vis=DEFAULT_VIS):
+        self._lib = _bind_aqua(lib())
+        self.obs_dim = int(self._lib.cp3_env_obs_dim())
+        self.act_dim = int(self._lib.cp3_env_act_dim())
+        self._h = self._lib.cp3_env_create(c_uint32(seed & 0xFFFFFFFF))
+        if not self._h:
+            raise MemoryError("cp3_env_create failed")
+        self._obs = (c_float * self.obs_dim)()
+        self._act = (c_float * self.act_dim)()
+        self._rew = c_float()
+        self._term = c_int32()
+        self._trunc = c_int32()
+        self._state_size = int(self._lib.cp3_env_state_size())
+        self._cnt = (c_int32 * 3)()
+        self._mean = (c_float * 6)()
+        self.default_genome = genome
+        self.render_size = render_size
+        self.vis = vis
+        self._fb = None
+        self._seed = seed
+
+    def close(self):
+        if getattr(self, "_h", None):
+            self._lib.cp3_env_free(self._h)
+            self._h = None
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    def reset(self, seed=None, genome=None):
+        if seed is None:
+            seed = self._seed
+        self._seed = seed
+        genome = genome if genome is not None else self.default_genome
+        if genome is None:
+            pp = None
+        else:
+            flat = []
+            for t, sg, yw, pt in genome["parts"][:10]:
+                if isinstance(t, str):
+                    t = AQ_PART[t]
+                flat += [int(t), int(sg), int(yw) & 0xFF, int(pt)]
+            flat += [0, 0, 0, 0] * (10 - len(flat) // 4)
+            flat += [genome.get("nseg", 3), genome.get("girth", 120)]
+            pp = (c_int32 * len(flat))(*flat)
+        self._lib.cp3_env_reset(self._h, c_uint32(seed & 0xFFFFFFFF), pp, self._obs)
+        return self._out()
+
+    def step(self, action):
+        for i in range(self.act_dim):
+            self._act[i] = float(action[i])
+        self._lib.cp3_env_step(self._h, self._act, self._obs,
+                               ctypes.byref(self._rew),
+                               ctypes.byref(self._term), ctypes.byref(self._trunc))
+        return (self._out(), float(self._rew.value),
+                bool(self._term.value), bool(self._trunc.value), {})
+
+    def _out(self):
+        if _np is not None:
+            return _np.frombuffer(self._obs, dtype=_np.float32).copy()
+        return list(self._obs)
+
+    def greedy_action(self):
+        self._lib.cp3_policy_greedy(self._lib.cp3_env_world(self._h), self._act)
+        return list(self._act)
+
+    def census(self):
+        """Live population statistics - what the ocean has evolved into.
+
+        Read through a C accessor rather than by picking the struct apart from
+        python, so a field added to the sim cannot silently shift what this
+        returns."""
+        self._lib.cp3_env_census(self._h, self._cnt, self._mean)
+        return {"births": self._cnt[0], "deaths": self._cnt[1], "pop": self._cnt[2],
+                "mean_gen": self._mean[0], "mean_parts": self._mean[1],
+                "mean_mouth": self._mean[2], "mean_tail": self._mean[3],
+                "mean_light": self._mean[4], "mean_depth": self._mean[5]}
+
+    def save_state(self) -> bytes:
+        buf = ctypes.create_string_buffer(self._state_size)
+        self._lib.cp3_env_save(self._h, buf)
+        return buf.raw
+
+    def load_state(self, blob: bytes):
+        self._lib.cp3_env_load(self._h, ctypes.create_string_buffer(blob, len(blob)))
+
+    def _draw(self, vis=None):
+        w, h = self.render_size
+        if self._fb is None:
+            self._fb = ctypes.create_string_buffer(w * h * 4)
+        v = vis if vis is not None else self.vis
+        if isinstance(v, str):
+            v = VIS[v]
+        self._lib.cp3_render_styled(self._lib.cp3_env_world(self._h), self._fb, w, h, v)
+        return w, h
+
+    def render(self, vis=None):
+        w, h = self._draw(vis)
+        if _np is not None:
+            return _np.frombuffer(self._fb, dtype=_np.uint8).reshape(h, w, 4).copy()
+        return self._fb.raw
+
+    def save_png(self, path: str, vis=None):
+        w, h = self._draw(vis)
+        if self._lib.cp_png_write(path.encode(), self._fb, w, h) != 0:
+            raise IOError(f"failed to write {path}")
+        return path
+
+

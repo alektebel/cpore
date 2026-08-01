@@ -22,6 +22,78 @@ make && make test && make bench
 ./build/cpore_shot --vis-all --out compare.png      # every style, same frame
 ```
 
+## Stage 2: aquatic, in 3D
+
+![aquatic stage](docs/aqua.png)
+
+A real volume of water — 1400 x 620 x 1400, surface above, seabed below, and
+**depth as a genuine axis of the problem**. Light falls off exponentially with
+depth, plankton blooms near the surface, carrion sinks. A build that cannot see
+in the dark cannot hunt there, so photophores are the only sight you can buy
+that the depth cannot take away.
+
+Body plans are three-dimensional: a genome is a spine of 2–6 segments plus up
+to 10 parts, each mounted at **a segment index and a yaw/pitch on that
+segment** — a direction in 3D, not an angle on a circle. Bite cones, armour
+coverage and thrust are all resolved against those directions.
+
+| part | DNA | what it does |
+| --- | --- | --- |
+| filter / jaw | 5 / 12 | plankton / meat, and bites through a cone |
+| fin / tail | 6 / 8 | turn rate / forward thrust |
+| spike / plate | 10 / 12 | directional damage and armour / flat armour, heavy |
+| eye | 6 | perception — but multiplied by how much light there is |
+| lung | 10 | buoyancy control, so holding a depth stops costing thrust |
+| light | 14 | a photophore: sight the depth cannot take away |
+
+The renderer is a **sphere-impostor rasteriser with a z-buffer**: everything
+solid is a sphere, so the scene is drawn by projecting centres, rasterising
+screen-space circles and solving depth and normal per pixel. Correct occlusion
+and real lighting for about the cost of drawing circles — no triangles, no
+matrices, no clipper. Surface and seabed are analytic ray-plane intersections.
+Output goes through the same palette pipeline as stage 1.
+
+## Natural selection
+
+The other animals are not props. Every fish carries a genome, burns energy to
+live, and breeds with mutation when it has banked enough. Founders are drawn
+uniformly from the design space — including animals that cannot feed
+themselves — and **nothing in the simulation prefers a working body plan**. The
+ones that eat leave more copies.
+
+Over five independent oceans with no player in them (`make test`):
+
+```
+mean generation 5.6 per episode, mouths +0.38, tails +0.18
+```
+
+Run the shipped baseline for a full episode and the population moves on its
+own:
+
+```
+founders          mouths 1.55  tails 0.62  photophores 0.27
+after ~6 gens     mouths 2.18  tails 0.79  photophores 0.02
+```
+
+Mouths and tails rise because you cannot eat without one and cannot reach food
+without the other. Photophores **fall** — they cost 14 DNA and only pay off
+deep, and the plankton is shallow where there is already light. Nobody wrote
+that rule down; it is what survived.
+
+A bounded lifespan turned out to be the load-bearing detail. Without old age
+the population sits at carrying capacity and every birth has to wait for a
+violent death, so barely half a generation turned over per episode and there
+was nothing to see. Capping lifespan makes *reproduction rate*, not survival
+alone, the thing selection acts on — mean generations went from 0.3 to 5.6.
+
+![deep water](docs/aqua_deep.png)
+
+```
+./build/cpore_aqua --seed 44 --steps 4200 --out aqua.png
+./build/cpore_aqua --style diver --steps 6000 --out deep.png
+./build/cpore_aqua --list-parts
+```
+
 ## Why not just use Spore
 
 Nobody has trained an RL agent on Spore, and nobody has published an LLM
@@ -107,7 +179,11 @@ src/genome.c            parts, costs, budgets, the editor's action decoding
 src/world.c             the simulation (no I/O, no allocation, no globals)
 src/policy.c            scripted baseline, design head included
 src/env.c               RL wrapper: reset/step/observe/save/load
+src/aqua_genome.c       3D body plans: parts, costs, mutation
+src/aqua.c              the aquatic simulation, including the breeding population
+src/aqua_env.c          stage-2 RL wrapper
 src/render.c            pixel-art rasteriser, five styles, palette-quantised
+src/render3d.c          sphere-impostor z-buffer renderer for stage 2
 src/png.c               PNG + DEFLATE encoder
 python/cpore/           ctypes binding, works without numpy
 apps/                   cpore_shot, cpore_bench
@@ -223,17 +299,17 @@ All of it found by running the table, not by reading the code:
 1. Structure-of-arrays world layout, then shard envs across cores.
 2. PPO on the cell stage, jointly over control and the design head — does a
    learned policy reorder that table, and does it learn to put spikes forward?
-3. Creature stage: the same world struct, land/water regions, limbs instead of
-   membrane-mounted parts, and pack behaviour. The stage transition carries
-   state forward rather than restarting.
-4. Tribal, Civ, Space as further rule sets over the same state.
+3. Carry the evolving population back into stage 1, and let the player's own
+   genome enter the same gene pool.
+4. Creature stage on land: legs instead of fins, terrain, and pack behaviour.
+5. Tribal, Civ, Space as further rule sets over the same state.
 
 ## Visual styles
 
 Five of them, and they are not palette swaps — internal resolution, camera
 scale, dither strength, background value structure and outline treatment all
 move together. `--vis NAME`, or `CporeEnv(vis="c64")` from python. Default is
-`petri`.
+`abyss`.
 
 | style | resolution | colours | look |
 | --- | --- | --- | --- |

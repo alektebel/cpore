@@ -1,4 +1,5 @@
 #include "cpore/cpore.h"
+#include "cpore/aqua.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -294,6 +295,189 @@ int main(void)
             if (w->status == CP_RUN) unfinished++;
         }
         CHECK(unfinished == 0, "every episode reaches a terminal state");
+        free(w);
+    }
+
+    /* ================= stage 2: aquatic ================= */
+    printf("\ncpore aquatic-stage tests\n");
+
+    /* --- determinism and snapshot in 3D --- */
+    {
+        Cp3World *a = (Cp3World *)malloc(sizeof(Cp3World));
+        Cp3World *b = (Cp3World *)malloc(sizeof(Cp3World));
+        cp3_world_reset(a, 5, NULL);
+        cp3_world_reset(b, 5, NULL);
+        int same = 1;
+        for (int t = 0; t < 900; t++) {
+            float aa[CP3_ACT_DIM], bb[CP3_ACT_DIM];
+            cp3_policy_greedy(a, aa); cp3_world_step(a, aa);
+            cp3_policy_greedy(b, bb); cp3_world_step(b, bb);
+            if (a->reward != b->reward || a->biomass != b->biomass) { same = 0; break; }
+        }
+        CHECK(same, "aquatic: identical seeds produce identical trajectories");
+        free(a); free(b);
+    }
+    {
+        Cp3Env *e = cp3_env_create(9);
+        float obs[CP3_OBS_DIM], r;
+        int32_t te, tr;
+        cp3_env_reset(e, 9, NULL, obs);
+        for (int t = 0; t < 400; t++) {
+            float a[CP3_ACT_DIM];
+            cp3_policy_greedy(cp3_env_world(e), a);
+            cp3_env_step(e, a, obs, &r, &te, &tr);
+        }
+        void *snap = malloc(cp3_env_state_size());
+        cp3_env_save(e, snap);
+        float o1[CP3_OBS_DIM], o2[CP3_OBS_DIM];
+        float r1 = 0.0f, r2 = 0.0f;
+        for (int t = 0; t < 250; t++) {
+            float a[CP3_ACT_DIM];
+            cp3_policy_greedy(cp3_env_world(e), a);
+            cp3_env_step(e, a, o1, &r, &te, &tr); r1 += r;
+        }
+        cp3_env_load(e, snap);
+        for (int t = 0; t < 250; t++) {
+            float a[CP3_ACT_DIM];
+            cp3_policy_greedy(cp3_env_world(e), a);
+            cp3_env_step(e, a, o2, &r, &te, &tr); r2 += r;
+        }
+        CHECK(memcmp(o1, o2, sizeof(o1)) == 0 && r1 == r2,
+              "aquatic: restore reproduces the branch exactly");
+        free(snap);
+        cp3_env_free(e);
+    }
+
+    /* --- observations stay bounded under random genomes and random actions --- */
+    {
+        Cp3World *w = (Cp3World *)malloc(sizeof(Cp3World));
+        float obs[CP3_OBS_DIM];
+        CpRng rng; cp_rng_seed(&rng, 21);
+        int bad = 0;
+        for (int ep = 0; ep < 4; ep++) {
+            Cp3Genome g; cp3_genome_random(&g, &rng, CP3_GEN_BUDGET[0]);
+            cp3_world_reset(w, (uint32_t)ep, &g);
+            for (int t = 0; t < 900 && w->status == CP3_RUN; t++) {
+                float a[CP3_ACT_DIM];
+                for (int i = 0; i < CP3_ACT_DIM; i++) a[i] = cp_rng_range(&rng, -1.2f, 1.2f);
+                cp3_world_step(w, a);
+                cp3_world_observe(w, obs);
+                for (int i = 0; i < CP3_OBS_DIM; i++)
+                    if (!isfinite(obs[i]) || fabsf(obs[i]) > 3.0f) bad++;
+            }
+        }
+        CHECK(bad == 0, "aquatic: observations are finite and in range");
+        free(w);
+    }
+
+    /* --- the 3D editor's budget holds, including under mutation --- */
+    {
+        CpRng rng; cp_rng_seed(&rng, 4);
+        int over = 0, mouthless = 0;
+        Cp3Genome g;
+        cp3_genome_random(&g, &rng, CP3_GEN_BUDGET[1]);
+        for (int i = 0; i < 6000; i++) {
+            cp3_genome_mutate(&g, &rng, CP3_GEN_BUDGET[1], 0.3f);
+            if (cp3_genome_cost(&g) > CP3_GEN_BUDGET[1]) over++;
+            int m = 0;
+            for (int k = 0; k < CP3_MAX_PARTS; k++)
+                if (g.part[k].type == CP3_FILTER || g.part[k].type == CP3_JAW) m++;
+            if (!m) mouthless++;
+        }
+        CHECK(over == 0, "aquatic: 6000 rounds of mutation never break the budget");
+        CHECK(mouthless == 0, "aquatic: mutation never produces an animal with no mouth");
+    }
+
+    /* --- placement is load-bearing in 3D too: a jaw only reaches through
+     *     the cone it points down --- */
+    {
+        Cp3Genome fwdg, aftg;
+        cp3_genome_clear(&fwdg);
+        fwdg.nseg = 3;
+        fwdg.part[0].type = CP3_JAW;  fwdg.part[0].seg = 0; fwdg.part[0].yaw = 0;
+        fwdg.part[1].type = CP3_TAIL; fwdg.part[1].seg = 2; fwdg.part[1].yaw = 128;
+        aftg = fwdg;
+        aftg.part[0].yaw = 128;              /* same jaw, mounted facing astern */
+        cp3_genome_normalise(&fwdg, CP3_GEN_BUDGET[0]);
+        cp3_genome_normalise(&aftg, CP3_GEN_BUDGET[0]);
+
+        float dealt[2] = { 0.0f, 0.0f };
+        for (int aft = 0; aft < 2; aft++) {
+            Cp3World *w = (Cp3World *)malloc(sizeof(Cp3World));
+            cp3_world_reset(w, 2, aft ? &aftg : &fwdg);
+            for (int i = 1; i < CP3_MAX_FISH; i++) w->fish[i].alive = 0;
+            Cp3Fish *t = &w->fish[0];
+            float a[CP3_ACT_DIM];
+            memset(a, 0, sizeof(a));
+            a[3] = 1.0f;                     /* bite, every step */
+            a[CP3_ACT_CTRL] = 1e-9f;         /* non-null design head, frozen */
+            for (int st = 0; st < 900; st++) {
+                w->player.p.x = 700.0f; w->player.p.y = 300.0f; w->player.p.z = 700.0f;
+                w->player.v.x = w->player.v.y = w->player.v.z = 0.0f;
+                w->player.yaw = 0.0f; w->player.pitch = 0.0f;
+                w->player.hp = w->player.hp_max;
+                w->bite_cd = 0.0f;
+                t->alive = 1; t->hp = t->hp_max = 1e6f;
+                /* held dead ahead, on the +x axis the player is facing */
+                t->p.x = w->player.p.x + w->player.s.radius + t->s.radius + 2.0f;
+                t->p.y = w->player.p.y; t->p.z = w->player.p.z;
+                t->v.x = t->v.y = t->v.z = 0.0f;
+                cp3_world_step(w, a);
+            }
+            dealt[aft] = w->dmg_dealt;
+            free(w);
+        }
+        printf("        jaw forward: dealt %.0f | jaw astern: dealt %.0f (%.1fx)\n",
+               (double)dealt[0], (double)dealt[1],
+               (double)(dealt[0] / (dealt[1] > 1.0f ? dealt[1] : 1.0f)));
+        /* Not exactly zero: collision separation nudges the pair a little each
+         * step, so the rear jaw clips the target on a handful of frames. The
+         * claim being tested is that facing dominates, not that it is absolute. */
+        CHECK(dealt[0] > dealt[1] * 25.0f,
+              "aquatic: a jaw bites what it points at, and little else");
+    }
+
+    /* --- NATURAL SELECTION ---
+     * Founders are drawn uniformly from the design space, so the starting
+     * population is full of animals that cannot feed themselves. Nothing in
+     * the simulation prefers a working body plan; the ones that eat simply
+     * breed more. If selection is real, the population's mean mouth and tail
+     * counts must rise on their own. */
+    {
+        int rose_mouth = 0, rose_tail = 0, trials = 0;
+        float d_mouth = 0.0f, d_tail = 0.0f, gens = 0.0f;
+        Cp3World *w = (Cp3World *)malloc(sizeof(Cp3World));
+        for (int seed = 0; seed < 5; seed++) {
+            cp3_world_reset(w, (uint32_t)(seed * 101 + 3), NULL);
+            /* founder census before anything has bred */
+            float m0 = 0.0f, t0 = 0.0f;
+            for (int i = 0; i < CP3_MAX_FISH; i++) {
+                m0 += w->fish[i].s.n[CP3_FILTER] + w->fish[i].s.n[CP3_JAW];
+                t0 += w->fish[i].s.n[CP3_TAIL];
+            }
+            m0 /= CP3_MAX_FISH; t0 /= CP3_MAX_FISH;
+
+            /* let the ocean run without a player in it - no policy, no reward,
+             * just metabolism and breeding */
+            float a[CP3_ACT_DIM];
+            memset(a, 0, sizeof(a));
+            for (int t = 0; t < 9000; t++) {
+                w->player.hp = w->player.hp_max;     /* keep the episode alive */
+                cp3_world_step(w, a);
+            }
+            d_mouth += w->mean_mouth - m0;
+            d_tail  += w->mean_tail - t0;
+            gens    += w->mean_gen;
+            if (w->mean_mouth > m0) rose_mouth++;
+            if (w->mean_tail > t0) rose_tail++;
+            trials++;
+        }
+        printf("        over %d oceans: mean generation %.1f, mouths %+.2f, tails %+.2f\n",
+               trials, (double)(gens / trials), (double)(d_mouth / trials),
+               (double)(d_tail / trials));
+        CHECK(gens / trials > 3.0f, "aquatic: several generations turn over per episode");
+        CHECK(rose_mouth >= 4, "aquatic: selection raises the population's mouth count");
+        CHECK(rose_tail >= 4, "aquatic: selection raises the population's tail count");
         free(w);
     }
 

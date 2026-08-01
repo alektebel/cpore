@@ -944,5 +944,64 @@ void cp_render_styled(const CpWorld *w, uint8_t *rgba, int W, int H, int style)
 /* Default style. One line to change, and every caller follows. */
 void cp_render(const CpWorld *w, uint8_t *rgba, int W, int H)
 {
-    cp_render_styled(w, rgba, W, H, CP_VIS_PETRI);
+    cp_render_styled(w, rgba, W, H, CP_VIS_ABYSS);
 }
+
+
+/* ---------------- shared pipeline exports ----------------
+ * Stage 2 has its own rasteriser (spheres into a z-buffer) but must land in
+ * the same palette, so the quantise/blit/text primitives are exported rather
+ * than duplicated. */
+
+void cp_vis_dims(int style, int32_t *w, int32_t *h)
+{
+    if (style < 0 || style >= CP_VIS_COUNT) style = CP_VIS_ABYSS;
+    if (w) *w = VIS[style].w;
+    if (h) *h = VIS[style].h;
+}
+
+void cp_vis_quantise(uint8_t *fb, int32_t w, int32_t h, int32_t style)
+{
+    if (style < 0 || style >= CP_VIS_COUNT) style = CP_VIS_ABYSS;
+    quantise(fb, w, h, &VIS[style]);
+}
+
+void cp_vis_blit(const uint8_t *low, int32_t lw, int32_t lh,
+                 uint8_t *out, int32_t W, int32_t H, int32_t style)
+{
+    if (style < 0 || style >= CP_VIS_COUNT) style = CP_VIS_ABYSS;
+    const Vis *v = &VIS[style];
+    int scale = W / lw;
+    if (H / lh < scale) scale = H / lh;
+    if (scale < 1) scale = 1;
+    int ox = (W - lw * scale) / 2, oy = (H - lh * scale) / 2;
+    for (int y = 0; y < H; y++) {
+        uint8_t *drow = out + 4 * (size_t)y * W;
+        int syi = (y - oy) / scale;
+        for (int x = 0; x < W; x++) {
+            int sxi = (x - ox) / scale;
+            const uint8_t *src = (x < ox || y < oy || sxi >= lw || syi >= lh)
+                               ? v->pal[0] : low + 4 * ((size_t)syi * lw + sxi);
+            drow[4 * x + 0] = src[0];
+            drow[4 * x + 1] = src[1];
+            drow[4 * x + 2] = src[2];
+            drow[4 * x + 3] = 255;
+        }
+    }
+}
+
+void cp_px_rect(uint8_t *fb, int32_t W, int32_t H, int32_t x, int32_t y,
+                int32_t w, int32_t h, float r, float g, float b, float a)
+{
+    Canvas c = { fb, W, H, &VIS[CP_VIS_ABYSS] };
+    rect_fill(&c, x, y, w, h, r, g, b, a);
+}
+
+void cp_px_text(uint8_t *fb, int32_t W, int32_t H, int32_t x, int32_t y,
+                int32_t sc, const char *s, float r, float g, float b, float a)
+{
+    Canvas c = { fb, W, H, &VIS[CP_VIS_ABYSS] };
+    text(&c, x, y, sc, s, r, g, b, a);
+}
+
+int32_t cp_px_text_w(const char *s, int32_t sc) { return text_w(s, sc); }
