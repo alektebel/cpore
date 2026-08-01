@@ -4,7 +4,7 @@ CFLAGS  += -Iinclude -D_POSIX_C_SOURCE=200809L
 LDLIBS   = -lm
 
 BUILD := build
-LIB_SRC := src/rng.c src/morph.c src/world.c src/policy.c src/env.c
+LIB_SRC := src/rng.c src/genome.c src/world.c src/policy.c src/env.c
 VIS_SRC := src/render.c src/png.c
 LIB_OBJ := $(LIB_SRC:%.c=$(BUILD)/%.o)
 VIS_OBJ := $(VIS_SRC:%.c=$(BUILD)/%.o)

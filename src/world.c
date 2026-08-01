@@ -10,8 +10,11 @@
  * replay fall out for free.
  * ------------------------------------------------------------------ */
 
-#define TARGET_FOOD    470
+#define TARGET_FOOD    320
 #define MEAT_LIFETIME  14.0f
+#define MEAT_SHARE     0.14f
+#define PI             3.14159265358979f
+#define ANG_PER_UNIT   (2.0f * PI / 256.0f)
 
 static inline float clampf(float v, float a, float b)
 {
@@ -19,6 +22,13 @@ static inline float clampf(float v, float a, float b)
 }
 
 static inline float len2(float x, float y) { return sqrtf(x * x + y * y); }
+
+static inline float ang_wrap(float a)
+{
+    while (a >  PI) a -= 2.0f * PI;
+    while (a < -PI) a += 2.0f * PI;
+    return a;
+}
 
 /* ---------------- spatial grid over food ---------------- */
 
@@ -34,8 +44,7 @@ static inline int grid_index(float x, float y)
 }
 
 /* Food does not move once spawned, so the lookup grid is maintained
- * incrementally instead of rebuilt every step - that rebuild was touching all
- * 640 slots per step to serve roughly ten actual insertions and removals. */
+ * incrementally instead of rebuilt every step. */
 static void grid_insert(CpWorld *w, int i)
 {
     int g = grid_index(w->food[i].x, w->food[i].y);
@@ -56,7 +65,6 @@ static void grid_remove(CpWorld *w, int i)
     }
 }
 
-/* consume food slot i: unlink, free, and keep the population count honest */
 static void food_consume(CpWorld *w, int i)
 {
     grid_remove(w, i);
@@ -109,13 +117,12 @@ static void spawn_food(CpWorld *w, int i, uint8_t type, float x, float y)
     f->type = type;
     f->r = (type == CP_FOOD_PLANT) ? cp_rng_range(&w->rng, 4.0f, 6.5f)
                                    : cp_rng_range(&w->rng, 5.0f, 8.0f);
-    f->phase = (type == CP_FOOD_MEAT) ? cp_rng_range(&w->rng, MEAT_LIFETIME, MEAT_LIFETIME * 3.0f)
-                                      : cp_rng_range(&w->rng, 0.0f, 6.28f);
+    f->phase = (type == CP_FOOD_MEAT)
+             ? cp_rng_range(&w->rng, MEAT_LIFETIME, MEAT_LIFETIME * 3.0f)
+             : cp_rng_range(&w->rng, 0.0f, 6.28f);
     grid_insert(w, i);
 }
 
-/* Round-robin free-slot search. The old code restarted at index 0 on every
- * spawn, which turned corpse drops into a repeated scan of the whole array. */
 static int alloc_food_slot(CpWorld *w)
 {
     for (int n = 0; n < CP_MAX_FOOD; n++) {
@@ -129,11 +136,8 @@ static int alloc_food_slot(CpWorld *w)
 /* Ambient drift: mostly plants, plus a trickle of dead plankton. Without that
  * trickle a jaws-only build has nothing to eat until it has already killed
  * something, and the carnivore branch of the editor is dead on arrival. */
-#define MEAT_SHARE 0.14f
-
 static void spawn_food_random(CpWorld *w, int i)
 {
-    /* plants clump: pick a patch centre from the seed stream */
     float cx = cp_rng_range(&w->rng, 60.0f, CP_WORLD_W - 60.0f);
     float cy = cp_rng_range(&w->rng, 60.0f, CP_WORLD_H - 60.0f);
     float px = clampf(cx + cp_rng_range(&w->rng, -110.0f, 110.0f), 20.0f, CP_WORLD_W - 20.0f);
@@ -152,7 +156,7 @@ static void spawn_cell(CpWorld *w, int i, float px, float py, float difficulty)
 
     /* a spread of sizes: mostly prey, a few things that hunt you */
     float t = cp_rng_f(&w->rng);
-    t = t * t;                                   /* bias small */
+    t = t * t;
     float scale = 0.45f + 1.95f * t + 0.55f * difficulty * t;
 
     c->r      = 13.0f * scale;
@@ -162,23 +166,28 @@ static void spawn_cell(CpWorld *w, int i, float px, float py, float difficulty)
     c->spikes = (uint8_t)(c->diet == CP_DIET_HERB ? cp_rng_int(&w->rng, 2)
                                                   : 1 + cp_rng_int(&w->rng, 4));
     c->cilia  = (uint8_t)(2 + cp_rng_int(&w->rng, 4));
+    c->jaws   = (uint8_t)(c->diet == CP_DIET_HERB ? 0 : 1 + cp_rng_int(&w->rng, 2));
+    c->eyes   = (uint8_t)cp_rng_int(&w->rng, 3);
+    /* the pool bites back: some cells carry poison, which punishes ramming */
+    c->poison = (difficulty > 0.25f && cp_rng_f(&w->rng) < 0.22f)
+              ? cp_rng_range(&w->rng, 4.0f, 9.0f) : 0.0f;
+
     c->attack = (c->diet == CP_DIET_HERB ? 3.0f : 10.0f) * scale + 2.2f * c->spikes;
     c->armor  = clampf(0.05f * c->spikes, 0.0f, 0.45f);
 
     c->x = px; c->y = py;
-    c->heading  = cp_rng_range(&w->rng, 0.0f, 6.2831853f);
+    c->heading  = cp_rng_range(&w->rng, 0.0f, 2.0f * PI);
     c->wander_a = c->heading;
     c->wander_t = cp_rng_range(&w->rng, 0.0f, 2.0f);
     c->wander_dx = cosf(c->wander_a);
     c->wander_dy = sinf(c->wander_a);
-    c->phase    = cp_rng_range(&w->rng, 0.0f, 6.2831853f);
+    c->phase    = cp_rng_range(&w->rng, 0.0f, 2.0f * PI);
     c->hue      = c->diet == CP_DIET_HERB ? cp_rng_range(&w->rng, 0.24f, 0.38f)
                 : c->diet == CP_DIET_CARN ? cp_rng_range(&w->rng, 0.90f, 1.02f)
                                           : cp_rng_range(&w->rng, 0.72f, 0.82f);
     c->alive = 1;
 }
 
-/* respawn away from the player so nothing materialises on top of them */
 static void spawn_cell_offscreen(CpWorld *w, int i, float difficulty)
 {
     for (int tries = 0; tries < 8; tries++) {
@@ -191,33 +200,55 @@ static void spawn_cell_offscreen(CpWorld *w, int i, float difficulty)
     }
 }
 
+/* ---------------- genome application ---------------- */
+
+static void apply_genome(CpWorld *w, const CpGenome *g, int budget, int heal)
+{
+    w->genome = *g;
+    cp_genome_normalise(&w->genome, budget);
+    cp_genome_stats(&w->genome, &w->stats);
+
+    CpCell *p = &w->player;
+    float frac = (p->hp_max > 0.0f) ? p->hp / p->hp_max : 1.0f;
+    p->hp_max = w->stats.hp_max;
+    /* Spore hands you a fresh body when you leave the editor; keeping the
+     * health fraction rather than the absolute value means a bigger build is
+     * not silently a heal. */
+    p->hp = heal ? p->hp_max : clampf(frac * p->hp_max, 1.0f, p->hp_max);
+    p->armor = w->stats.armor;
+    p->speed = w->stats.max_speed;
+    p->spikes = w->stats.n[CP_PART_SPIKE];
+    p->cilia  = w->stats.n[CP_PART_CILIA];
+    p->jaws   = w->stats.n[CP_PART_JAW];
+    p->eyes   = w->stats.n[CP_PART_EYE];
+    p->poison = w->stats.poison_dmg;
+    p->attack = w->stats.spike_dmg + w->stats.jaw_dmg;
+    p->diet = (uint8_t)(w->stats.herb_eff > 0.0f && w->stats.carn_eff > 0.0f ? CP_DIET_OMNI
+                        : (w->stats.carn_eff > 0.0f ? CP_DIET_CARN : CP_DIET_HERB));
+}
+
 /* ---------------- reset ---------------- */
 
-void cp_world_reset(CpWorld *w, uint32_t seed, const CpMorph *morph)
+void cp_world_reset(CpWorld *w, uint32_t seed, const CpGenome *genome)
 {
     memset(w, 0, sizeof(*w));
     w->seed = seed;
     cp_rng_seed(&w->rng, seed);
 
-    if (morph) w->morph = *morph;
-    else       cp_morph_default(&w->morph);
-    cp_morph_clamp(&w->morph);
-    cp_morph_stats(&w->morph, &w->stats);
+    CpGenome g;
+    if (genome) g = *genome;
+    else        cp_genome_starter(&g);
 
     CpCell *p = &w->player;
     p->x = CP_WORLD_W * 0.5f;
     p->y = CP_WORLD_H * 0.5f;
-    p->r = w->stats.radius0;
-    p->hp = p->hp_max = w->stats.hp_max;
-    p->attack = w->stats.attack;
-    p->armor  = w->stats.armor;
-    p->speed  = w->stats.max_speed;
+    p->hp_max = 1.0f;
+    p->alive = 1;
     p->heading = 0.0f;
-    p->spikes = w->morph.spike;
-    p->cilia  = w->morph.cilia;
-    p->alive  = 1;
-    p->diet   = (uint8_t)(w->morph.herb && w->morph.carn ? CP_DIET_OMNI
-                          : (w->morph.carn ? CP_DIET_CARN : CP_DIET_HERB));
+
+    w->generation = 0;
+    apply_genome(w, &g, CP_GEN_BUDGET[0], 1);
+    p->r = w->stats.radius0;
 
     memset(w->grid_head, 0xFF, sizeof(w->grid_head));
     for (int i = 0; i < CP_MAX_FOOD; i++) { w->food[i].type = CP_FOOD_NONE; w->grid_next[i] = -1; }
@@ -241,7 +272,7 @@ static void cell_think(CpWorld *w, CpCell *c, int idx, float *out_ax, float *out
      *    has to be responsive, so it runs every step. */
     float threat_x = 0.0f, threat_y = 0.0f, threat_w = 0.0f;
     const CpCell *pl = &w->player;
-    if (pl->alive && pl->r > c->r * 1.12f && w->stats.attack > 0.0f) {
+    if (pl->alive && pl->r > c->r * 1.12f && pl->attack > 0.0f) {
         float dx = c->x - pl->x, dy = c->y - pl->y;
         float d = len2(dx, dy);
         if (d < 260.0f && d > 0.01f) {
@@ -272,8 +303,7 @@ static void cell_think(CpWorld *w, CpCell *c, int idx, float *out_ax, float *out
             }
         });
 
-        /* carnivores prefer live prey over pellets */
-        if (eats_meat && pl->alive && c->r > pl->r * 1.15f) {
+        if (eats_meat && pl->alive && c->r > pl->r * 0.88f) {
             float dx = pl->x - c->x, dy = pl->y - c->y;
             float d2 = dx * dx + dy * dy;
             if (d2 < 340.0f * 340.0f && d2 < best_d2 * 4.0f) {
@@ -290,7 +320,6 @@ static void cell_think(CpWorld *w, CpCell *c, int idx, float *out_ax, float *out
         float n = len2(dx, dy);
         if (n > 0.001f) { ax += dx / n; ay += dy / n; }
     } else {
-        /* lazy wander: re-roll a heading every couple of seconds */
         c->wander_t -= CP_DT;
         if (c->wander_t <= 0.0f) {
             c->wander_t = cp_rng_range(&w->rng, 1.2f, 3.4f);
@@ -313,12 +342,60 @@ static void cell_think(CpWorld *w, CpCell *c, int idx, float *out_ax, float *out
     *out_ax = ax; *out_ay = ay;
 }
 
+/* ---------------- directional weapons ---------------- */
+
+/* Damage the player lands on a target lying in world direction `ca`.
+ *
+ * This is the whole point of placement: a spike mounted on the back does
+ * nothing to something in front of you, and two spikes side by side cover
+ * one arc, not two. */
+static float part_world_angle(const CpWorld *w, int i)
+{
+    return w->player.heading + (float)w->genome.part[i].angle * ANG_PER_UNIT;
+}
+
+/* Defence is directional too, and that is what makes the rear of the cell
+ * worth spending DNA on. Spikes and poison sacs only cover the arc they sit
+ * on, so a build that expects to be chased wants armour behind it and a build
+ * that expects to charge wants teeth in front. */
+static float facing_defense(const CpWorld *w, float ca, float *poison_out)
+{
+    float armor = 0.05f, poison = 0.0f;
+    for (int i = 0; i < CP_MAX_PARTS; i++) {
+        int t = w->genome.part[i].type;
+        if (t != CP_PART_SPIKE && t != CP_PART_POISON) continue;
+        float d = fabsf(ang_wrap(part_world_angle(w, i) - ca));
+        const float arc = 1.05f;
+        if (d > arc) continue;
+        float fall = 1.0f - 0.5f * (d / arc);
+        if (t == CP_PART_SPIKE) armor += 0.17f * fall;
+        else { armor += 0.10f * fall; poison += 13.0f * fall; }
+    }
+    if (armor > 0.66f) armor = 0.66f;
+    *poison_out = poison;
+    return armor;
+}
+
+static float contact_damage(const CpWorld *w, float ca)
+{
+    float dmg = 0.0f;
+    for (int i = 0; i < CP_MAX_PARTS; i++) {
+        int t = w->genome.part[i].type;
+        if (t != CP_PART_SPIKE && t != CP_PART_JAW) continue;
+        float d = fabsf(ang_wrap(part_world_angle(w, i) - ca));
+        float arc = (t == CP_PART_JAW) ? 0.95f : 0.72f;
+        if (d > arc) continue;
+        float fall = 1.0f - 0.45f * (d / arc);
+        dmg += (t == CP_PART_JAW ? w->stats.jaw_dmg : w->stats.spike_dmg) * fall;
+    }
+    return dmg;
+}
+
 /* ---------------- step ---------------- */
 
 static void kill_cell(CpWorld *w, CpCell *c)
 {
     c->alive = 0;
-    /* leave meat behind - a corpse is food for whatever comes next */
     int chunks = 2 + (int)(c->r / 14.0f);
     if (chunks > 5) chunks = 5;
     for (int k = 0; k < chunks; k++) {
@@ -329,6 +406,14 @@ static void kill_cell(CpWorld *w, CpCell *c)
                    clampf(c->y + cp_rng_range(&w->rng, -18.0f, 18.0f), 10.0f, CP_WORLD_H - 10.0f));
         w->n_food++;
     }
+}
+
+/* A policy that only drives the 4 control dimensions leaves the design head
+ * exactly zero; that is the signal to fall back on the scripted designer. */
+static int design_is_null(const float *d)
+{
+    for (int i = 0; i < CP_MAX_PARTS * 2; i++) if (d[i] != 0.0f) return 0;
+    return 1;
 }
 
 void cp_world_step(CpWorld *w, const float act[CP_ACT_DIM])
@@ -349,14 +434,19 @@ void cp_world_step(CpWorld *w, const float act[CP_ACT_DIM])
 
     float boost = 1.0f;
     w->boost_cd -= dt;
-    if (act[2] > 0.5f && w->morph.flag > 0 && w->boost_cd <= 0.0f) {
+    w->elec_cd -= dt;
+    w->elec_flash -= dt;
+    if (act[2] > 0.5f && st->n[CP_PART_FLAGELLA] > 0 && w->boost_cd <= 0.0f) {
         boost = 2.3f;
         w->boost_cd = 1.1f;
         p->hp -= 1.2f;                        /* burst costs energy */
     }
 
-    p->vx += ax * st->accel * boost * dt;
-    p->vy += ay * st->accel * boost * dt;
+    /* jets only help if they are mounted behind you - jet_thrust already
+     * folds in each nozzle's rearward component */
+    float thrust = st->accel * boost + st->jet_thrust * an;
+    p->vx += ax * thrust * dt;
+    p->vy += ay * thrust * dt;
 
     float sp = len2(p->vx, p->vy);
     float cap = st->max_speed * (boost > 1.0f ? 1.9f : 1.0f);
@@ -393,9 +483,7 @@ void cp_world_step(CpWorld *w, const float act[CP_ACT_DIM])
         c->phase += dt * (3.0f + cs * 0.02f);   /* heading is derived at draw time */
     }
 
-    /* ---- meat decay, amortised over eight steps ----
-     * Food is static, so nothing here needs to run at full rate. Each step
-     * ages one eighth of the array by eight times the timestep. */
+    /* ---- meat decay, amortised over eight steps ---- */
     {
         const int slice = CP_MAX_FOOD / 8;
         const int base = (w->step % 8) * slice;
@@ -409,6 +497,25 @@ void cp_world_step(CpWorld *w, const float act[CP_ACT_DIM])
 
     cgrid_build(w);
 
+    /* ---- electric discharge: radial, no facing, but it costs and it waits --- */
+    if (act[3] > 0.5f && st->elec_dmg > 0.0f && w->elec_cd <= 0.0f) {
+        w->elec_cd = st->elec_cd;
+        w->elec_flash = 0.20f;
+        w->discharges++;
+        p->hp -= st->elec_cost;
+        float rad = st->elec_radius;
+        for (int i = 0; i < CP_MAX_CELLS; i++) {
+            CpCell *c = &w->cells[i];
+            if (!c->alive) continue;
+            float dx = c->x - p->x, dy = c->y - p->y;
+            float rr = rad + c->r;
+            if (dx * dx + dy * dy > rr * rr) continue;
+            c->hp -= st->elec_dmg * (1.0f - c->armor);
+            c->vx *= 0.25f; c->vy *= 0.25f;          /* stun */
+            if (c->hp <= 0.0f) { kill_cell(w, c); w->kills++; reward += 1.0f; }
+        }
+    }
+
     /* ---- player eats ---- */
     {
         float hp_gain = 0.0f;
@@ -420,7 +527,7 @@ void cp_world_step(CpWorld *w, const float act[CP_ACT_DIM])
             if (dx * dx + dy * dy > rr * rr) continue;
             if (f->type == CP_FOOD_PLANT) {
                 if (st->herb_eff <= 0.0f) continue;
-                w->dna += 1.20f * st->herb_eff;
+                w->dna += 1.05f * st->herb_eff;
                 hp_gain += 3.0f;
                 w->ate_plant++;
             } else {
@@ -456,9 +563,16 @@ void cp_world_step(CpWorld *w, const float act[CP_ACT_DIM])
         p->x -= nx * push; p->y -= ny * push;
         c->x += nx * push; c->y += ny * push;
 
-        /* you can only hurt what you are not dwarfed by */
-        if (st->attack > 0.0f && p->r >= c->r * 0.70f) {
-            c->hp -= st->attack * (1.0f - c->armor) * dt * 3.0f;
+        /* our weapons reach only through the arcs they point down, and our
+         * armour only covers the arcs it sits on */
+        float ca = atan2f(dy, dx);
+        float ret_poison = 0.0f;
+        float def = facing_defense(w, ca, &ret_poison);
+        float dmg = contact_damage(w, ca);
+        if (dmg > 0.0f && p->r >= c->r * 0.70f) {
+            float applied = dmg * (1.0f - c->armor) * dt * 3.0f;
+            w->dmg_dealt += applied;
+            c->hp -= applied;
             if (c->hp <= 0.0f) {
                 kill_cell(w, c);
                 w->kills++;
@@ -467,11 +581,19 @@ void cp_world_step(CpWorld *w, const float act[CP_ACT_DIM])
             }
         }
         if (c->attack > 0.0f && c->r >= p->r * 0.70f) {
-            float dmg = c->attack * (1.0f - st->armor) * dt * 3.0f;
-            if (c->r > p->r * 1.6f && c->diet != CP_DIET_HERB) dmg *= 2.4f;  /* swallowed */
-            p->hp -= dmg;
+            float take = c->attack * (1.0f - def) * dt * 3.0f;
+            if (c->r > p->r * 1.6f && c->diet != CP_DIET_HERB) take *= 2.4f;  /* swallowed */
+            p->hp -= take;
+            w->dmg_taken += take;
             w->hits_taken++;
+            /* poison is retaliation: it fires only from the side being bitten */
+            if (ret_poison > 0.0f) {
+                c->hp -= ret_poison * dt * 3.0f;
+                if (c->hp <= 0.0f) { kill_cell(w, c); w->kills++; reward += 1.0f; continue; }
+            }
         }
+        /* their poison works the same way against us */
+        if (c->poison > 0.0f && dmg > 0.0f) p->hp -= c->poison * dt * 3.0f;
     }
 
     /* ---- npc vs npc and npc feeding (keeps the pool churning) ---- */
@@ -539,6 +661,34 @@ void cp_world_step(CpWorld *w, const float act[CP_ACT_DIM])
 
     reward += 0.5f * (w->dna - dna_before);
 
+    /* ---- generations: the editor opens on the way up ----
+     * Spore hands you the editor every time the DNA meter fills a segment.
+     * Here the design head of the action vector is sampled at exactly that
+     * moment and ignored on every other step, which keeps the whole thing a
+     * plain Box action space. */
+    {
+        float seg = CP_DNA_GOAL / (float)CP_GENERATIONS;
+        int want = (int)(w->dna / seg);
+        if (want > CP_GENERATIONS - 1) want = CP_GENERATIONS - 1;
+        if (want > w->generation) {
+            w->generation = want;
+            const float *design = act + CP_ACT_CTRL;
+            CpGenome g;
+            if (design_is_null(design)) {
+                int style = (st->carn_eff > st->herb_eff) ? CP_STYLE_HUNTER
+                          : (st->n[CP_PART_EYE] >= 2)     ? CP_STYLE_SCOUT
+                          : (st->n[CP_PART_SPIKE] >= 2)   ? CP_STYLE_TANK
+                                                          : CP_STYLE_GRAZER;
+                cp_genome_autodesign(&g, &w->rng, CP_GEN_BUDGET[want], style);
+            } else {
+                cp_genome_from_action(&g, design, CP_GEN_BUDGET[want]);
+            }
+            apply_genome(w, &g, CP_GEN_BUDGET[want], 1);
+            w->design_events++;
+            reward += 2.0f;                  /* reaching a new generation is progress */
+        }
+    }
+
     /* ---- termination ---- */
     w->step++;
     if (p->hp <= 0.0f) {
@@ -557,7 +707,6 @@ void cp_world_step(CpWorld *w, const float act[CP_ACT_DIM])
 
 /* ---------------- observation ---------------- */
 
-/* insert (d2, payload index) into a K-sized sorted-by-distance shortlist */
 static void topk_insert(float *d2s, int *idx, int k, float d2, int i)
 {
     if (d2 >= d2s[k - 1]) return;
@@ -583,30 +732,42 @@ void cp_world_observe(const CpWorld *w, float *o)
     o[k++] = clampf(1.0f - p->y / 400.0f, 0.0f, 1.0f);
     o[k++] = clampf(1.0f - (CP_WORLD_H - p->y) / 400.0f, 0.0f, 1.0f);
     o[k++] = (float)w->step / (float)CP_MAX_STEPS;
+    o[k++] = (float)w->generation / (float)(CP_GENERATIONS - 1);
+    o[k++] = (st->elec_dmg > 0.0f && w->elec_cd <= 0.0f) ? 1.0f : 0.0f;
+    o[k++] = st->percep / 620.0f;
 
-    /* --- nearest food (egocentric) --- */
+    /* --- nearest food, clipped to what this build can actually see ---
+     * Eyes are not decoration: an eyeless cell is given a shorter horizon,
+     * so buying perception genuinely buys information. */
+    const float percep = st->percep;
+    const float percep2 = percep * percep;
+    int rad_cells = (int)(percep / CP_GRID_CS) + 1;
+    if (rad_cells > 4) rad_cells = 4;
+
     float fd[CP_OBS_FOOD_K];
     int   fi_[CP_OBS_FOOD_K];
     for (int i = 0; i < CP_OBS_FOOD_K; i++) { fd[i] = 1e18f; fi_[i] = -1; }
 
-    GRID_FOREACH(w, p->x, p->y, 3, fi, {
+    GRID_FOREACH(w, p->x, p->y, rad_cells, fi, {
         const CpFood *f = &w->food[fi];
         if (f->type == CP_FOOD_NONE) continue;
         if (f->type == CP_FOOD_PLANT ? st->herb_eff <= 0.0f : st->carn_eff <= 0.0f) continue;
         float dx = f->x - p->x, dy = f->y - p->y;
-        topk_insert(fd, fi_, CP_OBS_FOOD_K, dx * dx + dy * dy, fi);
+        float d2 = dx * dx + dy * dy;
+        if (d2 > percep2) continue;
+        topk_insert(fd, fi_, CP_OBS_FOOD_K, d2, fi);
     });
 
     for (int i = 0; i < CP_OBS_FOOD_K; i++) {
         if (fi_[i] < 0) { o[k++] = 0; o[k++] = 0; o[k++] = 0; o[k++] = 0; continue; }
         const CpFood *f = &w->food[fi_[i]];
-        o[k++] = clampf((f->x - p->x) / 300.0f, -1.5f, 1.5f);
-        o[k++] = clampf((f->y - p->y) / 300.0f, -1.5f, 1.5f);
+        o[k++] = clampf((f->x - p->x) / 300.0f, -2.5f, 2.5f);
+        o[k++] = clampf((f->y - p->y) / 300.0f, -2.5f, 2.5f);
         o[k++] = f->type == CP_FOOD_PLANT ? 1.0f : 0.0f;
         o[k++] = f->type == CP_FOOD_MEAT  ? 1.0f : 0.0f;
     }
 
-    /* --- nearest cells --- */
+    /* --- nearest cells, same horizon --- */
     float cd[CP_OBS_CELL_K];
     int   ci[CP_OBS_CELL_K];
     for (int i = 0; i < CP_OBS_CELL_K; i++) { cd[i] = 1e18f; ci[i] = -1; }
@@ -614,24 +775,28 @@ void cp_world_observe(const CpWorld *w, float *o)
         const CpCell *c = &w->cells[i];
         if (!c->alive) continue;
         float dx = c->x - p->x, dy = c->y - p->y;
-        topk_insert(cd, ci, CP_OBS_CELL_K, dx * dx + dy * dy, i);
+        float d2 = dx * dx + dy * dy;
+        if (d2 > percep2) continue;
+        topk_insert(cd, ci, CP_OBS_CELL_K, d2, i);
     }
     for (int i = 0; i < CP_OBS_CELL_K; i++) {
         if (ci[i] < 0) { for (int z = 0; z < 6; z++) o[k++] = 0; continue; }
         const CpCell *c = &w->cells[ci[i]];
-        o[k++] = clampf((c->x - p->x) / 400.0f, -1.5f, 1.5f);
-        o[k++] = clampf((c->y - p->y) / 400.0f, -1.5f, 1.5f);
-        o[k++] = clampf(c->r / p->r - 1.0f, -1.5f, 1.5f);      /* >0 = bigger than me */
-        o[k++] = clampf(c->attack / 24.0f, 0.0f, 1.5f);        /* how much it hurts  */
-        o[k++] = clampf(c->vx / 200.0f, -1.5f, 1.5f);
-        o[k++] = clampf(c->vy / 200.0f, -1.5f, 1.5f);
+        o[k++] = clampf((c->x - p->x) / 400.0f, -2.5f, 2.5f);
+        o[k++] = clampf((c->y - p->y) / 400.0f, -2.5f, 2.5f);
+        o[k++] = clampf(c->r / p->r - 1.0f, -2.5f, 2.5f);      /* >0 = bigger than me */
+        o[k++] = clampf(c->attack / 24.0f, 0.0f, 2.5f);        /* how much it hurts  */
+        o[k++] = clampf(c->vx / 200.0f, -2.5f, 2.5f);
+        o[k++] = clampf(c->vy / 200.0f, -2.5f, 2.5f);
     }
 
     /* --- own body plan: the policy must know what it is driving --- */
-    o[k++] = w->morph.herb  * 0.5f;
-    o[k++] = w->morph.carn  * 0.5f;
-    o[k++] = w->morph.spike * 0.25f;
-    o[k++] = w->morph.cilia * 0.25f;
-    o[k++] = w->morph.flag  * 0.5f;
-    o[k++] = w->morph.elec  * 0.5f;
+    for (int t = 1; t < CP_PART_COUNT; t++) o[k++] = st->n[t] * 0.25f;
+
+    o[k++] = clampf(st->herb_eff * 0.5f, 0.0f, 2.5f);
+    o[k++] = clampf(st->carn_eff * 0.5f, 0.0f, 2.5f);
+    o[k++] = clampf(st->max_speed / 400.0f, 0.0f, 2.5f);
+    o[k++] = st->armor;
+    o[k++] = clampf((st->spike_dmg + st->jaw_dmg) / 30.0f, 0.0f, 2.5f);
+    o[k++] = clampf((float)st->cost / 125.0f, 0.0f, 2.5f);
 }

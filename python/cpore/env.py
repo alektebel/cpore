@@ -24,9 +24,32 @@ except ImportError:                                    # pragma: no cover
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _DEFAULT_LIB = os.path.normpath(os.path.join(_HERE, "..", "..", "build", "libcpore.so"))
 
-PART_NAMES = ("herb", "carn", "spike", "cilia", "flag", "elec")
-MAX_PARTS = 8
+# index == the CP_PART_* enum value; slot 0 is "empty"
+PART_NAMES = ("none", "filter", "jaw", "proboscis", "cilia", "flagella",
+              "jet", "spike", "electric", "poison", "eye")
+PART = {n: i for i, n in enumerate(PART_NAMES)}
+PART_COST = (0, 5, 10, 16, 5, 10, 16, 9, 20, 14, 6)
+GEN_BUDGET = (30, 55, 85, 125)
 STATUS = ("running", "dead", "evolved", "timeout")
+
+# angle units: 0..255 clockwise from the front of the cell
+FRONT, RIGHT, BACK, LEFT = 0, 64, 128, 192
+
+
+def genome(*parts):
+    """Build a genome from (name_or_index, angle) pairs.
+
+        genome(("jaw", FRONT), ("cilia", 112), ("cilia", 144), ("spike", 16))
+
+    Placement is not decoration - the simulation reads these angles when it
+    resolves contact, thrust and armour."""
+    out = []
+    for p in parts:
+        t, a = p
+        if isinstance(t, str):
+            t = PART[t]
+        out.append((int(t), int(a) & 0xFF))
+    return out
 
 
 def _load(path=None):
@@ -41,6 +64,15 @@ def _load(path=None):
     lib.cp_env_create.restype = c_void_p
     lib.cp_env_free.argtypes = [c_void_p]
     lib.cp_env_reset.argtypes = [c_void_p, c_uint32, POINTER(c_int32), POINTER(c_float)]
+    lib.cp_env_max_parts.restype = c_int32
+    lib.cp_env_part_count.restype = c_int32
+    lib.cp_env_genome.argtypes = [c_void_p, POINTER(c_int32)]
+    lib.cp_env_generation.argtypes = [c_void_p]
+    lib.cp_env_generation.restype = c_int32
+    lib.cp_part_name.argtypes = [c_int32]
+    lib.cp_part_name.restype = c_char_p
+    lib.cp_part_cost.argtypes = [c_int32]
+    lib.cp_part_cost.restype = c_int32
     lib.cp_env_step.argtypes = [c_void_p, POINTER(c_float), POINTER(c_float),
                                 POINTER(c_float), POINTER(c_int32), POINTER(c_int32)]
     lib.cp_env_obs_dim.restype = c_int32
@@ -72,10 +104,12 @@ class CporeEnv:
 
     metadata = {"render_modes": ["rgb_array"]}
 
-    def __init__(self, seed: int = 0, morph=None, render_size=(1280, 720)):
+    def __init__(self, seed: int = 0, parts=None, render_size=(1280, 720)):
         self._lib = lib()
         self.obs_dim = int(self._lib.cp_env_obs_dim())
         self.act_dim = int(self._lib.cp_env_act_dim())
+        self.max_parts = int(self._lib.cp_env_max_parts())
+        self.part_count = int(self._lib.cp_env_part_count())
         self._h = self._lib.cp_env_create(c_uint32(seed & 0xFFFFFFFF))
         if not self._h:
             raise MemoryError("cp_env_create failed")
@@ -87,7 +121,8 @@ class CporeEnv:
         self._trunc = c_int32()
         self._state_size = int(self._lib.cp_env_state_size())
 
-        self.default_morph = morph
+        self.default_parts = parts
+        self._gbuf = (c_int32 * (self.max_parts * 2))()
         self.render_size = render_size
         self._fb = None
         self._seed = seed
@@ -107,20 +142,28 @@ class CporeEnv:
 
     # -- core api ----------------------------------------------------------
 
-    def reset(self, seed=None, morph=None, options=None):
+    def reset(self, seed=None, parts=None, options=None):
+        """parts: list of (type, angle) pairs, or None for the starter cell.
+
+        Anything over the generation-0 DNA budget is trimmed by the C side,
+        so a caller cannot smuggle in a build it has not paid for."""
         if seed is None:
             seed = self._seed
         self._seed = seed
-        morph = morph if morph is not None else self.default_morph
+        parts = parts if parts is not None else self.default_parts
 
-        if morph is None:
-            mp = None
+        if parts is None:
+            pp = None
         else:
-            if len(morph) != 6:
-                raise ValueError("morph must be 6 ints: " + ", ".join(PART_NAMES))
-            mp = (c_int32 * 6)(*[int(v) for v in morph])
+            flat = []
+            for t, a in parts[:self.max_parts]:
+                if isinstance(t, str):
+                    t = PART[t]
+                flat += [int(t), int(a) & 0xFF]
+            flat += [0, 0] * (self.max_parts - len(flat) // 2)
+            pp = (c_int32 * (self.max_parts * 2))(*flat)
 
-        self._lib.cp_env_reset(self._h, c_uint32(seed & 0xFFFFFFFF), mp, self._obs)
+        self._lib.cp_env_reset(self._h, c_uint32(seed & 0xFFFFFFFF), pp, self._obs)
         return self._out_obs()
 
     def step(self, action):
@@ -144,6 +187,21 @@ class CporeEnv:
         """The scripted C baseline, exposed so python can benchmark against it."""
         self._lib.cp_policy_greedy(self._lib.cp_env_world(self._h), self._act)
         return list(self._act)
+
+    # -- the live build ----------------------------------------------------
+
+    def genome(self):
+        """Current genome as [(part_name, angle), ...] - empty slots dropped."""
+        self._lib.cp_env_genome(self._h, self._gbuf)
+        return [(PART_NAMES[self._gbuf[i * 2]], self._gbuf[i * 2 + 1])
+                for i in range(self.max_parts) if self._gbuf[i * 2] != 0]
+
+    def genome_cost(self):
+        return sum(PART_COST[PART[n]] for n, _ in self.genome())
+
+    @property
+    def generation(self) -> int:
+        return int(self._lib.cp_env_generation(self._h))
 
     # -- snapshot / restore ------------------------------------------------
 
@@ -193,8 +251,8 @@ class CporeVecEnv:
     exists so python-side algorithms have something to talk to today.
     """
 
-    def __init__(self, num_envs: int, seed: int = 0, morph=None, **kw):
-        self.envs = [CporeEnv(seed=seed + i, morph=morph, **kw) for i in range(num_envs)]
+    def __init__(self, num_envs: int, seed: int = 0, parts=None, **kw):
+        self.envs = [CporeEnv(seed=seed + i, parts=parts, **kw) for i in range(num_envs)]
         self.num_envs = num_envs
         self.obs_dim = self.envs[0].obs_dim
         self.act_dim = self.envs[0].act_dim
@@ -233,14 +291,16 @@ def make_gym_env(**kw):
             self._env = CporeEnv(**kw)
             self.observation_space = gym.spaces.Box(
                 -4.0, 4.0, (self._env.obs_dim,), dtype=np.float32)
-            # continuous steering + a discrete-ish boost trigger, kept in one box
+            # 4 control dims (steer x/y, burst, discharge) followed by a design
+            # head of (part type, mount angle) per slot. The design head is
+            # read only at a generation boundary, so this stays one Box.
             self.action_space = gym.spaces.Box(
                 -1.0, 1.0, (self._env.act_dim,), dtype=np.float32)
 
         def reset(self, seed=None, options=None):
             super().reset(seed=seed)
-            morph = (options or {}).get("morph")
-            obs = self._env.reset(seed=seed if seed is not None else 0, morph=morph)
+            parts = (options or {}).get("parts")
+            obs = self._env.reset(seed=seed if seed is not None else 0, parts=parts)
             return obs, {}
 
         def step(self, action):

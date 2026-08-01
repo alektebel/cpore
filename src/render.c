@@ -214,72 +214,141 @@ static void hsv(float h, float s, float v, float *r, float *g, float *b)
 
 typedef struct { float r, g, b; } Col;
 
-static void draw_organism(Canvas *c, float sx, float sy, float rad, float phase,
-                          float heading, int cilia, int spikes, int flagella,
-                          Col body, Col accent, int is_player)
+/* ---------------- parts ----------------
+ * Every part is drawn at its own mounting angle, because that angle is what
+ * the simulation reads. If a spike looks like it is on the back, it is on the
+ * back, and it will not hit anything in front of you. */
+
+#define PART_UNDER 0   /* drawn beneath the membrane: protrusions   */
+#define PART_OVER  1   /* drawn on top: surface organs              */
+
+static int part_layer(int type)
 {
-    /* ambient glow so cells read against the murk */
-    glow(c, sx, sy, rad * 3.1f, body.r * 0.5f, body.g * 0.5f, body.b * 0.5f,
-         is_player ? 0.30f : 0.16f);
-
-    /* cilia: a fringe of little oars, phase-shifted around the rim */
-    int nc = 8 + cilia * 4;
-    if (nc > 30) nc = 30;
-    for (int i = 0; i < nc; i++) {
-        float a = (float)i / nc * 2.0f * PI;
-        float wave = sinf(phase * 2.0f + (float)i * 0.85f);
-        float ln = rad * (0.30f + 0.10f * cilia) * (0.75f + 0.35f * wave);
-        float bend = wave * 0.42f;
-        float bx = sx + cosf(a) * rad * 0.96f;
-        float by = sy + sinf(a) * rad * 0.96f;
-        float tx = bx + cosf(a + bend) * ln;
-        float ty = by + sinf(a + bend) * ln;
-        capsule(c, bx, by, tx, ty, rad * 0.055f + 0.5f, 0.35f,
-                accent.r, accent.g, accent.b, 0.72f);
+    switch (type) {
+    case CP_PART_EYE: case CP_PART_ELECTRIC: case CP_PART_POISON: return PART_OVER;
+    default: return PART_UNDER;
     }
+}
 
-    /* flagella: long trailing whips behind the direction of travel */
-    for (int i = 0; i < flagella; i++) {
-        float a = heading + PI + (i - (flagella - 1) * 0.5f) * 0.45f;
-        float px_ = sx + cosf(a) * rad * 0.9f;
-        float py_ = sy + sinf(a) * rad * 0.9f;
-        float seg = rad * 0.55f;
-        for (int k = 0; k < 5; k++) {
-            float bend = sinf(phase * 3.0f - k * 0.9f) * 0.42f;
-            float na = a + bend;
-            float nx = px_ + cosf(na) * seg;
-            float ny = py_ + sinf(na) * seg;
-            float w0 = rad * 0.10f * (1.0f - k * 0.16f);
-            capsule(c, px_, py_, nx, ny, w0, w0 * 0.7f,
-                    accent.r, accent.g, accent.b, 0.66f);
-            px_ = nx; py_ = ny;
+static void draw_part(Canvas *c, float cx, float cy, float rad, float wa,
+                      int type, float phase, Col acc, float flash)
+{
+    float ux = cosf(wa), uy = sinf(wa);
+    float bx = cx + ux * rad * 0.92f, by = cy + uy * rad * 0.92f;
+    float wave = sinf(phase * 2.0f + wa * 3.0f);
+
+    switch (type) {
+    case CP_PART_FILTER: {                      /* a comb of feeding filaments */
+        for (int i = -1; i <= 1; i++) {
+            float a = wa + i * 0.34f;
+            float ln = rad * (0.50f + 0.10f * sinf(phase * 3.0f + i));
+            capsule(c, bx, by, bx + cosf(a) * ln, by + sinf(a) * ln,
+                    rad * 0.055f + 0.6f, 0.4f, 0.80f, 0.98f, 0.80f, 0.85f);
         }
+        disc(c, bx, by, rad * 0.16f, 0.70f, 0.95f, 0.78f, 0.70f);
+        break;
     }
-
-    /* spikes */
-    for (int i = 0; i < spikes; i++) {
-        float a = heading + (float)i / (spikes ? spikes : 1) * 2.0f * PI;
-        float bx = sx + cosf(a) * rad * 0.72f;
-        float by = sy + sinf(a) * rad * 0.72f;
-        float tx = sx + cosf(a) * rad * 1.62f;
-        float ty = sy + sinf(a) * rad * 1.62f;
-        capsule(c, bx, by, tx, ty, rad * 0.20f, 0.4f, 0.94f, 0.90f, 0.80f, 0.92f);
-        capsule(c, bx, by, tx, ty, rad * 0.11f, 0.3f, 1.0f, 1.0f, 1.0f, 0.55f);
+    case CP_PART_JAW: {                         /* two mandibles, chewing */
+        float gap = 0.20f + 0.11f * (0.5f + 0.5f * sinf(phase * 5.0f));
+        for (int i = -1; i <= 1; i += 2) {
+            float a = wa + i * gap;
+            capsule(c, bx - ux * rad * 0.10f, by - uy * rad * 0.10f,
+                    bx + cosf(a) * rad * 0.72f, by + sinf(a) * rad * 0.72f,
+                    rad * 0.17f, rad * 0.035f + 0.4f, 0.96f, 0.93f, 0.84f, 0.96f);
+        }
+        break;
     }
+    case CP_PART_PROBOSCIS: {                   /* a straw with a soft tip */
+        float ln = rad * (0.85f + 0.10f * wave);
+        capsule(c, bx - ux * rad * 0.1f, by - uy * rad * 0.1f,
+                bx + ux * ln, by + uy * ln,
+                rad * 0.13f, rad * 0.09f, 0.86f, 0.72f, 0.95f, 0.92f);
+        disc(c, bx + ux * ln, by + uy * ln, rad * 0.13f, 0.98f, 0.86f, 1.0f, 0.92f);
+        break;
+    }
+    case CP_PART_CILIA: {                       /* a little oar */
+        float ln = rad * 0.42f * (0.75f + 0.35f * wave);
+        float bend = wave * 0.45f;
+        capsule(c, bx, by, bx + cosf(wa + bend) * ln, by + sinf(wa + bend) * ln,
+                rad * 0.055f + 0.5f, 0.35f, acc.r, acc.g, acc.b, 0.78f);
+        break;
+    }
+    case CP_PART_FLAGELLA: {                    /* a long trailing whip */
+        float x = bx, y = by, a = wa, seg = rad * 0.50f;
+        for (int k = 0; k < 5; k++) {
+            a += sinf(phase * 3.0f - k * 0.9f) * 0.42f;
+            float nx = x + cosf(a) * seg, ny = y + sinf(a) * seg;
+            float wdt = rad * 0.10f * (1.0f - k * 0.16f);
+            capsule(c, x, y, nx, ny, wdt, wdt * 0.7f, acc.r, acc.g, acc.b, 0.70f);
+            x = nx; y = ny;
+        }
+        break;
+    }
+    case CP_PART_JET: {                         /* nozzle plus exhaust plume */
+        float tx = bx + ux * rad * 0.42f, ty = by + uy * rad * 0.42f;
+        capsule(c, bx - ux * rad * 0.08f, by - uy * rad * 0.08f, tx, ty,
+                rad * 0.24f, rad * 0.17f, 0.72f, 0.78f, 0.88f, 0.95f);
+        ring(c, tx, ty, rad * 0.16f, 1.6f, 0.90f, 0.95f, 1.0f, 0.75f);
+        float plume = 0.55f + 0.45f * sinf(phase * 9.0f);
+        glow(c, tx + ux * rad * 0.35f, ty + uy * rad * 0.35f, rad * 0.75f,
+             0.35f, 0.72f, 1.0f, 0.55f * plume);
+        break;
+    }
+    case CP_PART_SPIKE: {                       /* the reason facing matters */
+        float t0x = cx + ux * rad * 0.70f, t0y = cy + uy * rad * 0.70f;
+        float t1x = cx + ux * rad * 1.62f, t1y = cy + uy * rad * 1.62f;
+        capsule(c, t0x, t0y, t1x, t1y, rad * 0.20f, 0.4f, 0.94f, 0.90f, 0.80f, 0.94f);
+        capsule(c, t0x, t0y, t1x, t1y, rad * 0.11f, 0.3f, 1.0f, 1.0f, 1.0f, 0.55f);
+        break;
+    }
+    case CP_PART_ELECTRIC: {                    /* bulb, and arcs when it fires */
+        float ex = cx + ux * rad * 0.80f, ey = cy + uy * rad * 0.80f;
+        glow(c, ex, ey, rad * (0.55f + flash * 2.4f), 0.35f, 0.75f, 1.0f, 0.55f + flash * 2.0f);
+        disc(c, ex, ey, rad * 0.20f, 0.55f, 0.88f, 1.0f, 0.95f);
+        disc(c, ex, ey, rad * 0.11f, 1.0f, 1.0f, 1.0f, 0.95f);
+        if (flash > 0.0f) {
+            for (int i = 0; i < 5; i++) {
+                float a = wa + (i - 2) * 0.55f + sinf(phase * 20.0f + i) * 0.25f;
+                float ln = rad * (0.9f + 0.6f * (float)((i * 7) % 3));
+                capsule(c, ex, ey, ex + cosf(a) * ln, ey + sinf(a) * ln,
+                        1.6f, 0.5f, 0.75f, 0.95f, 1.0f, 0.85f);
+            }
+        }
+        break;
+    }
+    case CP_PART_POISON: {                      /* sacs that punish a biter */
+        float ex = cx + ux * rad * 0.78f, ey = cy + uy * rad * 0.78f;
+        glow(c, ex, ey, rad * 0.70f, 0.55f, 0.95f, 0.20f, 0.45f);
+        disc(c, ex, ey, rad * 0.21f, 0.52f, 0.88f, 0.22f, 0.95f);
+        disc(c, ex - ux * rad * 0.05f, ey - uy * rad * 0.05f, rad * 0.09f,
+             0.85f, 1.0f, 0.55f, 0.85f);
+        break;
+    }
+    case CP_PART_EYE: {                         /* perception, made visible */
+        float ex = cx + ux * rad * 0.68f, ey = cy + uy * rad * 0.68f;
+        disc(c, ex, ey, rad * 0.21f, 0.97f, 0.98f, 1.0f, 0.97f);
+        disc(c, ex + ux * rad * 0.07f, ey + uy * rad * 0.07f, rad * 0.10f,
+             0.06f, 0.09f, 0.14f, 0.97f);
+        disc(c, ex - ux * rad * 0.04f, ey - uy * rad * 0.06f, rad * 0.045f,
+             1.0f, 1.0f, 1.0f, 0.8f);
+        break;
+    }
+    default: break;
+    }
+}
 
-    /* membrane: slightly squashed along the direction of travel */
+/* membrane, organelles and the player's marker ring */
+static void draw_body(Canvas *c, float sx, float sy, float rad, float heading,
+                      Col body, Col acc, int is_player)
+{
     disc(c, sx, sy, rad, body.r * 0.55f, body.g * 0.55f, body.b * 0.55f, 0.92f);
     disc(c, sx - rad * 0.12f, sy - rad * 0.14f, rad * 0.88f, body.r, body.g, body.b, 0.80f);
-    ring(c, sx, sy, rad - 0.6f, 2.0f, accent.r, accent.g, accent.b, 0.85f);
-
-    /* rim light */
+    ring(c, sx, sy, rad - 0.6f, 2.0f, acc.r, acc.g, acc.b, 0.85f);
     ring(c, sx + rad * 0.10f, sy + rad * 0.12f, rad * 0.90f, 1.6f, 1.0f, 1.0f, 1.0f, 0.14f);
 
-    /* organelles */
     disc(c, sx + rad * 0.18f, sy + rad * 0.10f, rad * 0.34f,
-         accent.r * 0.75f, accent.g * 0.75f, accent.b * 0.85f, 0.62f);
-    disc(c, sx - rad * 0.26f, sy + rad * 0.22f, rad * 0.15f,
-         1.0f, 1.0f, 1.0f, 0.22f);
+         acc.r * 0.75f, acc.g * 0.75f, acc.b * 0.85f, 0.62f);
+    disc(c, sx - rad * 0.26f, sy + rad * 0.22f, rad * 0.15f, 1.0f, 1.0f, 1.0f, 0.22f);
     disc(c, sx - rad * 0.30f, sy - rad * 0.30f, rad * 0.20f, 1.0f, 1.0f, 1.0f, 0.30f);
 
     if (is_player) {
@@ -292,11 +361,76 @@ static void draw_organism(Canvas *c, float sx, float sy, float rad, float phase,
                     sx + cosf(a) * (rad + 17.0f), sy + sinf(a) * (rad + 17.0f),
                     1.1f, 1.1f, 0.60f, 1.0f, 0.95f, 0.55f);
         }
-        /* facing tick */
         capsule(c, sx + cosf(heading) * (rad + 3.0f), sy + sinf(heading) * (rad + 3.0f),
                 sx + cosf(heading) * (rad + 13.0f), sy + sinf(heading) * (rad + 13.0f),
                 2.0f, 0.6f, 0.7f, 1.0f, 1.0f, 0.85f);
     }
+}
+
+/* the player: parts come straight off the genome, at their real angles */
+static void draw_player(Canvas *c, const CpWorld *w, float sx, float sy)
+{
+    const CpCell *p = &w->player;
+    Col body = { 0.16f, 0.72f, 0.88f }, acc = { 0.60f, 1.0f, 0.98f };
+    if (!p->alive) { body.r = 0.35f; body.g = 0.35f; body.b = 0.40f; }
+    float rad = p->r;
+    float flash = w->elec_flash > 0.0f ? w->elec_flash * 5.0f : 0.0f;
+
+    glow(c, sx, sy, rad * 3.1f, body.r * 0.5f, body.g * 0.5f, body.b * 0.5f, 0.30f);
+
+    for (int layer = 0; layer <= 1; layer++) {
+        if (layer == 1) draw_body(c, sx, sy, rad, p->heading, body, acc, 1);
+        for (int i = 0; i < CP_MAX_PARTS; i++) {
+            int t = w->genome.part[i].type;
+            if (t == CP_PART_NONE) continue;
+            if (part_layer(t) != layer) continue;
+            float wa = p->heading + (float)w->genome.part[i].angle * (2.0f * PI / 256.0f);
+            draw_part(c, sx, sy, rad, wa, t, p->phase, acc, flash);
+        }
+    }
+
+    /* discharge shockwave, at the radius the simulation actually used */
+    if (w->elec_flash > 0.0f && w->stats.elec_radius > 0.0f) {
+        float k = w->elec_flash / 0.20f;
+        ring(c, sx, sy, w->stats.elec_radius * (1.15f - 0.15f * k), 2.5f,
+             0.65f, 0.92f, 1.0f, 0.85f * k);
+        glow(c, sx, sy, w->stats.elec_radius * 1.2f, 0.30f, 0.65f, 1.0f, 0.55f * k);
+    }
+}
+
+/* npc cells get the same part vocabulary, synthesised from their counts */
+static void draw_npc(Canvas *c, const CpCell *n, float sx, float sy)
+{
+    Col body, acc;
+    hsv(n->hue, 0.58f, 0.72f, &body.r, &body.g, &body.b);
+    hsv(n->hue + 0.06f, 0.42f, 1.0f, &acc.r, &acc.g, &acc.b);
+
+    float head = (n->vx * n->vx + n->vy * n->vy) > 1.0f
+               ? atan2f(n->vy, n->vx) : n->wander_a;
+    float rad = n->r;
+
+    glow(c, sx, sy, rad * 3.1f, body.r * 0.5f, body.g * 0.5f, body.b * 0.5f, 0.16f);
+
+    int ncil = 8 + n->cilia * 3;
+    if (ncil > 26) ncil = 26;
+    for (int i = 0; i < ncil; i++)
+        draw_part(c, sx, sy, rad, head + (float)i / ncil * 2.0f * PI,
+                  CP_PART_CILIA, n->phase, acc, 0.0f);
+    for (int i = 0; i < n->spikes; i++)
+        draw_part(c, sx, sy, rad, head + (float)i / (n->spikes ? n->spikes : 1) * 2.0f * PI,
+                  CP_PART_SPIKE, n->phase, acc, 0.0f);
+    for (int i = 0; i < n->jaws; i++)
+        draw_part(c, sx, sy, rad, head + (i ? PI : 0.0f),
+                  n->diet == CP_DIET_HERB ? CP_PART_FILTER : CP_PART_JAW,
+                  n->phase, acc, 0.0f);
+
+    draw_body(c, sx, sy, rad, head, body, acc, 0);
+
+    for (int i = 0; i < n->eyes; i++)
+        draw_part(c, sx, sy, rad, head + (i - (n->eyes - 1) * 0.5f) * 0.55f,
+                  CP_PART_EYE, n->phase, acc, 0.0f);
+    if (n->poison > 0.0f)
+        draw_part(c, sx, sy, rad, head + PI, CP_PART_POISON, n->phase, acc, 0.0f);
 }
 
 /* ---------------- HUD ---------------- */
@@ -366,7 +500,7 @@ static void draw_hud(Canvas *c, const CpWorld *w, float camx, float camy)
     /* --- stage / vitals --- */
     panel(c, 18, 18, 330, 104, 0.66f);
     text(c, 30, 28, 2, "CELL STAGE", 0.62f, 0.96f, 1.0f, 0.95f);
-    snprintf(buf, sizeof(buf), "SEED %u   T %d", w->seed, w->step);
+    snprintf(buf, sizeof(buf), "SEED %u   T %d   PARTS %d", w->seed, w->step, w->stats.n_parts);
     text(c, 30, 46, 1, buf, 0.45f, 0.62f, 0.70f, 0.9f);
 
     text(c, 30, 64, 1, "HEALTH", 0.75f, 0.80f, 0.82f, 0.9f);
@@ -380,27 +514,50 @@ static void draw_hud(Canvas *c, const CpWorld *w, float camx, float camy)
     snprintf(buf, sizeof(buf), "SIZE %.1f", (double)p->r);
     text(c, 240, 100, 1, buf, 0.50f, 0.70f, 0.78f, 0.9f);
 
-    /* --- body plan (the editor's output) --- */
-    panel(c, 18, 134, 330, 96, 0.62f);
-    text(c, 30, 142, 1, "BODY PLAN", 0.62f, 0.96f, 1.0f, 0.9f);
-    static const char *names[6] = { "MOUTH", "JAWS", "SPIKE", "CILIA", "FLGLM", "ELECT" };
-    const uint8_t vals[6] = { w->morph.herb, w->morph.carn, w->morph.spike,
-                              w->morph.cilia, w->morph.flag, w->morph.elec };
-    for (int i = 0; i < 6; i++) {
-        int col = i / 3, row = i % 3;
-        int x = 30 + col * 160, y = 160 + row * 20;
-        text(c, x, y, 1, names[i], 0.70f, 0.76f, 0.78f, 0.9f);
+    /* --- body plan: the editor's output, including where things are --- */
+    panel(c, 18, 134, 330, 186, 0.62f);
+    snprintf(buf, sizeof(buf), "BODY PLAN   GEN %d/%d   %d/%d DNA",
+             w->generation + 1, CP_GENERATIONS,
+             (int)w->stats.cost, CP_GEN_BUDGET[w->generation]);
+    text(c, 30, 142, 1, buf, 0.62f, 0.96f, 1.0f, 0.9f);
+
+    static const char *pn[CP_PART_COUNT] = { "", "FILTR", "JAW", "PROBO", "CILIA",
+                                             "FLGLA", "JET", "SPIKE", "ELECT",
+                                             "POISN", "EYE" };
+    for (int t = 1; t < CP_PART_COUNT; t++) {
+        int i = t - 1;
+        int col = i / 5, row = i % 5;
+        int x = 30 + col * 116, y = 160 + row * 15;
+        int n = w->stats.n[t];
+        float lum = n ? 1.0f : 0.34f;
+        text(c, x, y, 1, pn[t], 0.70f * lum, 0.80f * lum, 0.84f * lum, 0.95f);
         for (int k = 0; k < 4; k++) {
-            int on = k < vals[i];
-            rect_fill(c, x + 42 + k * 11, y, 8, 7,
-                      on ? 0.40f : 0.16f, on ? 0.92f : 0.20f, on ? 0.86f : 0.24f, 0.95f);
+            int on = k < n;
+            rect_fill(c, x + 38 + k * 8, y, 6, 7,
+                      on ? 0.40f : 0.14f, on ? 0.92f : 0.18f, on ? 0.86f : 0.22f, 0.95f);
         }
-        snprintf(buf, sizeof(buf), "%d", vals[i]);
-        text(c, x + 92, y, 1, buf, 0.55f, 0.85f, 0.90f, 0.9f);
+    }
+
+    /* placement dial - where each part actually sits on the membrane.
+     * Front of the cell is to the right, matching the facing tick in-world. */
+    {
+        float dx = 296.0f, dy = 218.0f, dr = 30.0f;
+        ring(c, dx, dy, dr, 1.0f, 0.35f, 0.62f, 0.68f, 0.55f);
+        capsule(c, dx + dr * 0.55f, dy, dx + dr * 0.95f, dy, 1.0f, 1.0f,
+                0.55f, 0.85f, 0.90f, 0.75f);
+        text(c, (int)(dx - 12), (int)(dy + dr + 5), 1, "FWD", 0.45f, 0.70f, 0.76f, 0.8f);
+        for (int i = 0; i < CP_MAX_PARTS; i++) {
+            int t = w->genome.part[i].type;
+            if (t == CP_PART_NONE) continue;
+            float a = (float)w->genome.part[i].angle * (2.0f * PI / 256.0f);
+            float r, g, b;
+            hsv(0.08f + 0.085f * (float)t, 0.70f, 1.0f, &r, &g, &b);
+            disc(c, dx + cosf(a) * dr, dy + sinf(a) * dr, 3.2f, r, g, b, 0.95f);
+        }
     }
 
     /* --- episode stats --- */
-    panel(c, c->W - 232, 18, 214, 92, 0.62f);
+    panel(c, c->W - 232, 18, 214, 106, 0.62f);
     text(c, c->W - 220, 26, 1, "EPISODE", 0.62f, 0.96f, 1.0f, 0.9f);
     snprintf(buf, sizeof(buf), "PLANTS EATEN  %d", w->ate_plant);
     text(c, c->W - 220, 44, 1, buf, 0.72f, 0.80f, 0.82f, 0.9f);
@@ -410,6 +567,8 @@ static void draw_hud(Canvas *c, const CpWorld *w, float camx, float camy)
     text(c, c->W - 220, 72, 1, buf, 0.72f, 0.80f, 0.82f, 0.9f);
     snprintf(buf, sizeof(buf), "HITS TAKEN    %d", w->hits_taken);
     text(c, c->W - 220, 86, 1, buf, 0.72f, 0.80f, 0.82f, 0.9f);
+    snprintf(buf, sizeof(buf), "DISCHARGES    %d", w->discharges);
+    text(c, c->W - 220, 100, 1, buf, 0.72f, 0.80f, 0.82f, 0.9f);
 
     draw_minimap(c, w, camx, camy);
 
@@ -537,13 +696,7 @@ void cp_render(const CpWorld *w, uint8_t *rgba, int W, int H)
         float sx = c->x - camx, sy = c->y - camy;
         if (sx < -120 || sy < -120 || sx > W + 120 || sy > H + 120) continue;
 
-        Col body, acc;
-        hsv(c->hue, 0.58f, 0.72f, &body.r, &body.g, &body.b);
-        hsv(c->hue + 0.06f, 0.42f, 1.0f, &acc.r, &acc.g, &acc.b);
-        float head = (c->vx * c->vx + c->vy * c->vy) > 1.0f
-                   ? atan2f(c->vy, c->vx) : c->wander_a;
-        draw_organism(&cv, sx, sy, c->r, c->phase, head,
-                      c->cilia, c->spikes, 0, body, acc, 0);
+        draw_npc(&cv, c, sx, sy);
 
         if (c->hp < c->hp_max * 0.995f) {
             int bw = (int)(c->r * 2.0f);
@@ -554,13 +707,7 @@ void cp_render(const CpWorld *w, uint8_t *rgba, int W, int H)
     }
 
     /* --- player --- */
-    {
-        const CpCell *p = &w->player;
-        Col body = { 0.16f, 0.72f, 0.88f }, acc = { 0.60f, 1.0f, 0.98f };
-        if (!p->alive) { body.r = 0.35f; body.g = 0.35f; body.b = 0.40f; }
-        draw_organism(&cv, p->x - camx, p->y - camy, p->r, p->phase, p->heading,
-                      w->morph.cilia, w->morph.spike, w->morph.flag, body, acc, 1);
-    }
+    draw_player(&cv, w, w->player.x - camx, w->player.y - camy);
 
     /* --- vignette --- */
     {

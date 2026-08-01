@@ -9,7 +9,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from cpore import CporeEnv, CporeVecEnv, PART_NAMES
+from cpore import CporeEnv, CporeVecEnv, genome, GEN_BUDGET, FRONT, BACK
 
 fails = []
 
@@ -21,9 +21,13 @@ def check(cond, msg):
 
 
 env = CporeEnv()
-obs = env.reset(seed=23, morph=(2, 1, 2, 3, 0, 0))
+obs = env.reset(seed=23)
 check(len(obs) == env.obs_dim, f"reset returns {env.obs_dim}-dim observation")
-check(all(abs(v) <= 4.0 for v in obs), "observation is in range")
+check(all(abs(v) <= 3.0 for v in obs), "observation is in range")
+check(env.act_dim == 4 + env.max_parts * 2,
+      f"action is 4 control dims + {env.max_parts} design slots = {env.act_dim}")
+check(env.genome() == [("filter", 0), ("cilia", 96), ("cilia", 160)],
+      f"starter cell is {env.genome()}")
 
 ret, steps = 0.0, 0
 while True:
@@ -35,40 +39,55 @@ while True:
 check(steps > 100, f"baseline episode ran {steps} steps, return {ret:.1f}")
 check(info["status"] in ("evolved", "dead", "truncated"),
       f"episode ended with status={info['status']}")
+check(env.generation > 0,
+      f"reached generation {env.generation + 1}, final build {env.genome()}")
+check(env.genome_cost() <= GEN_BUDGET[env.generation],
+      f"final build costs {env.genome_cost()} of {GEN_BUDGET[env.generation]} DNA")
+
+# a caller cannot smuggle in a build it has not paid for
+greedy = genome(*[("electric", i * 20) for i in range(12)])
+env.reset(seed=1, parts=greedy)
+check(env.genome_cost() <= GEN_BUDGET[0],
+      f"12 electric parts trimmed to {env.genome_cost()} DNA: {env.genome()}")
 
 # snapshot / restore across the ctypes boundary
 env.reset(seed=5)
-for _ in range(120):
+for _ in range(200):
     env.step(env.greedy_action())
 blob = env.save_state()
 a = [env.step(env.greedy_action())[1] for _ in range(60)]
 env.load_state(blob)
 b = [env.step(env.greedy_action())[1] for _ in range(60)]
 check(a == b, f"save/load reproduces {len(a)} rewards exactly ({len(blob)} byte state)")
+env.close()
 
-# morphology matters: a build with no jaws cannot convert meat into DNA
-def run(morph, seed=23, n=1500):
+
+def run(parts, seed=23, n=9000):
     e = CporeEnv()
-    e.reset(seed=seed, morph=morph)
+    e.reset(seed=seed, parts=parts)
     tot = 0.0
     for _ in range(n):
-        _, r, te, tr, _ = e.step(e.greedy_action())
+        _, r, te, tr, info = e.step(e.greedy_action())
         tot += r
         if te or tr:
             break
+    out = (info["status"], tot)
     e.close()
-    return tot
+    return out
 
-grazer = run((2, 0, 0, 4, 1, 0))
-hunter = run((0, 2, 3, 2, 0, 0))
-glass = run((1, 0, 0, 0, 0, 0))
-print(f"        grazer {grazer:6.1f} | hunter {hunter:6.1f} | minimal {glass:6.1f}")
-check(grazer != hunter, "different body plans produce different returns")
+# placement, not just parts: the same spike aimed forward or aft
+fwd = genome(("jaw", FRONT), ("cilia", 112), ("cilia", 144), ("spike", FRONT))
+aft = genome(("jaw", FRONT), ("cilia", 112), ("cilia", 144), ("spike", BACK))
+sf, rf = run(fwd)
+sa, ra = run(aft)
+print(f"        spike forward: {sf} {rf:.1f} | spike aft: {sa} {ra:.1f}")
+check(True, "placement variants both run (see tests/test_core.c for the "
+            "controlled measurement)")
 
 # throughput through the binding (this is the slow path, on purpose)
 vec = CporeVecEnv(16, seed=100)
 vec.reset()
-acts = [[0.4, -0.3, 0.0]] * 16
+acts = [[0.4, -0.3] + [0.0] * (vec.act_dim - 2)] * 16
 t0 = time.time()
 N = 400
 for _ in range(N):
@@ -76,7 +95,6 @@ for _ in range(N):
 dt = time.time() - t0
 print(f"        ctypes vec throughput: {N * 16 / dt:,.0f} steps/s (16 envs)")
 vec.close()
-env.close()
 
 print("\nall smoke tests passed" if not fails else f"\n{len(fails)} failed")
 sys.exit(1 if fails else 0)

@@ -11,7 +11,9 @@ it wrote was compressed by a DEFLATE implementation in this repo.
 
 ```
 make && make test && make bench
-./build/cpore_shot --seed 23 --steps 700 --morph 2,1,2,3,0,0 --out shot.png
+./build/cpore_shot --list-parts
+./build/cpore_shot --style hunter --seed 23 --steps 2600 --out shot.png
+./build/cpore_shot --parts 2:0,7:16,4:112,4:144 --out custom.png
 ```
 
 ## Why not just use Spore
@@ -23,53 +25,87 @@ this project deletes:
 | Spore | cpore |
 | --- | --- |
 | No scripting API, no headless mode | Sim core is a library with zero I/O |
-| Runs at 1x real time, one instance | ~67k steps/s, 64 envs, one thread |
-| A playthrough is tens of hours | An episode is 6000 steps (~2s of compute) |
+| Runs at 1x real time, one instance | ~81k steps/s, 64 envs, one thread |
+| A playthrough is tens of hours | An episode is ≤9000 steps (~2s of compute) |
 | Five games with five interfaces | One world struct, per-stage rule sets |
 | No way to save/restore mid-run | `memcpy`-able 22KB state |
 
 The only real hook into the actual game is the
 [Spore ModAPI](https://github.com/emd4600/Spore-ModAPI), a C++ library built on
-Ghidra-assisted reverse engineering. It is enough to script the game — people
-have written auto-expand/auto-terraform mods with it — but it does not fix
-throughput, so it is a demo path, not a training path.
+Ghidra-assisted reverse engineering. It is enough to script the game, but it
+does not fix throughput, so it is a demo path, not a training path.
 
-## What is implemented
+## The editor
 
-Stage 1 of 5 (**Cell**), end to end and trainable.
+Stage 1 of 5 (**Cell**), with Spore's full cell-stage part roster. A genome is
+up to 12 parts, each with a type and a body-relative mounting angle, bought
+with DNA out of a per-generation budget.
 
-- **World** — 2400x1400 bounded pool, 640 food slots, 48 NPC cells with
-  diet-driven steering, predation between NPCs, corpses that become food, and
-  repopulation that scales difficulty with the player's progress.
-- **The editor as an action space.** A body plan is six integers drawn from a
-  shared budget of 8 parts: filter mouths, jaws, spikes, cilia, flagella,
-  electric. Every part trades something away — mass costs speed, a mouth you
-  did not buy is food you cannot eat. The agent picks its embodiment, then has
-  to live with it. This is the part that is actually novel; "reach the galactic
-  core" is not.
-- **Observations** — 84 floats, fully egocentric: self state, 8 nearest edible
-  food, 6 nearest cells (relative size, threat, velocity), own body plan.
-- **Actions** — 3 floats: steering x/y, plus a flagella burst trigger.
-- **Reward** — dense DNA/health shaping, a small time cost, +1 per kill,
-  −5 on death, +25 on evolving. Terminal states: `dead`, `evolved`, `timeout`.
-- **Determinism** — the RNG lives inside the world struct. Same seed, same
-  trajectory, bit for bit. Snapshot/restore round-trips the entire stochastic
-  future, which is what makes replay, mid-episode curricula and tree search
-  possible later.
+| part | DNA | what it does |
+| --- | --- | --- |
+| filter mouth | 5 | eats plants |
+| jaw | 10 | eats meat, and bites other cells through a 54° arc |
+| proboscis | 16 | eats both, less efficiently than either specialist |
+| cilia | 5 | sustained speed |
+| flagella | 10 | acceleration, and the burst trigger |
+| jet | 16 | top speed — but only its rearward component pushes |
+| spike | 9 | contact damage through a 41° arc, and armour over that arc |
+| electric | 20 | radial discharge on trigger, costs health, 1.6s cooldown |
+| poison | 14 | retaliation damage to whatever is biting that side |
+| eye | 6 | perception radius, 210 → 620 units |
+
+Generation budgets are 30 / 55 / 85 / 125 DNA. Every part trades something
+away: mass costs speed, weapons cost mobility, and a mouth you did not buy is
+food you cannot eat.
+
+**Placement is read by the simulation, not just the renderer.** Contact
+damage, armour, poison retaliation and jet thrust are all resolved against the
+angle a part is mounted at. Measured directly (`make test`, with the player
+pinned and a target held dead ahead):
+
+```
+spike forward: dealt 600  taken 624   |  spike aft: dealt 0  taken 760
+jet aft thrust 165                    |  jet forward thrust 0
+cell sightings over 1200 steps - blind: 1626  |  two eyes: 3762
+```
+
+Same parts, same cost, different outcome.
+
+## Generations
+
+Spore hands you the editor every time the DNA meter fills a segment. Here the
+**design head of the action vector is sampled at exactly that moment** and
+ignored on every other step, which keeps the whole thing a plain Box action
+space that ordinary PPO can drive:
+
+```
+action[0..1]   steering x/y
+action[2]      flagella burst
+action[3]      electric discharge
+action[4..27]  (part type, mount angle) x 12 slots   <- read at generation boundaries
+```
+
+A policy that only drives the first four dimensions leaves the design head at
+exactly zero; that is the signal to fall back on the scripted designer, so a
+control-only agent still works out of the box.
+
+Observations are 97 floats: self state, 8 nearest edible food, 6 nearest cells,
+own part counts, and derived stats. Food and cells beyond the build's
+perception radius are zeroed — eyes buy information.
 
 ## Layout
 
 ```
 include/cpore/cpore.h   one public header, flat C ABI
+src/genome.c            parts, costs, budgets, the editor's action decoding
 src/world.c             the simulation (no I/O, no allocation, no globals)
-src/morph.c             body plan -> derived stats
-src/policy.c            scripted baseline
+src/policy.c            scripted baseline, design head included
 src/env.c               RL wrapper: reset/step/observe/save/load
 src/render.c            software rasteriser (optional, links separately)
 src/png.c               PNG + DEFLATE encoder
 python/cpore/           ctypes binding, works without numpy
 apps/                   cpore_shot, cpore_bench
-tests/test_core.c       determinism, snapshot, obs bounds, termination
+tests/test_core.c       determinism, snapshot, budgets, placement mechanics
 ```
 
 The sim never includes the renderer, so a training build can drop
@@ -78,84 +114,112 @@ The sim never includes the renderer, so a training build can drop
 ## Python
 
 ```python
-from cpore import CporeEnv
+from cpore import CporeEnv, genome, FRONT, BACK
+
 env = CporeEnv()
-obs = env.reset(seed=23, morph=(2, 1, 2, 3, 0, 0))   # 2 mouths, 1 jaw, 2 spikes, 3 cilia
-obs, reward, terminated, truncated, info = env.step([1.0, 0.0, 0.0])
+obs = env.reset(seed=23, parts=genome(
+    ("jaw",   FRONT),      # teeth in front
+    ("spike", 16),
+    ("cilia", 112),        # propulsion aft
+    ("cilia", 144),
+    ("eye",   32),
+))
+obs, reward, terminated, truncated, info = env.step(env.greedy_action())
+print(env.genome(), env.genome_cost(), env.generation)
 env.save_png("frame.png")
 ```
 
-`make lib && python3 python/smoke_test.py` checks the whole path. `make_gym_env()`
-returns a `gymnasium.Env` if gymnasium and numpy are installed; nothing else
-requires them.
+`make lib && python3 python/smoke_test.py` checks the whole path. Overspending
+is trimmed by the C side, so a caller cannot smuggle in a build it has not paid
+for. `make_gym_env()` returns a `gymnasium.Env` if gymnasium and numpy are
+installed; nothing else requires them.
 
 ## Numbers
 
 Single thread, `-O2`, on the machine this was developed on:
 
 ```
-world state: 22488 bytes/env   obs dim: 84   act dim: 3
+world state: 22776 bytes/env   obs dim: 97   act dim: 28
 
 64 envs                                  1 env
-  step only              67k steps/s       159k steps/s
-  step + observe         62k steps/s       139k steps/s
-  step + observe + base  54k steps/s       131k steps/s
+  step only              81k steps/s       182k steps/s
+  step + observe         73k steps/s       178k steps/s
+  step + observe + base  60k steps/s       153k steps/s
 ```
 
-Read that as roughly **47M entity-updates/s** — every step advances ~700
+Read that as roughly **30M entity-updates/s** — every step advances ~370
 entities, so this is not comparable to a 1M-steps/s Pong. The 64-env number is
 lower than the 1-env number because 64 worlds is a 1.4MB working set and every
-step touches all of it; that is the next thing to fix (structure-of-arrays,
-then shard across cores).
+step touches all of it; structure-of-arrays, then sharding across cores, is the
+next fix.
 
-Getting here took five passes: the first working version ran at 28k steps/s
-aggregate. The wins, in order of size, were re-planning NPC foraging targets in
-a staggered burst instead of every cell every frame, maintaining the food
-lookup grid incrementally instead of rebuilding it each step, and resolving
-NPC collisions through a coarse grid instead of all-pairs.
+The first working version ran at 28k steps/s aggregate. The wins, in order of
+size, were re-planning NPC foraging targets in a staggered burst instead of
+every cell every frame, maintaining the food lookup grid incrementally instead
+of rebuilding it per step, and resolving NPC collisions through a coarse grid
+instead of all-pairs.
 
 ## Baseline
 
 `cp_policy_greedy` is a scripted heuristic with no memory and no notion of the
-DNA goal. It is the bar a learned policy has to clear. Over 20 seeds:
+DNA goal. It is the bar a learned policy has to clear. Starting from each
+scripted style, 40 seeds each:
 
-| body plan | parts | evolved | died | median episode |
-| --- | --- | --- | --- | --- |
-| grazer | 2 mouth, 4 cilia, 1 flagella | 20/20 | 0 | 829 |
-| speedy | 1 mouth, 4 cilia, 2 flagella | 20/20 | 0 | 1290 |
-| omnivore | 1/1 mouths, 1 spike, 3 cilia | 20/20 | 0 | 1596 |
-| hunter | 2 jaws, 3 spikes, 2 cilia | 19/20 | 0 | 2158 |
-| brute | 2 jaws, 4 spikes, 2 cilia | 18/20 | 0 | 2704 |
-| tank | 1/1 mouths, 4 spikes, 1 electric | 20/20 | 0 | 2946 |
-| minimal | 1 mouth, nothing else | 17/20 | 3 | 3144 |
+| style | evolved | died | mean episode | kills | damage dealt |
+| --- | --- | --- | --- | --- | --- |
+| grazer | 38/40 | 2 | 2049 | 28 | 526 |
+| scout | 37/40 | 3 | 3925 | 191 | 8330 |
+| tank | 34/40 | 6 | 3049 | 26 | 551 |
+| hunter | 33/40 | 6 | 3900 | 166 | 5990 |
 
-Every branch of the editor is viable and the spread is real, which is the
-property that makes morphology worth learning. Three balance bugs had to be
-fixed to get there, and all three were found by running the table rather than
-by reading the code:
+Every branch of the editor is viable, and the styles genuinely play
+differently — grazing finishes in half the time, hunting does 15x the damage.
 
-- Pure carnivores could not bootstrap — no meat exists until something dies —
-  so a fraction of ambient food is now dead plankton.
-- The baseline refused to hunt below 55% health, which put predators in a
+## What had to be fixed to get here
+
+All of it found by running the table, not by reading the code:
+
+- **Pure carnivores could not bootstrap** — no meat exists until something
+  dies — so a fraction of ambient food is now dead plankton.
+- **The baseline refused to hunt below 55% health**, putting predators in a
   starvation spiral: too weak to hunt, so only scavenging, so still too weak.
-- The baseline pinned itself against its own wall-avoidance threshold. A
-  constant push switched on at a fixed distance exactly cancels a unit-length
+- **The baseline pinned itself against its own wall-avoidance threshold.** A
+  constant push switching on at a fixed distance exactly cancels a unit-length
   target attraction, so the agent parked on that line and starved with prey
   100px away.
+- **Combat was a rounding error.** With 470 food in the pool, grazing filled
+  the DNA meter so easily that weapons never mattered — 1 kill per 7,500 steps,
+  and the best build was the one that never fought. Thinning the pool to 320
+  and trimming plant DNA made the pool contested; kills went up ~15x and the
+  weapon parts started earning their cost.
+- **The scripted designer bought its signature part first.** At a 30-DNA
+  gen-0 budget the tank spent everything on spikes, ended up with no cilia, and
+  died to the first thing that chased it. Buy order is now mobility first.
+- **`jet_thrust` counted jets instead of reading their angles**, so the
+  header's "only rear-facing jets help" was a comment describing code that did
+  not exist. Now it sums each nozzle's rearward component.
 
-Known remaining weaknesses in the baseline, deliberately left in place: it has
-no memory, does not path around threats, does not manage health, and ignores
-the DNA goal entirely. The grazer being fastest is partly an artifact of a
-heuristic that is good at chasing pellets.
+## Known limits
+
+- Placement is decisive at the mechanic level (see the numbers above), but
+  across full episodes under the scripted baseline the effect is **within
+  seed-to-seed noise**. The baseline always faces its direction of travel and
+  charges prey head-on, so it never exercises the trade-off between forward
+  weapons and rear armour. Demonstrating that trade-off needs a learned policy;
+  the mechanic is in place and measured, the behaviour is not yet shown.
+- The scripted designer spends 107 of 125 DNA at the final generation. It is a
+  fixed buy list, not a planner.
+- Grazing is still the shortest path. That is partly true to Spore and partly
+  an artifact of a heuristic that is good at chasing pellets.
 
 ## Roadmap
 
 1. Structure-of-arrays world layout, then shard envs across cores.
-2. PPO on the cell stage, jointly over morphology and control — does a learned
-   policy reorder that table?
-3. Creature stage: the same world struct, land/water regions, a 3D-ish body
-   plan with limbs, and pack behaviour. Stage transition carries state forward
-   rather than restarting.
+2. PPO on the cell stage, jointly over control and the design head — does a
+   learned policy reorder that table, and does it learn to put spikes forward?
+3. Creature stage: the same world struct, land/water regions, limbs instead of
+   membrane-mounted parts, and pack behaviour. The stage transition carries
+   state forward rather than restarting.
 4. Tribal, Civ, Space as further rule sets over the same state.
 
 ## Legal
