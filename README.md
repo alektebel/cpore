@@ -7,19 +7,19 @@ reinforcement learning environment rather than a game.
 
 Dependencies: `libc` and `libm`. No SDL, no OpenGL, no zlib, no stb.
 
-That screenshot is a full pixel-art pipeline written from scratch: the scene is
-rasterised into a 320x180 buffer with hard-edged primitives (coverage is
-thresholded at the pixel centre, never blended), quantised to a fixed 32-colour
-palette with 4x4 ordered dithering, then blown up 4x with nearest-neighbour.
-The PNG it wrote was compressed by a DEFLATE implementation in this repo — the
-palette also cut the file from ~500KB to ~64KB, since 32 colours is very
-friendly to LZ77.
+That screenshot is a pixel-art pipeline written from scratch: the scene is
+rasterised into a small buffer with hard-edged primitives (coverage is
+thresholded at the pixel centre, never blended), quantised to a fixed palette
+with 4x4 ordered dithering, then blown up with nearest-neighbour. The PNG was
+compressed by a DEFLATE implementation in this repo — the small palette also
+cut the file from ~500KB to ~60KB, since few colours suit LZ77 well.
 
 ```
 make && make test && make bench
 ./build/cpore_shot --list-parts
 ./build/cpore_shot --style hunter --seed 23 --steps 2600 --out shot.png
 ./build/cpore_shot --parts 2:0,7:16,4:112,4:144 --out custom.png
+./build/cpore_shot --vis-all --out compare.png      # every style, same frame
 ```
 
 ## Why not just use Spore
@@ -107,7 +107,7 @@ src/genome.c            parts, costs, budgets, the editor's action decoding
 src/world.c             the simulation (no I/O, no allocation, no globals)
 src/policy.c            scripted baseline, design head included
 src/env.c               RL wrapper: reset/step/observe/save/load
-src/render.c            pixel-art rasteriser: 320x180, 32 colours, dithered
+src/render.c            pixel-art rasteriser, five styles, palette-quantised
 src/png.c               PNG + DEFLATE encoder
 python/cpore/           ctypes binding, works without numpy
 apps/                   cpore_shot, cpore_bench
@@ -228,10 +228,48 @@ All of it found by running the table, not by reading the code:
    state forward rather than restarting.
 4. Tribal, Civ, Space as further rule sets over the same state.
 
+## Visual styles
+
+Five of them, and they are not palette swaps — internal resolution, camera
+scale, dither strength, background value structure and outline treatment all
+move together. `--vis NAME`, or `CporeEnv(vis="c64")` from python. Default is
+`petri`.
+
+| style | resolution | colours | look |
+| --- | --- | --- | --- |
+| `petri` | 320x180 | 16 | cream paper, ink outlines, muted pigment — the only one with an inverted value structure |
+| `abyss` | 320x180 | 32 | deep water, dithered gradient, dark keylines |
+| `neon` | 320x180 | 16 | near-black void, saturated arcade colour, outlines brighter than fills |
+| `c64` | 160x90 | 16 | the actual Commodore 64 hardware palette, flat field, black keylines |
+| `dmg` | 160x90 | 4 | original Game Boy greens, and nothing else |
+
+![petri](docs/hero.png)
+![c64](docs/style_c64.png)
+![dmg](docs/style_dmg.png)
+![neon](docs/style_neon.png)
+![abyss](docs/style_abyss.png)
+
+`--vis-all` renders the identical terminal state in every style, which is the
+only fair way to compare them.
+
+Two of these needed structural work rather than a palette:
+
+- **dmg** has four tones and no hue, so its ground has to be perfectly flat.
+  Dithering a gradient across four colours produces a checkerboard that swamps
+  every subject on screen — the first attempt was unreadable. Silhouette
+  carries the whole image, so panels sit on the darkest tone and the field one
+  step up.
+- **neon** inverts the outline rule: the rim is the brightest thing on a
+  shape, so the fill can sit almost black against an almost-black background.
+  A dark keyline does nothing on a black field.
+
+The 160x90 styles cannot fit the full HUD, so they drop to vitals plus the
+placement dial.
+
 ## Rendering
 
 The renderer is a debug view, not a product, and that shaped the choices. At
-320x180 there is no room for soft shading, so every cell gets a hard dark
+these resolutions there is no room for soft shading, so every cell gets a hard dark
 keyline, a fill and one highlight — without the keyline everything dissolves
 into the water. The player is marked with four corner brackets rather than
 concentric rings, because a ring drawn around a 10px cell is just noise on top

@@ -15,9 +15,27 @@
 
 #define PIX_W   320
 #define PIX_H   180
-#define WSCALE  0.30f          /* pixels per world unit */
 
-typedef struct { uint8_t *fb; int W, H; } Canvas;
+/* A visual style is more than a palette swap: internal resolution, camera
+ * scale, dither strength, background value structure and whether shapes are
+ * keylined dark or rimmed bright all move together. */
+typedef struct {
+    const char    *name;
+    const uint8_t (*pal)[3];
+    int            pal_n;
+    int            w, h;             /* internal resolution                  */
+    float          wscale;           /* pixels per world unit                */
+    float          dither;           /* ordered-dither spread                */
+    int            rim_bright;       /* 0 = dark keyline, 1 = bright rim     */
+    float          ink[3];
+    float          sky0[3], sky1[3]; /* background ramp, top to bottom       */
+    float          motes;
+    float          wall[3];
+    float          ui_bg[3], ui_fg[3], ui_dim[3];
+    float          ui_deep[3];       /* recessed fills: bar tracks, minimap   */
+} Vis;
+
+typedef struct { uint8_t *fb; int W, H; const Vis *v; } Canvas;
 
 /* Coverage is thresholded at the pixel centre rather than blended, which is
  * the entire difference between a soft vector look and a pixel one. */
@@ -363,9 +381,19 @@ static void draw_body(Canvas *c, float sx, float sy, float rad, float heading,
     /* hard dark keyline, then the fill, then one highlight - the classic
      * three-step pixel read. Without the keyline everything dissolves into
      * the water at this resolution. */
-    disc(c, sx, sy, rad, 0.02f, 0.05f, 0.08f, 1.0f);
-    disc(c, sx, sy, rad - 1.0f, body.r * 0.62f, body.g * 0.62f, body.b * 0.62f, 1.0f);
-    disc(c, sx - rad * 0.16f, sy - rad * 0.18f, rad * 0.76f, body.r, body.g, body.b, 1.0f);
+    const Vis *v = c->v;
+    if (v->rim_bright) {
+        /* neon: the outline is the brightest thing on the shape, so the fill
+         * can sit almost black against an almost-black background */
+        disc(c, sx, sy, rad, acc.r, acc.g, acc.b, 1.0f);
+        disc(c, sx, sy, rad - 1.0f, body.r * 0.28f, body.g * 0.28f, body.b * 0.28f, 1.0f);
+        disc(c, sx - rad * 0.16f, sy - rad * 0.18f, rad * 0.70f,
+             body.r * 0.60f, body.g * 0.60f, body.b * 0.60f, 1.0f);
+    } else {
+        disc(c, sx, sy, rad, v->ink[0], v->ink[1], v->ink[2], 1.0f);
+        disc(c, sx, sy, rad - 1.0f, body.r * 0.62f, body.g * 0.62f, body.b * 0.62f, 1.0f);
+        disc(c, sx - rad * 0.16f, sy - rad * 0.18f, rad * 0.76f, body.r, body.g, body.b, 1.0f);
+    }
 
     if (rad >= 5.0f) {
         disc(c, sx + rad * 0.20f, sy + rad * 0.16f, rad * 0.32f,
@@ -417,7 +445,7 @@ static void draw_player(Canvas *c, const CpWorld *w, float sx, float sy, float r
     /* discharge shockwave, at the radius the simulation actually used */
     if (w->elec_flash > 0.0f && w->stats.elec_radius > 0.0f) {
         float k = w->elec_flash / 0.20f;
-        float er = w->stats.elec_radius * WSCALE;
+        float er = w->stats.elec_radius * c->v->wscale;
         ring(c, sx, sy, er * (1.15f - 0.15f * k), 1.5f, 0.65f, 0.92f, 1.0f, 0.9f);
         ring(c, sx, sy, er * 0.72f, 1.0f, 0.85f, 0.96f, 1.0f, 0.6f * k);
     }
@@ -436,7 +464,9 @@ static void draw_npc(Canvas *c, const CpCell *n, float sx, float sy, float rad)
     glow(c, sx, sy, rad * 3.1f, body.r * 0.5f, body.g * 0.5f, body.b * 0.5f, 0.16f);
 
     if (rad < 4.0f) {          /* too small to carry detail at this resolution */
-        disc(c, sx, sy, rad, 0.02f, 0.05f, 0.08f, 1.0f);
+        const Vis *v = c->v;
+        if (v->rim_bright) disc(c, sx, sy, rad, acc.r, acc.g, acc.b, 1.0f);
+        else               disc(c, sx, sy, rad, v->ink[0], v->ink[1], v->ink[2], 1.0f);
         disc(c, sx, sy, rad - 1.0f, body.r, body.g, body.b, 1.0f);
         return;
     }
@@ -467,16 +497,18 @@ static void draw_npc(Canvas *c, const CpCell *n, float sx, float sy, float rad)
 
 static void panel(Canvas *c, int x, int y, int w, int h)
 {
-    rect_fill(c, x, y, w, h, 0.04f, 0.09f, 0.13f, 0.86f);
-    rect_fill(c, x, y, w, 1, 0.32f, 0.62f, 0.66f, 0.55f);
-    rect_fill(c, x, y + h - 1, w, 1, 0.10f, 0.24f, 0.30f, 0.9f);
+    const Vis *v = c->v;
+    rect_fill(c, x, y, w, h, v->ui_bg[0], v->ui_bg[1], v->ui_bg[2], 0.92f);
+    rect_fill(c, x, y, w, 1, v->ui_fg[0], v->ui_fg[1], v->ui_fg[2], 0.55f);
+    rect_fill(c, x, y + h - 1, w, 1, v->ui_dim[0], v->ui_dim[1], v->ui_dim[2], 0.7f);
 }
 
 static void bar(Canvas *c, int x, int y, int w, int h, float frac,
                 float r, float g, float b)
 {
     frac = clampf(frac, 0.0f, 1.0f);
-    rect_fill(c, x, y, w, h, 0.06f, 0.12f, 0.15f, 1.0f);
+    const float *dp = c->v->ui_deep;
+    rect_fill(c, x, y, w, h, dp[0], dp[1], dp[2], 1.0f);
     int fw = (int)(w * frac + 0.5f);
     if (fw > 0) {
         rect_fill(c, x, y, fw, h, r, g, b, 1.0f);
@@ -487,12 +519,12 @@ static void bar(Canvas *c, int x, int y, int w, int h, float frac,
 static void draw_minimap(Canvas *c, const CpWorld *w, float camx, float camy,
                          float viewW, float viewH)
 {
-    const int mw = 62, mh = 36;
+    const int mw = c->W >= 300 ? 62 : 40, mh = c->W >= 300 ? 36 : 23;
     const int mx = c->W - mw - 3, my = 3;
     panel(c, mx - 1, my - 1, mw + 2, mh + 2);
 
     float sx = (float)mw / CP_WORLD_W, sy = (float)mh / CP_WORLD_H;
-    rect_fill(c, mx, my, mw, mh, 0.03f, 0.08f, 0.11f, 1.0f);
+    rect_fill(c, mx, my, mw, mh, c->v->ui_deep[0], c->v->ui_deep[1], c->v->ui_deep[2], 1.0f);
 
     for (int i = 0; i < CP_MAX_FOOD; i += 4) {
         const CpFood *f = &w->food[i];
@@ -512,14 +544,15 @@ static void draw_minimap(Canvas *c, const CpWorld *w, float camx, float camy,
     /* viewport box */
     int vx = mx + (int)(camx * sx), vy = my + (int)(camy * sy);
     int vw = (int)(viewW * sx), vh = (int)(viewH * sy);
-    rect_fill(c, vx, vy, vw, 1, 0.70f, 0.90f, 0.92f, 0.55f);
-    rect_fill(c, vx, vy + vh, vw, 1, 0.70f, 0.90f, 0.92f, 0.55f);
-    rect_fill(c, vx, vy, 1, vh, 0.70f, 0.90f, 0.92f, 0.55f);
-    rect_fill(c, vx + vw, vy, 1, vh, 0.70f, 0.90f, 0.92f, 0.55f);
+    const float *uf = c->v->ui_fg;
+    rect_fill(c, vx, vy, vw, 1, uf[0], uf[1], uf[2], 0.75f);
+    rect_fill(c, vx, vy + vh, vw, 1, uf[0], uf[1], uf[2], 0.75f);
+    rect_fill(c, vx, vy, 1, vh, uf[0], uf[1], uf[2], 0.75f);
+    rect_fill(c, vx + vw, vy, 1, vh, uf[0], uf[1], uf[2], 0.75f);
 
     int px_ = mx + (int)(w->player.x * sx), py = my + (int)(w->player.y * sy);
-    rect_fill(c, px_ - 1, py, 3, 1, 0.75f, 1.0f, 1.0f, 1.0f);
-    rect_fill(c, px_, py - 1, 1, 3, 0.75f, 1.0f, 1.0f, 1.0f);
+    rect_fill(c, px_ - 1, py, 3, 1, uf[0], uf[1], uf[2], 1.0f);
+    rect_fill(c, px_, py - 1, 1, 3, uf[0], uf[1], uf[2], 1.0f);
 }
 
 /* one colour per part type, shared by the strip and the placement dial so the
@@ -546,41 +579,53 @@ static void draw_hud(Canvas *c, const CpWorld *w, float camx, float camy,
 {
     char buf[64];
     const CpCell *p = &w->player;
+    const Vis *V = c->v;
+    /* At 160x90 there is no room for the full readout, so the chunkier styles
+     * get vitals and the placement dial only. */
+    const int roomy = (c->W >= 300);
 
     /* --- vitals, top left --- */
-    panel(c, 3, 3, 104, 32);
-    text(c, 6, 6, 1, "CELL STAGE", 0.62f, 0.92f, 0.96f, 1.0f);
-    snprintf(buf, sizeof(buf), "G%d/%d T%d", w->generation + 1, CP_GENERATIONS, w->step);
-    text(c, 6, 15, 1, buf, 0.42f, 0.58f, 0.64f, 1.0f);
-    bar(c, 6, 24, 46, 3, p->hp / p->hp_max, 0.86f, 0.28f, 0.30f);
-    bar(c, 55, 24, 46, 3, w->dna / CP_DNA_GOAL, 0.38f, 0.82f, 0.46f);
+    panel(c, 3, 3, roomy ? 104 : 62, 32);
+    text(c, 6, 6, 1, roomy ? "CELL STAGE" : "CELL", V->ui_fg[0], V->ui_fg[1], V->ui_fg[2], 1.0f);
+    if (roomy) snprintf(buf, sizeof(buf), "G%d/%d T%d", w->generation + 1, CP_GENERATIONS, w->step);
+    else       snprintf(buf, sizeof(buf), "G%d T%d", w->generation + 1, w->step);
+    text(c, 6, 15, 1, buf, V->ui_dim[0], V->ui_dim[1], V->ui_dim[2], 1.0f);
+    int bw2 = roomy ? 46 : 25;
+    bar(c, 6, 24, bw2, 3, p->hp / p->hp_max, 0.86f, 0.28f, 0.30f);
+    bar(c, 9 + bw2, 24, bw2, 3, w->dna / CP_DNA_GOAL, 0.38f, 0.82f, 0.46f);
 
     /* --- body plan, bottom left: a swatch and a count per owned part --- */
-    panel(c, 3, PIX_H - 34, 132, 31);
+    if (roomy) {
+    panel(c, 3, c->H - 34, 132, 31);
     snprintf(buf, sizeof(buf), "%d DNA  %d PARTS", (int)w->stats.cost, w->stats.n_parts);
-    text(c, 6, PIX_H - 31, 1, buf, 0.50f, 0.74f, 0.78f, 1.0f);
+    text(c, 6, c->H - 31, 1, buf, V->ui_fg[0], V->ui_fg[1], V->ui_fg[2], 1.0f);
 
     int col = 0;
     for (int t = 1; t < CP_PART_COUNT; t++) {
         int n = w->stats.n[t];
         if (!n) continue;
         int x = 6 + (col % 5) * 19;
-        int y = PIX_H - 21 + (col / 5) * 9;
+        int y = c->H - 21 + (col / 5) * 9;
         float r, g, b;
         part_colour(t, &r, &g, &b);
         rect_fill(c, x, y, 5, 5, r, g, b, 1.0f);
         rect_fill(c, x, y, 5, 1, r * 1.3f, g * 1.3f, b * 1.3f, 1.0f);
         snprintf(buf, sizeof(buf), "%d", n);
-        text(c, x + 7, y - 1, 1, buf, 0.78f, 0.86f, 0.88f, 1.0f);
+        text(c, x + 7, y - 1, 1, buf, V->ui_fg[0], V->ui_fg[1], V->ui_fg[2], 1.0f);
         col++;
+    }
+
     }
 
     /* --- placement dial: where the parts actually sit. Front points right,
      *     matching the facing tick on the cell itself. --- */
     {
-        float dx = 118.0f, dy = (float)PIX_H - 18.0f, dr = 12.0f;
-        ring(c, dx, dy, dr, 1.0f, 0.24f, 0.44f, 0.50f, 1.0f);
-        rect_fill(c, (int)(dx + dr - 3), (int)dy, 5, 1, 0.55f, 0.82f, 0.86f, 1.0f);
+        float dx = roomy ? 118.0f : 20.0f, dy = (float)c->H - 16.0f;
+        float dr = roomy ? 12.0f : 10.0f;
+        if (!roomy) panel(c, 3, c->H - 30, 35, 27);
+        ring(c, dx, dy, dr, 1.0f, V->ui_dim[0], V->ui_dim[1], V->ui_dim[2], 1.0f);
+        rect_fill(c, (int)(dx + dr - 3), (int)dy, 5, 1,
+                  V->ui_fg[0], V->ui_fg[1], V->ui_fg[2], 1.0f);
         for (int i = 0; i < CP_MAX_PARTS; i++) {
             int t = w->genome.part[i].type;
             if (t == CP_PART_NONE) continue;
@@ -595,15 +640,15 @@ static void draw_hud(Canvas *c, const CpWorld *w, float camx, float camy,
     draw_minimap(c, w, camx, camy, viewW, viewH);
 
     /* --- episode counters, under the minimap --- */
-    {
+    if (roomy) {
         int x = c->W - 65, y = 43;
         panel(c, x - 1, y - 1, 64, 32);
         snprintf(buf, sizeof(buf), "EAT %d", w->ate_plant + w->ate_meat);
-        text(c, x + 2, y + 2, 1, buf, 0.66f, 0.76f, 0.78f, 1.0f);
+        text(c, x + 2, y + 2, 1, buf, V->ui_fg[0], V->ui_fg[1], V->ui_fg[2], 1.0f);
         snprintf(buf, sizeof(buf), "KILL %d", w->kills);
-        text(c, x + 2, y + 10, 1, buf, 0.66f, 0.76f, 0.78f, 1.0f);
+        text(c, x + 2, y + 10, 1, buf, V->ui_fg[0], V->ui_fg[1], V->ui_fg[2], 1.0f);
         snprintf(buf, sizeof(buf), "HIT %d", w->hits_taken);
-        text(c, x + 2, y + 18, 1, buf, 0.66f, 0.76f, 0.78f, 1.0f);
+        text(c, x + 2, y + 18, 1, buf, V->ui_fg[0], V->ui_fg[1], V->ui_fg[2], 1.0f);
     }
 
     /* --- terminal banner --- */
@@ -620,11 +665,10 @@ static void draw_hud(Canvas *c, const CpWorld *w, float camx, float camy,
     }
 }
 
-/* ---------------- palette + dithering ---------------- */
+/* ---------------- palettes ---------------- */
 
-/* 32 colours, grouped as ramps so shading stays inside a hue instead of
- * wandering across the palette when it is quantised. */
-static const uint8_t PAL[32][3] = {
+/* deep water, grouped as per-hue ramps so shading stays inside a hue */
+static const uint8_t PAL_ABYSS[32][3] = {
     {  6, 12, 20}, { 10, 22, 34}, { 14, 34, 48}, { 20, 48, 62},
     { 28, 62, 78}, { 38, 80, 94}, { 52,102,114}, { 74,128,138},
     { 26, 64, 38}, { 44,104, 56}, { 78,158, 74}, {132,206,104},
@@ -635,93 +679,182 @@ static const uint8_t PAL[32][3] = {
     {142,112,200}, {182,176,152}, {224,220,200}, {252,252,248},
 };
 
+/* original Game Boy DMG: four greens, and nothing else. Everything has to be
+ * carried by silhouette and dither, which is the point of trying it. */
+static const uint8_t PAL_DMG[4][3] = {
+    { 15, 56, 15}, { 48, 98, 48}, {139,172, 15}, {155,188, 15},
+};
+
+/* near-black void with saturated arcade colour, outlines brighter than fills */
+static const uint8_t PAL_NEON[16][3] = {
+    {  4,  4, 10}, { 14, 10, 26}, { 26, 18, 44}, { 44, 30, 66},
+    {255, 42,109}, {150, 20, 66}, {  5,255,161}, {  0,130, 86},
+    { 41,173,255}, { 16, 84,140}, {255,236, 39}, {255,119,168},
+    {170, 90,255}, {126, 37, 83}, {200,206,214}, {255,255,255},
+};
+
+/* lab illustration: cream paper, ink outlines, muted pigment. The only style
+ * with an inverted value structure - light ground, dark subjects. */
+static const uint8_t PAL_PETRI[16][3] = {
+    {241,234,216}, {226,215,190}, {206,192,162}, {182,166,136},
+    { 38, 32, 28}, { 78, 70, 60}, {120,110, 96}, {162,150,132},
+    {126,148,110}, { 88,112, 74}, {170, 96, 66}, {206,140,100},
+    { 92,116,146}, {146,172,196}, {138, 92,120}, {196,150,172},
+};
+
+/* the actual Commodore 64 hardware palette, at 160x90 for real chunk */
+static const uint8_t PAL_C64[16][3] = {
+    {  0,  0,  0}, {255,255,255}, {136, 57, 50}, {103,182,189},
+    {139, 63,150}, { 85,160, 73}, { 64, 49,141}, {191,206,114},
+    {139, 84, 41}, { 87, 66,  0}, {184,105, 98}, { 80, 80, 80},
+    {120,120,120}, {148,224,137}, {120,105,196}, {159,159,159},
+};
+
+static const Vis VIS[CP_VIS_COUNT] = {
+    { "abyss", PAL_ABYSS, 32, 320, 180, 0.30f, 26.0f, 0,
+      {0.02f,0.05f,0.08f},
+      {0.055f,0.150f,0.200f}, {0.100f,0.235f,0.290f}, 0.28f, {0.30f,0.62f,0.64f},
+      {0.04f,0.09f,0.13f}, {0.62f,0.92f,0.96f}, {0.42f,0.58f,0.64f},
+      {0.012f,0.031f,0.043f} },
+
+    /* Four tones and no hue at all, so the ground has to be perfectly flat -
+     * dithering a ramp here just produces a checkerboard that swamps every
+     * subject on screen. Silhouette carries the whole image. */
+    { "dmg", PAL_DMG, 4, 160, 90, 0.16f, 10.0f, 0,
+      {0.059f,0.220f,0.059f},
+      {0.188f,0.384f,0.188f}, {0.188f,0.384f,0.188f}, 0.30f, {0.545f,0.675f,0.059f},
+      {0.059f,0.220f,0.059f}, {0.545f,0.675f,0.059f}, {0.608f,0.737f,0.059f},
+      {0.059f,0.220f,0.059f} },
+
+    { "neon", PAL_NEON, 16, 320, 180, 0.30f, 8.0f, 1,
+      {0.85f,0.95f,1.00f},
+      {0.015f,0.015f,0.040f}, {0.055f,0.040f,0.105f}, 0.34f, {1.00f,0.16f,0.43f},
+      {0.05f,0.04f,0.10f}, {0.02f,1.00f,0.63f}, {0.16f,0.68f,1.00f},
+      {0.016f,0.016f,0.039f} },
+
+    { "petri", PAL_PETRI, 16, 320, 180, 0.30f, 30.0f, 0,
+      {0.15f,0.13f,0.11f},
+      {0.945f,0.918f,0.847f}, {0.760f,0.706f,0.600f}, 0.30f, {0.31f,0.27f,0.24f},
+      {0.886f,0.843f,0.745f}, {0.15f,0.13f,0.11f}, {0.40f,0.36f,0.31f},
+      {0.714f,0.651f,0.533f} },
+
+    { "c64", PAL_C64, 16, 160, 90, 0.16f, 18.0f, 0,
+      {0.0f,0.0f,0.0f},
+      {0.251f,0.192f,0.553f}, {0.251f,0.192f,0.553f}, 0.42f, {0.40f,0.71f,0.74f},
+      {0.0f,0.0f,0.0f}, {0.58f,0.88f,0.54f}, {0.47f,0.47f,0.47f},
+      {0.0f,0.0f,0.0f} },
+};
+
+const char *cp_vis_name(int style)
+{
+    return (style >= 0 && style < CP_VIS_COUNT) ? VIS[style].name : "?";
+}
+
+/* ---------------- dithering + quantisation ---------------- */
+
 static const uint8_t BAYER[16] = { 0, 8, 2,10, 12, 4,14, 6, 3,11, 1, 9, 15, 7,13, 5 };
 
-static void quantise(uint8_t *fb, int W, int H)
+static void quantise(uint8_t *fb, int W, int H, const Vis *v)
 {
     for (int y = 0; y < H; y++) {
         for (int x = 0; x < W; x++) {
             uint8_t *px_ = fb + 4 * ((size_t)y * W + x);
-            /* ordered dither: nudge each pixel before snapping, so the water
-             * gradient breaks into a woven texture instead of hard bands */
-            float d = ((float)BAYER[(y & 3) * 4 + (x & 3)] / 16.0f - 0.469f) * 26.0f;
+            /* ordered dither: nudge each pixel before snapping, so a ramp
+             * breaks into a woven texture instead of hard bands. The fewer
+             * colours a style has, the harder it has to lean on this. */
+            float d = ((float)BAYER[(y & 3) * 4 + (x & 3)] / 16.0f - 0.469f) * v->dither;
             float pr = px_[0] + d, pg = px_[1] + d, pb = px_[2] + d;
 
             int best = 0;
             float bestd = 1e18f;
-            for (int i = 0; i < 32; i++) {
-                float dr = pr - PAL[i][0], dg = pg - PAL[i][1], db = pb - PAL[i][2];
+            for (int i = 0; i < v->pal_n; i++) {
+                float dr = pr - v->pal[i][0], dg = pg - v->pal[i][1], db = pb - v->pal[i][2];
                 /* luma-weighted, so the match tracks perceived brightness */
                 float e = dr * dr * 0.30f + dg * dg * 0.59f + db * db * 0.11f;
                 if (e < bestd) { bestd = e; best = i; }
             }
-            px_[0] = PAL[best][0];
-            px_[1] = PAL[best][1];
-            px_[2] = PAL[best][2];
+            px_[0] = v->pal[best][0];
+            px_[1] = v->pal[best][1];
+            px_[2] = v->pal[best][2];
         }
     }
 }
 
 /* ---------------- main entry ---------------- */
 
-void cp_render(const CpWorld *w, uint8_t *rgba, int W, int H)
+void cp_render_styled(const CpWorld *w, uint8_t *rgba, int W, int H, int style)
 {
-    int scale = W / PIX_W;
-    if (H / PIX_H < scale) scale = H / PIX_H;
+    if (style < 0 || style >= CP_VIS_COUNT) style = CP_VIS_ABYSS;
+    const Vis *v = &VIS[style];
+
+    int scale = W / v->w;
+    if (H / v->h < scale) scale = H / v->h;
     if (scale < 1) scale = 1;
 
-    uint8_t *low = (uint8_t *)malloc((size_t)PIX_W * PIX_H * 4);
+    uint8_t *low = (uint8_t *)malloc((size_t)v->w * v->h * 4);
     if (!low) return;
-    Canvas cv = { low, PIX_W, PIX_H };
+    Canvas cv = { low, v->w, v->h, v };
 
-    const float viewW = PIX_W / WSCALE, viewH = PIX_H / WSCALE;
+    const float viewW = v->w / v->wscale, viewH = v->h / v->wscale;
     float camx = clampf(w->player.x - viewW * 0.5f, 0.0f, CP_WORLD_W - viewW);
     float camy = clampf(w->player.y - viewH * 0.5f, 0.0f, CP_WORLD_H - viewH);
     if (CP_WORLD_W < viewW) camx = (CP_WORLD_W - viewW) * 0.5f;
     if (CP_WORLD_H < viewH) camy = (CP_WORLD_H - viewH) * 0.5f;
 
-    #define SXW(wx) (((wx) - camx) * WSCALE)
-    #define SYW(wy) (((wy) - camy) * WSCALE)
+    #define SXW(wx) (((wx) - camx) * v->wscale)
+    #define SYW(wy) (((wy) - camy) * v->wscale)
 
     /* --- water: a vertical ramp, left to the dither to break up --- */
-    for (int y = 0; y < PIX_H; y++) {
-        float t = (float)y / (float)PIX_H;
-        float r = mixf(0.055f, 0.100f, t);
-        float g = mixf(0.150f, 0.235f, t);
-        float b = mixf(0.200f, 0.290f, t);
-        uint8_t *row = low + 4 * (size_t)y * PIX_W;
-        for (int x = 0; x < PIX_W; x++) {
-            row[4 * x + 0] = (uint8_t)(r * 255.0f);
-            row[4 * x + 1] = (uint8_t)(g * 255.0f);
-            row[4 * x + 2] = (uint8_t)(b * 255.0f);
+    for (int y = 0; y < v->h; y++) {
+        float t = (float)y / (float)v->h;
+        float r = mixf(v->sky0[0], v->sky1[0], t);
+        float g = mixf(v->sky0[1], v->sky1[1], t);
+        float b = mixf(v->sky0[2], v->sky1[2], t);
+        uint8_t *row = low + 4 * (size_t)y * v->w;
+        for (int x = 0; x < v->w; x++) {
+            row[4 * x + 0] = (uint8_t)(clampf(r, 0, 1) * 255.0f);
+            row[4 * x + 1] = (uint8_t)(clampf(g, 0, 1) * 255.0f);
+            row[4 * x + 2] = (uint8_t)(clampf(b, 0, 1) * 255.0f);
             row[4 * x + 3] = 255;
         }
     }
 
-    /* murk, fixed to the world so it parallaxes with the camera */
+    /* murk, fixed to the world so it parallaxes with the camera. On a light
+     * ground it has to darken rather than add, or it does nothing at all. */
     CpRng mr; cp_rng_seed(&mr, w->seed ^ 0xA53Cu);
+    int light_ground = (v->sky0[0] + v->sky0[1] + v->sky0[2]) > 1.5f;
     for (int i = 0; i < 12; i++) {
         float mx = cp_rng_range(&mr, -200.0f, CP_WORLD_W + 200.0f);
         float my = cp_rng_range(&mr, -200.0f, CP_WORLD_H + 200.0f);
-        float mrad = cp_rng_range(&mr, 200.0f, 520.0f) * WSCALE;
-        glow(&cv, SXW(mx), SYW(my), mrad, 0.06f, 0.16f, 0.20f, 0.55f);
+        float mrad = cp_rng_range(&mr, 200.0f, 520.0f) * v->wscale;
+        if (light_ground) {
+            float sx = SXW(mx), sy = SYW(my);
+            for (int k = 0; k < 3; k++)
+                disc(&cv, sx, sy, mrad * (1.0f - 0.28f * k),
+                     v->sky1[0], v->sky1[1], v->sky1[2], 0.16f);
+        } else {
+            glow(&cv, SXW(mx), SYW(my), mrad, 0.06f, 0.16f, 0.20f, 0.55f);
+        }
     }
 
     /* pool walls */
     {
         int l = (int)SXW(0.0f), r = (int)SXW(CP_WORLD_W);
         int t = (int)SYW(0.0f), b = (int)SYW(CP_WORLD_H);
-        for (int d = 0; d < 14; d++) {
-            float a = (1.0f - d / 14.0f) * 0.55f;
-            if (l + d >= 0 && l + d < PIX_W) rect_fill(&cv, l + d, 0, 1, PIX_H, 0.02f, 0.05f, 0.08f, a);
-            if (r - d >= 0 && r - d < PIX_W) rect_fill(&cv, r - d, 0, 1, PIX_H, 0.02f, 0.05f, 0.08f, a);
-            if (t + d >= 0 && t + d < PIX_H) rect_fill(&cv, 0, t + d, PIX_W, 1, 0.02f, 0.05f, 0.08f, a);
-            if (b - d >= 0 && b - d < PIX_H) rect_fill(&cv, 0, b - d, PIX_W, 1, 0.02f, 0.05f, 0.08f, a);
+        int band = v->w >= 300 ? 14 : 7;
+        for (int d = 0; d < band; d++) {
+            float a = (1.0f - (float)d / band) * 0.55f;
+            const float *ik = v->ink;
+            if (l + d >= 0 && l + d < v->w) rect_fill(&cv, l + d, 0, 1, v->h, ik[0], ik[1], ik[2], a);
+            if (r - d >= 0 && r - d < v->w) rect_fill(&cv, r - d, 0, 1, v->h, ik[0], ik[1], ik[2], a);
+            if (t + d >= 0 && t + d < v->h) rect_fill(&cv, 0, t + d, v->w, 1, ik[0], ik[1], ik[2], a);
+            if (b - d >= 0 && b - d < v->h) rect_fill(&cv, 0, b - d, v->w, 1, ik[0], ik[1], ik[2], a);
         }
-        if (l >= 0 && l < PIX_W) rect_fill(&cv, l, 0, 1, PIX_H, 0.30f, 0.62f, 0.64f, 0.6f);
-        if (r >= 0 && r < PIX_W) rect_fill(&cv, r, 0, 1, PIX_H, 0.30f, 0.62f, 0.64f, 0.6f);
-        if (t >= 0 && t < PIX_H) rect_fill(&cv, 0, t, PIX_W, 1, 0.30f, 0.62f, 0.64f, 0.6f);
-        if (b >= 0 && b < PIX_H) rect_fill(&cv, 0, b, PIX_W, 1, 0.30f, 0.62f, 0.64f, 0.6f);
+        const float *wl = v->wall;
+        if (l >= 0 && l < v->w) rect_fill(&cv, l, 0, 1, v->h, wl[0], wl[1], wl[2], 0.7f);
+        if (r >= 0 && r < v->w) rect_fill(&cv, r, 0, 1, v->h, wl[0], wl[1], wl[2], 0.7f);
+        if (t >= 0 && t < v->h) rect_fill(&cv, 0, t, v->w, 1, wl[0], wl[1], wl[2], 0.7f);
+        if (b >= 0 && b < v->h) rect_fill(&cv, 0, b, v->w, 1, wl[0], wl[1], wl[2], 0.7f);
     }
 
     /* suspended detritus, parallaxed for depth - single pixels, no blur */
@@ -730,9 +863,10 @@ void cp_render(const CpWorld *w, uint8_t *rgba, int W, int H)
         float wx = cp_rng_range(&dr, 0.0f, CP_WORLD_W);
         float wy = cp_rng_range(&dr, 0.0f, CP_WORLD_H);
         float depth = cp_rng_range(&dr, 0.30f, 0.85f);
-        int sx = (int)((wx - camx * depth) * WSCALE);
-        int sy = (int)((wy - camy * depth) * WSCALE);
-        px_blend(&cv, sx, sy, 0.55f, 0.78f, 0.82f, 0.10f + 0.22f * depth);
+        int sx = (int)((wx - camx * depth) * v->wscale);
+        int sy = (int)((wy - camy * depth) * v->wscale);
+        if (light_ground) px_blend(&cv, sx, sy, v->ink[0], v->ink[1], v->ink[2], v->motes * depth);
+        else              px_blend(&cv, sx, sy, 0.55f, 0.78f, 0.82f, v->motes * depth);
     }
 
     /* --- food --- */
@@ -740,14 +874,15 @@ void cp_render(const CpWorld *w, uint8_t *rgba, int W, int H)
         const CpFood *f = &w->food[i];
         if (f->type == CP_FOOD_NONE) continue;
         float sx = SXW(f->x), sy = SYW(f->y);
-        if (sx < -8 || sy < -8 || sx > PIX_W + 8 || sy > PIX_H + 8) continue;
-        float rad = f->r * WSCALE + 0.6f;
+        if (sx < -8 || sy < -8 || sx > v->w + 8 || sy > v->h + 8) continue;
+        float rad = f->r * v->wscale + 0.6f;
+        if (rad < 1.2f) rad = 1.2f;
         if (f->type == CP_FOOD_PLANT) {
-            disc(&cv, sx, sy, rad + 1.0f, 0.14f, 0.36f, 0.24f, 0.75f);
+            disc(&cv, sx, sy, rad + 1.0f, v->ink[0], v->ink[1], v->ink[2], 0.85f);
             disc(&cv, sx, sy, rad, 0.30f, 0.72f, 0.34f, 1.0f);
             px_blend(&cv, (int)sx, (int)(sy - 1), 0.66f, 0.92f, 0.55f, 1.0f);
         } else {
-            disc(&cv, sx, sy, rad + 1.0f, 0.36f, 0.14f, 0.10f, 0.75f);
+            disc(&cv, sx, sy, rad + 1.0f, v->ink[0], v->ink[1], v->ink[2], 0.85f);
             disc(&cv, sx, sy, rad, 0.78f, 0.32f, 0.20f, 1.0f);
             px_blend(&cv, (int)sx, (int)(sy - 1), 0.95f, 0.62f, 0.40f, 1.0f);
         }
@@ -758,8 +893,9 @@ void cp_render(const CpWorld *w, uint8_t *rgba, int W, int H)
         const CpCell *c = &w->cells[i];
         if (!c->alive) continue;
         float sx = SXW(c->x), sy = SYW(c->y);
-        float rad = c->r * WSCALE;
-        if (sx < -40 || sy < -40 || sx > PIX_W + 40 || sy > PIX_H + 40) continue;
+        float rad = c->r * v->wscale;
+        if (rad < 1.5f) rad = 1.5f;
+        if (sx < -40 || sy < -40 || sx > v->w + 40 || sy > v->h + 40) continue;
         draw_npc(&cv, c, sx, sy, rad);
 
         if (c->hp < c->hp_max * 0.995f && rad >= 4.0f) {
@@ -771,13 +907,17 @@ void cp_render(const CpWorld *w, uint8_t *rgba, int W, int H)
     }
 
     /* --- player --- */
-    draw_player(&cv, w, SXW(w->player.x), SYW(w->player.y), w->player.r * WSCALE);
+    {
+        float rad = w->player.r * v->wscale;
+        if (rad < 3.0f) rad = 3.0f;
+        draw_player(&cv, w, SXW(w->player.x), SYW(w->player.y), rad);
+    }
 
     draw_hud(&cv, w, camx, camy, viewW, viewH);
-    quantise(low, PIX_W, PIX_H);
+    quantise(low, v->w, v->h, v);
 
     /* --- nearest-neighbour blow-up, centred --- */
-    int outw = PIX_W * scale, outh = PIX_H * scale;
+    int outw = v->w * scale, outh = v->h * scale;
     int ox = (W - outw) / 2, oy = (H - outh) / 2;
     for (int y = 0; y < H; y++) {
         uint8_t *drow = rgba + 4 * (size_t)y * W;
@@ -785,10 +925,10 @@ void cp_render(const CpWorld *w, uint8_t *rgba, int W, int H)
         for (int x = 0; x < W; x++) {
             int sxi = (x - ox) / scale;
             const uint8_t *src;
-            if (x < ox || y < oy || sxi >= PIX_W || syi >= PIX_H)
-                src = PAL[0];
+            if (x < ox || y < oy || sxi >= v->w || syi >= v->h)
+                src = v->pal[0];
             else
-                src = low + 4 * ((size_t)syi * PIX_W + sxi);
+                src = low + 4 * ((size_t)syi * v->w + sxi);
             drow[4 * x + 0] = src[0];
             drow[4 * x + 1] = src[1];
             drow[4 * x + 2] = src[2];
@@ -799,4 +939,10 @@ void cp_render(const CpWorld *w, uint8_t *rgba, int W, int H)
     #undef SXW
     #undef SYW
     free(low);
+}
+
+/* Default style. One line to change, and every caller follows. */
+void cp_render(const CpWorld *w, uint8_t *rgba, int W, int H)
+{
+    cp_render_styled(w, rgba, W, H, CP_VIS_PETRI);
 }

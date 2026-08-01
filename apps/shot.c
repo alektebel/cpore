@@ -19,7 +19,7 @@ static void usage(void)
 {
     printf("usage: cpore_shot [--seed N] [--steps N] [--out FILE] [--size WxH]\n"
            "                  [--every N] [--style NAME] [--parts t:a,t:a,...]\n"
-           "                  [--list-parts]\n");
+           "                  [--vis NAME] [--vis-all] [--list-parts]\n");
 }
 
 static void list_parts(void)
@@ -50,6 +50,7 @@ int main(int argc, char **argv)
     CpGenome g;
     cp_genome_starter(&g);
     int have_genome = 0;
+    int vis = CP_VIS_ABYSS, vis_all = 0;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--seed") && i + 1 < argc)       seed = (uint32_t)strtoul(argv[++i], NULL, 10);
@@ -58,6 +59,19 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--every") && i + 1 < argc) every = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--size") && i + 1 < argc)  sscanf(argv[++i], "%dx%d", &W, &H);
         else if (!strcmp(argv[i], "--list-parts")) { list_parts(); return 0; }
+        else if (!strcmp(argv[i], "--vis-all")) vis_all = 1;
+        else if (!strcmp(argv[i], "--vis") && i + 1 < argc) {
+            const char *nm = argv[++i];
+            vis = -1;
+            for (int k = 0; k < CP_VIS_COUNT; k++)
+                if (!strcmp(nm, cp_vis_name(k))) vis = k;
+            if (vis < 0) {
+                fprintf(stderr, "unknown vis style '%s'; have:", nm);
+                for (int k = 0; k < CP_VIS_COUNT; k++) fprintf(stderr, " %s", cp_vis_name(k));
+                fprintf(stderr, "\n");
+                return 1;
+            }
+        }
         else if (!strcmp(argv[i], "--style") && i + 1 < argc) {
             const char *nm = argv[++i];
             int style = 0;
@@ -101,14 +115,30 @@ int main(int argc, char **argv)
             snprintf(path, sizeof(path), "%.*s_%03d.png",
                      (int)(strrchr(out, '.') ? strrchr(out, '.') - out : (long)strlen(out)),
                      out, shot_n++);
-            cp_render(w, fb, W, H);
+            cp_render_styled(w, fb, W, H, vis);
             cp_png_write(path, fb, W, H);
             printf("  wrote %s\n", path);
         }
         if (w->status != CP_RUN) break;
     }
 
-    cp_render(w, fb, W, H);
+    /* --vis-all renders the identical terminal state in every style, which is
+     * the only fair way to compare them. */
+    if (vis_all) {
+        const char *dot = strrchr(out, '.');
+        int stem = (int)(dot ? dot - out : (long)strlen(out));
+        for (int k = 0; k < CP_VIS_COUNT; k++) {
+            cp_render_styled(w, fb, W, H, k);
+            snprintf(path, sizeof(path), "%.*s_%s.png", stem, out, cp_vis_name(k));
+            if (cp_png_write(path, fb, W, H) != 0) {
+                fprintf(stderr, "png write failed: %s\n", path);
+                return 1;
+            }
+            printf("  wrote %s\n", path);
+        }
+    }
+
+    cp_render_styled(w, fb, W, H, vis);
     if (cp_png_write(out, fb, W, H) != 0) { fprintf(stderr, "png write failed\n"); return 1; }
 
     static const char *status[] = { "RUNNING", "DEAD", "EVOLVED", "TIMEOUT" };

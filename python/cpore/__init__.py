@@ -8,6 +8,9 @@ from .env import (
     PART_COST,
     GEN_BUDGET,
     STATUS,
+    VIS,
+    VIS_STYLES,
+    DEFAULT_VIS,
     FRONT,
     RIGHT,
     BACK,
@@ -15,5 +18,5 @@ from .env import (
 )
 
 __all__ = ["CporeEnv", "CporeVecEnv", "make_gym_env", "genome",
-           "PART", "PART_NAMES", "PART_COST", "GEN_BUDGET", "STATUS",
+           "PART", "PART_NAMES", "PART_COST", "GEN_BUDGET", "STATUS", "VIS", "VIS_STYLES", "DEFAULT_VIS",
            "FRONT", "RIGHT", "BACK", "LEFT"]

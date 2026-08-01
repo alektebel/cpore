@@ -32,6 +32,11 @@ PART_COST = (0, 5, 10, 16, 5, 10, 16, 9, 20, 14, 6)
 GEN_BUDGET = (30, 55, 85, 125)
 STATUS = ("running", "dead", "evolved", "timeout")
 
+# render styles; index == the CP_VIS_* enum value
+VIS_STYLES = ("abyss", "dmg", "neon", "petri", "c64")
+VIS = {n: i for i, n in enumerate(VIS_STYLES)}
+DEFAULT_VIS = "petri"
+
 # angle units: 0..255 clockwise from the front of the cell
 FRONT, RIGHT, BACK, LEFT = 0, 64, 128, 192
 
@@ -83,6 +88,9 @@ def _load(path=None):
     lib.cp_env_world.argtypes = [c_void_p]
     lib.cp_env_world.restype = c_void_p
     lib.cp_render.argtypes = [c_void_p, c_void_p, c_int32, c_int32]
+    lib.cp_render_styled.argtypes = [c_void_p, c_void_p, c_int32, c_int32, c_int32]
+    lib.cp_vis_name.argtypes = [c_int32]
+    lib.cp_vis_name.restype = c_char_p
     lib.cp_png_write.argtypes = [c_char_p, c_void_p, c_int32, c_int32]
     lib.cp_png_write.restype = c_int32
     lib.cp_policy_greedy.argtypes = [c_void_p, POINTER(c_float)]
@@ -104,7 +112,8 @@ class CporeEnv:
 
     metadata = {"render_modes": ["rgb_array"]}
 
-    def __init__(self, seed: int = 0, parts=None, render_size=(1280, 720)):
+    def __init__(self, seed: int = 0, parts=None, render_size=(1280, 720),
+                 vis=DEFAULT_VIS):
         self._lib = lib()
         self.obs_dim = int(self._lib.cp_env_obs_dim())
         self.act_dim = int(self._lib.cp_env_act_dim())
@@ -124,6 +133,7 @@ class CporeEnv:
         self.default_parts = parts
         self._gbuf = (c_int32 * (self.max_parts * 2))()
         self.render_size = render_size
+        self.vis = vis
         self._fb = None
         self._seed = seed
 
@@ -225,20 +235,24 @@ class CporeEnv:
             return "evolved" if self._obs[3] >= 1.0 else "dead"
         return "truncated" if self._trunc.value else "running"
 
-    def render(self):
+    def _draw(self, vis=None):
         w, h = self.render_size
         if self._fb is None:
             self._fb = ctypes.create_string_buffer(w * h * 4)
-        self._lib.cp_render(self._lib.cp_env_world(self._h), self._fb, w, h)
+        v = vis if vis is not None else self.vis
+        if isinstance(v, str):
+            v = VIS[v]
+        self._lib.cp_render_styled(self._lib.cp_env_world(self._h), self._fb, w, h, v)
+        return w, h
+
+    def render(self, vis=None):
+        w, h = self._draw(vis)
         if _np is not None:
             return _np.frombuffer(self._fb, dtype=_np.uint8).reshape(h, w, 4).copy()
         return self._fb.raw
 
-    def save_png(self, path: str):
-        w, h = self.render_size
-        if self._fb is None:
-            self._fb = ctypes.create_string_buffer(w * h * 4)
-        self._lib.cp_render(self._lib.cp_env_world(self._h), self._fb, w, h)
+    def save_png(self, path: str, vis=None):
+        w, h = self._draw(vis)
         if self._lib.cp_png_write(path.encode(), self._fb, w, h) != 0:
             raise IOError(f"failed to write {path}")
         return path

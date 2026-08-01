@@ -223,7 +223,16 @@ void   cp_env_genome(const CpEnv *e, int32_t *out);
 int32_t cp_env_generation(const CpEnv *e);
 
 /* ---- rendering (optional; pure function of world state) ---- */
+
+/* Visual styles. Each moves internal resolution, palette, camera scale, dither
+ * strength and outline treatment together - they are not palette swaps. */
+enum { CP_VIS_ABYSS = 0, CP_VIS_DMG, CP_VIS_NEON, CP_VIS_PETRI, CP_VIS_C64,
+       CP_VIS_COUNT };
+const char *cp_vis_name(int style);
+
 void cp_render(const CpWorld *w, uint8_t *rgba, int width, int height);
+void cp_render_styled(const CpWorld *w, uint8_t *rgba, int width, int height,
+                      int style);
 int  cp_png_write(const char *path, const uint8_t *rgba, int width, int height);
 
 #ifdef __cplusplus
