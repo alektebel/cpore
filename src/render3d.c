@@ -237,7 +237,17 @@ typedef struct {
     float k;           /* blend radius when merged into the body   */
     V3    col;
     float em;
+    float body;        /* 1 for trunk, 0 for appendages - only the trunk
+                        * carries the pattern genes */
 } Prim;
+
+/* everything the shader needs about a creature that is not geometry */
+typedef struct {
+    V3    base, mark;  /* body colour and pattern colour */
+    int   pattern;
+    float freq;
+    V3    origin, fwd, right, up;
+} Skin;
 
 static V3 part_albedo(int t, float *emissive)
 {
@@ -265,16 +275,18 @@ static void basis3(float yaw, float pitch, V3 *fwd, V3 *right, V3 *up)
 }
 
 static void push(Prim *out, int *n, V3 a, V3 b, float ra, float rb,
-                 float k, V3 col, float em)
+                 float k, V3 col, float em, float body)
 {
     if (*n >= MAX_PRIM) return;
     Prim *p = &out[(*n)++];
-    p->a = a; p->b = b; p->ra = ra; p->rb = rb; p->k = k; p->col = col; p->em = em;
+    p->a = a; p->b = b; p->ra = ra; p->rb = rb; p->k = k;
+    p->col = col; p->em = em; p->body = body;
 }
 
 /* Build the body in world space. Shared by both the ray-marched and the
  * impostor path, so near and far creatures are the same animal. */
-static int build_prims(const Cp3Fish *f, int is_player, Prim *out, V3 *centre, float *bound)
+static int build_prims(const Cp3Fish *f, int is_player, Prim *out,
+                       V3 *centre, float *bound, Skin *skin)
 {
     V3 fwd, right, up;
     basis3(f->yaw, f->pitch, &fwd, &right, &up);
@@ -283,33 +295,48 @@ static int build_prims(const Cp3Fish *f, int is_player, Prim *out, V3 *centre, f
     float R = f->s.radius;
     float L = f->s.length;
 
-    /* Lineage colour: descendants keep their founder's tint, so a successful
-     * family reads as one hue spreading through the shoal. */
-    static const float LIN[6][3] = {
-        { 0.86f, 0.52f, 0.30f }, { 0.42f, 0.82f, 0.44f }, { 0.72f, 0.44f, 0.86f },
-        { 0.90f, 0.78f, 0.36f }, { 0.36f, 0.66f, 0.92f }, { 0.88f, 0.40f, 0.52f },
-    };
-    const float *lc = LIN[f->lineage % 6];
-    V3 body = is_player ? v3(0.46f, 0.90f, 0.98f) : v3(lc[0], lc[1], lc[2]);
+    float base[3], mark[3];
+    cp3_genome_colour(&f->g, base, mark);
+    V3 body = v3(base[0], base[1], base[2]);
+    if (is_player) {
+        /* the agent's own animal keeps its genome's shape but is tinted toward
+         * a fixed hue, because you must be able to find yourself in a shoal */
+        body = v3(0.30f + body.x * 0.25f, 0.66f + body.y * 0.28f, 0.82f + body.z * 0.16f);
+    }
+    skin->base = body;
+    skin->mark = v3(mark[0], mark[1], mark[2]);
+    skin->pattern = f->g.pattern;
+    skin->freq = 0.02f + 0.16f * ((float)f->g.pscale / 255.0f);
+    skin->origin = cv(f->p);
+    skin->fwd = fwd; skin->right = right; skin->up = up;
+
+    /* Spine. The profile genes reshape the silhouette; arch and sweep bow it.
+     * These three are what turn one fish into eels, discs and tadpoles. */
+    float arch  = (float)f->g.arch  / 127.0f * R * 1.5f;
+    float sweep = (float)f->g.sweep / 127.0f * R * 1.2f;
 
     V3 segpos[CP3_MAX_SEG];
     float segrad[CP3_MAX_SEG];
     for (int i = 0; i < nseg; i++) {
         float t = (float)i / (float)(nseg - 1);
         float along = (0.5f - t) * L;
+        float bend = sinf(PI * t);
         float wig = sinf(f->phase - t * 2.2f) * R * 0.55f * t;
-        segpos[i] = add(add(cv(f->p), mul(fwd, along)), mul(right, wig));
-        segrad[i] = R * (0.62f + 0.40f * sinf(PI * (0.18f + 0.72f * (1.0f - t))));
+        segpos[i] = add(add(add(cv(f->p), mul(fwd, along)),
+                            mul(right, wig + sweep * bend)),
+                        mul(up, arch * bend));
+        segrad[i] = R * cp3_profile(&f->g, t);
     }
 
     int n = 0;
-    float bk = R * 0.34f;                  /* fillet along the spine */
+    float bk = R * 0.34f;
     for (int i = 0; i + 1 < nseg; i++)
-        push(out, &n, segpos[i], segpos[i + 1], segrad[i], segrad[i + 1], bk, body, 0.0f);
-    /* taper the last segment into a tail tip rather than ending on a ball */
+        push(out, &n, segpos[i], segpos[i + 1], segrad[i], segrad[i + 1],
+             bk, body, 0.0f, 1.0f);
     {
         V3 tip = add(segpos[nseg - 1], mul(fwd, -L * 0.22f));
-        push(out, &n, segpos[nseg - 1], tip, segrad[nseg - 1], R * 0.13f, bk, body, 0.0f);
+        push(out, &n, segpos[nseg - 1], tip, segrad[nseg - 1],
+             R * 0.13f, bk, body, 0.0f, 1.0f);
     }
 
     for (int i = 0; i < CP3_MAX_PARTS; i++) {
@@ -318,56 +345,60 @@ static int build_prims(const Cp3Fish *f, int is_player, Prim *out, V3 *centre, f
         int sg = f->g.part[i].seg;
         if (sg >= nseg) sg = nseg - 1;
 
-        float py = (float)f->g.part[i].yaw * (2.0f * PI / 256.0f);
-        float pp = (float)f->g.part[i].pitch * (PI / 128.0f);
-        float cy = cosf(py), sy = sinf(py), cpp = cosf(pp), spp = sinf(pp);
-        V3 ax = norm(add(add(mul(fwd, cy * cpp), mul(right, sy * cpp)), mul(up, spp)));
-
         float er;
         V3 col = part_albedo(t, &er);
-        V3 base = add(segpos[sg], mul(ax, segrad[sg] * 0.55f));
+        float sc = 0.45f + 1.45f * ((float)f->g.part[i].scale / 255.0f);
+        int copies = f->g.part[i].mirror ? 2 : 1;
 
-        switch (t) {
-        case CP3_FIN:
-        case CP3_TAIL: {
-            float span = (t == CP3_TAIL ? 1.7f : 1.25f) * R;
-            float flap = sinf(f->phase * 1.6f + (float)i) * 0.35f;
-            V3 dir = norm(add(ax, mul(up, flap)));
-            /* a membrane: wide at the root, thin at the trailing edge */
-            push(out, &n, base, add(base, mul(dir, span)),
-                 R * 0.40f, R * 0.10f, R * 0.26f, col, 0.0f);
-            break;
-        }
-        case CP3_SPIKE:
-            push(out, &n, base, add(base, mul(ax, R * 1.15f)),
-                 R * 0.30f, R * 0.03f, R * 0.16f, col, 0.0f);
-            break;
-        case CP3_JAW:
-            push(out, &n, base, add(base, mul(ax, R * 0.75f)),
-                 R * 0.46f, R * 0.20f, R * 0.22f, col, 0.0f);
-            break;
-        case CP3_EYE: {
-            /* eyes stay their own lobe - a fillet here reads as a tumour */
-            V3 e = add(base, mul(ax, R * 0.22f));
-            push(out, &n, e, e, R * 0.28f, R * 0.28f, R * 0.05f, col, 0.0f);
-            V3 pu = add(e, mul(ax, R * 0.19f));
-            push(out, &n, pu, pu, R * 0.13f, R * 0.13f, R * 0.04f,
-                 v3(0.05f, 0.06f, 0.10f), 0.0f);
-            break;
-        }
-        case CP3_LIGHT: {
-            V3 e = add(base, mul(ax, R * 0.42f));
-            push(out, &n, e, e, R * 0.24f, R * 0.24f, R * 0.10f, col, er);
-            break;
-        }
-        default:
-            push(out, &n, base, add(base, mul(ax, R * 0.28f)),
-                 R * 0.34f, R * 0.30f, R * 0.20f, col, er);
-            break;
+        for (int m = 0; m < copies; m++) {
+            int yaw_u = m ? ((256 - f->g.part[i].yaw) & 0xFF) : f->g.part[i].yaw;
+            float py = (float)yaw_u * (2.0f * PI / 256.0f);
+            float pp = (float)f->g.part[i].pitch * (PI / 128.0f);
+            float cy = cosf(py), sy = sinf(py), cpp = cosf(pp), spp = sinf(pp);
+            V3 ax = norm(add(add(mul(fwd, cy * cpp), mul(right, sy * cpp)), mul(up, spp)));
+            V3 bs = add(segpos[sg], mul(ax, segrad[sg] * 0.55f));
+
+            switch (t) {
+            case CP3_FIN:
+            case CP3_TAIL: {
+                float span = (t == CP3_TAIL ? 1.7f : 1.25f) * R * sc;
+                float flap = sinf(f->phase * 1.6f + (float)i + (float)m * 3.1f) * 0.35f;
+                V3 dir = norm(add(ax, mul(up, flap)));
+                push(out, &n, bs, add(bs, mul(dir, span)),
+                     R * 0.40f * sc, R * 0.10f * sc, R * 0.26f, col, 0.0f, 0.0f);
+                break;
+            }
+            case CP3_SPIKE:
+                push(out, &n, bs, add(bs, mul(ax, R * 1.15f * sc)),
+                     R * 0.30f * sc, R * 0.03f, R * 0.16f, col, 0.0f, 0.0f);
+                break;
+            case CP3_JAW:
+                push(out, &n, bs, add(bs, mul(ax, R * 0.75f * sc)),
+                     R * 0.46f * sc, R * 0.20f * sc, R * 0.22f, col, 0.0f, 0.0f);
+                break;
+            case CP3_EYE: {
+                V3 e = add(bs, mul(ax, R * 0.22f));
+                float er2 = R * 0.28f * (0.7f + 0.5f * sc);
+                push(out, &n, e, e, er2, er2, R * 0.05f, col, 0.0f, 0.0f);
+                V3 pu = add(e, mul(ax, er2 * 0.68f));
+                push(out, &n, pu, pu, er2 * 0.46f, er2 * 0.46f, R * 0.04f,
+                     v3(0.05f, 0.06f, 0.10f), 0.0f, 0.0f);
+                break;
+            }
+            case CP3_LIGHT: {
+                V3 e = add(bs, mul(ax, R * 0.42f));
+                float lr = R * 0.24f * sc;
+                push(out, &n, e, e, lr, lr, R * 0.10f, col, er, 0.0f);
+                break;
+            }
+            default:
+                push(out, &n, bs, add(bs, mul(ax, R * 0.28f * sc)),
+                     R * 0.34f * sc, R * 0.30f * sc, R * 0.20f, col, er, 0.0f);
+                break;
+            }
         }
     }
 
-    /* bounding sphere, so the marcher can skip straight to the body */
     V3 mid = cv(f->p);
     float rad = 0.0f;
     for (int i = 0; i < n; i++) {
@@ -413,11 +444,11 @@ static float smin(float a, float b, float k)
  * ball. Tracking the true minimum alongside and refusing to blend more than
  * one fillet's worth below it keeps the field honest no matter how many parts
  * a genome piles on. */
-static float creature_sdf(const Prim *pr, int n, V3 q, V3 *col, float *em)
+static float creature_sdf(const Prim *pr, int n, V3 q, V3 *col, float *em, float *bodyw)
 {
     float d = 1e9f, dmin = 1e9f, kmax = 0.0f;
     V3 c = v3(0, 0, 0);
-    float e = 0.0f, wsum = 1e-6f;
+    float e = 0.0f, bw = 0.0f, wsum = 1e-6f;
     for (int i = 0; i < n; i++) {
         float di = sd_cone(q, &pr[i]);
         if (di < dmin) dmin = di;
@@ -427,23 +458,54 @@ static float creature_sdf(const Prim *pr, int n, V3 q, V3 *col, float *em)
             float w = expf(-di * 0.30f);
             c = add(c, mul(pr[i].col, w));
             e += pr[i].em * w;
+            bw += pr[i].body * w;
             wsum += w;
         }
     }
     if (col) { *col = mul(c, 1.0f / wsum); *em = e / wsum; }
+    if (bodyw) *bodyw = bw / wsum;
     float floor_d = dmin - kmax * 0.55f;
     return d < floor_d ? floor_d : d;
+}
+
+/* Markings, applied only where the surface is trunk rather than appendage.
+ * Colour carries as much perceived variety as shape, and quantising to 32
+ * colours punishes gradients, so the patterns are deliberately crisp. */
+static V3 apply_pattern(const Skin *sk, V3 q, V3 albedo, float bodyw)
+{
+    if (bodyw <= 0.02f || sk->pattern == CP3_PAT_PLAIN) return albedo;
+    V3 d = sub(q, sk->origin);
+    float along = dot(d, sk->fwd), side = dot(d, sk->right), vert = dot(d, sk->up);
+    float m = 0.0f;
+    switch (sk->pattern) {
+    case CP3_PAT_BANDS:
+        m = sinf(along * sk->freq * 6.0f) > 0.15f ? 1.0f : 0.0f;
+        break;
+    case CP3_PAT_SPOTS:
+        m = (sinf(along * sk->freq * 5.0f) * sinf(side * sk->freq * 5.0f)
+           * sinf(vert * sk->freq * 5.0f)) > 0.30f ? 1.0f : 0.0f;
+        break;
+    case CP3_PAT_COUNTER:
+        /* dark back, pale belly - the near-universal fish pattern */
+        m = clampf(0.5f + vert * 0.16f, 0.0f, 1.0f);
+        break;
+    default: break;
+    }
+    m *= bodyw;
+    return v3(mixf(albedo.x, sk->mark.x, m),
+              mixf(albedo.y, sk->mark.y, m),
+              mixf(albedo.z, sk->mark.z, m));
 }
 
 static V3 sdf_normal(const Prim *pr, int n, V3 q)
 {
     const float h = 0.35f;
-    float dx = creature_sdf(pr, n, v3(q.x + h, q.y, q.z), NULL, NULL)
-             - creature_sdf(pr, n, v3(q.x - h, q.y, q.z), NULL, NULL);
-    float dy = creature_sdf(pr, n, v3(q.x, q.y + h, q.z), NULL, NULL)
-             - creature_sdf(pr, n, v3(q.x, q.y - h, q.z), NULL, NULL);
-    float dz = creature_sdf(pr, n, v3(q.x, q.y, q.z + h), NULL, NULL)
-             - creature_sdf(pr, n, v3(q.x, q.y, q.z - h), NULL, NULL);
+    float dx = creature_sdf(pr, n, v3(q.x + h, q.y, q.z), NULL, NULL, NULL)
+             - creature_sdf(pr, n, v3(q.x - h, q.y, q.z), NULL, NULL, NULL);
+    float dy = creature_sdf(pr, n, v3(q.x, q.y + h, q.z), NULL, NULL, NULL)
+             - creature_sdf(pr, n, v3(q.x, q.y - h, q.z), NULL, NULL, NULL);
+    float dz = creature_sdf(pr, n, v3(q.x, q.y, q.z + h), NULL, NULL, NULL)
+             - creature_sdf(pr, n, v3(q.x, q.y, q.z - h), NULL, NULL, NULL);
     return norm(v3(dx, dy, dz));
 }
 
@@ -465,7 +527,8 @@ static void shade_hit(Ctx *c, int x, int y, V3 q, V3 nrm, V3 albedo, float em, f
 
 /* ---------------- ray-marched path ---------------- */
 
-static void march_creature(Ctx *c, const Prim *pr, int n, V3 centre, float bound)
+static void march_creature(Ctx *c, const Prim *pr, int n, V3 centre, float bound,
+                           const Skin *sk)
 {
     /* project the bounding sphere to a screen rect */
     V3 d = sub(centre, c->eye);
@@ -506,7 +569,7 @@ static void march_creature(Ctx *c, const Prim *pr, int n, V3 centre, float bound
             V3 q = v3(0, 0, 0);
             for (int i = 0; i < 64 && t < tmax; i++) {
                 q = add(c->eye, mul(ray, t));
-                float dist = creature_sdf(pr, n, q, NULL, NULL);
+                float dist = creature_sdf(pr, n, q, NULL, NULL, NULL);
                 if (dist < 0.12f) { hit = 1; break; }
                 t += dist * 0.8f;      /* the cone SDF is approximate */
             }
@@ -516,8 +579,9 @@ static void march_creature(Ctx *c, const Prim *pr, int n, V3 centre, float bound
             if (hz >= *zp) continue;
             *zp = hz;
 
-            V3 albedo; float em;
-            creature_sdf(pr, n, q, &albedo, &em);
+            V3 albedo; float em, bw;
+            creature_sdf(pr, n, q, &albedo, &em, &bw);
+            albedo = apply_pattern(sk, q, albedo, bw);
             shade_hit(c, x, y, q, sdf_normal(pr, n, q), albedo, em, hz);
         }
     }
@@ -546,9 +610,10 @@ static void impostor_creature(Ctx *c, const Prim *pr, int n)
 static void draw_creature(Ctx *c, const Cp3Fish *f, int is_player)
 {
     Prim pr[MAX_PRIM];
+    Skin sk;
     V3 centre;
     float bound;
-    int n = build_prims(f, is_player, pr, &centre, &bound);
+    int n = build_prims(f, is_player, pr, &centre, &bound, &sk);
     if (n <= 0) return;
 
     V3 d = sub(centre, c->eye);
@@ -556,7 +621,7 @@ static void draw_creature(Ctx *c, const Cp3Fish *f, int is_player)
     if (vz < 8.0f) return;
     float px = c->focal * bound / vz;
 
-    if (px >= MARCH_MIN_PX) march_creature(c, pr, n, centre, bound);
+    if (px >= MARCH_MIN_PX) march_creature(c, pr, n, centre, bound, &sk);
     else                    impostor_creature(c, pr, n);
 }
 
@@ -710,4 +775,62 @@ void cp3_render_styled(const Cp3World *w, uint8_t *rgba, int OW, int OH, int sty
 void cp3_render(const Cp3World *w, uint8_t *rgba, int W, int H)
 {
     cp3_render_styled(w, rgba, W, H, CP_VIS_ABYSS);
+}
+
+
+/* ---------------- portrait ----------------
+ * A genome space is only as good as the variety you can see in it, so this
+ * renders one creature side-on with nothing else in frame. */
+void cp3_render_portrait(const Cp3Genome *g, uint8_t *fb, int lw, int lh,
+                         int style, uint32_t seed)
+{
+    float *zb = (float *)malloc(sizeof(float) * (size_t)lw * lh);
+    if (!zb) return;
+
+    Cp3Fish f;
+    memset(&f, 0, sizeof(f));
+    f.g = *g;
+    cp3_genome_stats(&f.g, &f.s);
+    f.hp = f.hp_max = f.s.hp_max;
+    f.alive = 1;
+    f.p.x = 0.0f; f.p.y = 120.0f; f.p.z = 0.0f;
+    f.yaw = 0.0f;
+    f.pitch = -0.06f;
+    f.phase = (float)(seed % 128) * 0.05f;
+    f.lineage = (uint8_t)(seed % 6);
+
+    Prim pr[MAX_PRIM];
+    Skin sk;
+    V3 centre;
+    float bound;
+    int n = build_prims(&f, 0, pr, &centre, &bound, &sk);
+
+    Ctx c;
+    c.fb = fb; c.zb = zb; c.W = lw; c.H = lh;
+    c.focal = (float)lw * 1.15f;
+    /* three-quarter view: straight side-on hides everything mounted fore
+     * and aft, which is most of what the genome varies */
+    V3 dir = norm(v3(-0.62f, -0.30f, 0.72f));
+    float dist = bound * 2.15f + 6.0f;
+    c.eye = add(centre, mul(dir, dist));
+    V3 look = norm(sub(centre, c.eye));
+    c.fwd = look;
+    c.right = norm(v3(-look.z, 0.0f, look.x));
+    c.up = norm(v3(c.right.z * look.y - c.right.y * look.z,
+                   c.right.x * look.z - c.right.z * look.x,
+                   c.right.y * look.x - c.right.x * look.y));
+
+    for (int y = 0; y < lh; y++) {
+        float t = (float)y / (float)lh;
+        V3 bg = v3(mixf(0.030f, 0.075f, t), mixf(0.100f, 0.170f, t),
+                   mixf(0.150f, 0.215f, t));
+        for (int x = 0; x < lw; x++) {
+            put(&c, x, y, bg);
+            zb[(size_t)y * lw + x] = 1e30f;
+        }
+    }
+
+    march_creature(&c, pr, n, centre, bound, &sk);
+    cp_vis_quantise(fb, lw, lh, style);
+    free(zb);
 }

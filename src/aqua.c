@@ -340,18 +340,23 @@ static float bite_damage(const Cp3Fish *f, Cp3Vec dir)
     for (int i = 0; i < CP3_MAX_PARTS; i++) {
         int t = f->g.part[i].type;
         if (t != CP3_JAW && t != CP3_SPIKE) continue;
-        float py = (float)f->g.part[i].yaw * (2.0f * PI / 256.0f);
-        float pp = (float)f->g.part[i].pitch * (PI / 128.0f);
-        /* the part's own axis, in world space */
-        float cy = cosf(py), sy = sinf(py), cp = cosf(pp), sp = sinf(pp);
-        Cp3Vec ax = v3(fwd.x * cy * cp + right.x * sy * cp + up.x * sp,
-                       fwd.y * cy * cp + right.y * sy * cp + up.y * sp,
-                       fwd.z * cy * cp + right.z * sy * cp + up.z * sp);
-        float c = v3dot(ax, dir);
-        float arc = (t == CP3_JAW) ? 0.62f : 0.75f;   /* cos threshold */
-        if (c < arc) continue;
-        float fall = 0.55f + 0.45f * (c - arc) / (1.0f - arc);
-        dmg += (t == CP3_JAW ? f->s.bite : f->s.spike_dmg) * fall;
+        float scale = 0.45f + 1.45f * ((float)f->g.part[i].scale / 255.0f);
+        /* a mirrored gene is two real weapons, one on each flank */
+        int copies = f->g.part[i].mirror ? 2 : 1;
+        for (int m = 0; m < copies; m++) {
+            int yaw_u = m ? ((256 - f->g.part[i].yaw) & 0xFF) : f->g.part[i].yaw;
+            float py = (float)yaw_u * (2.0f * PI / 256.0f);
+            float pp = (float)f->g.part[i].pitch * (PI / 128.0f);
+            float cy = cosf(py), sy = sinf(py), cp = cosf(pp), sp = sinf(pp);
+            Cp3Vec ax = v3(fwd.x * cy * cp + right.x * sy * cp + up.x * sp,
+                           fwd.y * cy * cp + right.y * sy * cp + up.y * sp,
+                           fwd.z * cy * cp + right.z * sy * cp + up.z * sp);
+            float c = v3dot(ax, dir);
+            float arc = (t == CP3_JAW) ? 0.62f : 0.75f;   /* cos threshold */
+            if (c < arc) continue;
+            float fall = 0.55f + 0.45f * (c - arc) / (1.0f - arc);
+            dmg += (t == CP3_JAW ? f->s.bite : f->s.spike_dmg) * fall * scale;
+        }
     }
     return dmg;
 }

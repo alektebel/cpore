@@ -14,7 +14,7 @@ static const char *STYLES[CP3_STYLE_COUNT] = { "grazer", "hunter", "diver" };
 int main(int argc, char **argv)
 {
     uint32_t seed = 3;
-    int steps = 2400, W = 1280, H = 720, every = 0, vis = CP_VIS_ABYSS;
+    int steps = 2400, W = 1280, H = 720, every = 0, vis = CP_VIS_ABYSS, gallery = 0;
     const char *out = "aqua.png";
     Cp3Genome g;
     cp3_genome_starter(&g);
@@ -25,6 +25,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--steps") && i + 1 < argc) steps = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--out") && i + 1 < argc)   out = argv[++i];
         else if (!strcmp(argv[i], "--every") && i + 1 < argc) every = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--gallery") && i + 1 < argc) gallery = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--size") && i + 1 < argc)  sscanf(argv[++i], "%dx%d", &W, &H);
         else if (!strcmp(argv[i], "--vis") && i + 1 < argc) {
             const char *nm = argv[++i];
@@ -46,6 +47,42 @@ int main(int argc, char **argv)
                    "                  [--vis NAME] [--list-parts]\n");
             return 1;
         }
+    }
+
+    /* --gallery: a contact sheet of random genomes, so the variety the design
+     * space actually produces can be judged rather than assumed. */
+    if (gallery > 0) {
+        const int cols = 4, rows = 2;
+        const int tw = W / cols, th = H / rows;
+        const int lw = tw / 4, lh = th / 4;
+        uint8_t *tile = (uint8_t *)malloc((size_t)lw * lh * 4);
+        uint8_t *fb2 = (uint8_t *)malloc((size_t)W * H * 4);
+        if (!tile || !fb2) { fprintf(stderr, "oom\n"); return 1; }
+        memset(fb2, 0, (size_t)W * H * 4);
+        CpRng rng;
+        cp_rng_seed(&rng, seed);
+        for (int i = 0; i < cols * rows; i++) {
+            Cp3Genome rg;
+            cp3_genome_random(&rg, &rng, CP3_GEN_BUDGET[gallery - 1 < 0 ? 0 :
+                              (gallery - 1 < CP3_GENERATIONS ? gallery - 1 : CP3_GENERATIONS - 1)]);
+            cp3_render_portrait(&rg, tile, lw, lh, vis, (uint32_t)(seed + i * 7919));
+            int ox = (i % cols) * tw, oy = (i / cols) * th;
+            for (int y = 0; y < th; y++) {
+                for (int x = 0; x < tw; x++) {
+                    const uint8_t *sp = tile + 4 * ((size_t)(y / 4) * lw + (x / 4));
+                    uint8_t *dp = fb2 + 4 * ((size_t)(oy + y) * W + (ox + x));
+                    dp[0] = sp[0]; dp[1] = sp[1]; dp[2] = sp[2]; dp[3] = 255;
+                }
+            }
+            Cp3Stats st;
+            cp3_genome_stats(&rg, &st);
+            printf("  %d: %3d dna  %2d parts  %d seg  pattern %d\n",
+                   i, cp3_genome_cost(&rg), st.n_parts, rg.nseg, rg.pattern);
+        }
+        if (cp_png_write(out, fb2, W, H) != 0) { fprintf(stderr, "png failed\n"); return 1; }
+        printf("gallery -> %s\n", out);
+        free(tile); free(fb2);
+        return 0;
     }
 
     Cp3World *w = (Cp3World *)malloc(sizeof(Cp3World));

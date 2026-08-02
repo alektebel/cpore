@@ -40,12 +40,57 @@ void cp3_genome_clear(Cp3Genome *g)
     memset(g, 0, sizeof(*g));
     g->nseg = 3;
     g->girth = 128;
+    g->prof[0] = 110; g->prof[1] = 190; g->prof[2] = 150; g->prof[3] = 70;
+    g->hue = 130; g->hue2 = 30; g->sat = 150; g->val = 190;
+    g->pattern = CP3_PAT_PLAIN; g->pscale = 120;
+}
+
+/* Catmull-Rom-ish blend across the four profile stations. Smooth, so a
+ * mutation to one station bulges the body rather than creating a step. */
+float cp3_profile(const Cp3Genome *g, float t)
+{
+    if (t < 0.0f) t = 0.0f;
+    if (t > 1.0f) t = 1.0f;
+    float x = t * 3.0f;
+    int i = (int)x;
+    if (i > 2) i = 2;
+    float f = x - (float)i;
+    float a = (float)g->prof[i] / 255.0f, b = (float)g->prof[i + 1] / 255.0f;
+    float sm = f * f * (3.0f - 2.0f * f);          /* smoothstep the segment */
+    return 0.30f + 1.50f * (a + (b - a) * sm);
+}
+
+static void hsv2rgb(float h, float s, float v, float *out)
+{
+    h = h - floorf(h);
+    float i = floorf(h * 6.0f), f = h * 6.0f - i;
+    float p = v * (1.0f - s), q = v * (1.0f - f * s), t = v * (1.0f - (1.0f - f) * s);
+    switch (((int)i) % 6) {
+    case 0: out[0]=v; out[1]=t; out[2]=p; break;
+    case 1: out[0]=q; out[1]=v; out[2]=p; break;
+    case 2: out[0]=p; out[1]=v; out[2]=t; break;
+    case 3: out[0]=p; out[1]=q; out[2]=v; break;
+    case 4: out[0]=t; out[1]=p; out[2]=v; break;
+    default: out[0]=v; out[1]=p; out[2]=q; break;
+    }
+}
+
+void cp3_genome_colour(const Cp3Genome *g, float *rgb, float *rgb2)
+{
+    float s = 0.25f + 0.65f * ((float)g->sat / 255.0f);
+    float v = 0.45f + 0.52f * ((float)g->val / 255.0f);
+    if (rgb)  hsv2rgb((float)g->hue / 255.0f, s, v, rgb);
+    /* the pattern colour is deliberately pushed apart in value as well as hue,
+     * or the markings vanish the moment the palette quantises */
+    if (rgb2) hsv2rgb((float)g->hue2 / 255.0f, s * 0.9f,
+                      v > 0.62f ? v * 0.48f : v * 1.75f, rgb2);
 }
 
 int cp3_genome_cost(const Cp3Genome *g)
 {
     int c = 0;
-    for (int i = 0; i < CP3_MAX_PARTS; i++) c += cp3_part_cost(g->part[i].type);
+    for (int i = 0; i < CP3_MAX_PARTS; i++)
+        c += cp3_part_cost(g->part[i].type) * (g->part[i].mirror ? 2 : 1);
     /* a longer body is itself an investment */
     c += (g->nseg > 2 ? (g->nseg - 2) * 4 : 0);
     return c;
@@ -68,10 +113,10 @@ void cp3_genome_starter(Cp3Genome *g)
     cp3_genome_clear(g);
     g->nseg = 3;
     g->girth = 120;
-    g->part[0].type = CP3_FILTER; g->part[0].seg = 0; g->part[0].yaw = 0;   g->part[0].pitch = 0;
-    g->part[1].type = CP3_TAIL;   g->part[1].seg = 2; g->part[1].yaw = 128; g->part[1].pitch = 0;
-    g->part[2].type = CP3_FIN;    g->part[2].seg = 1; g->part[2].yaw = 64;  g->part[2].pitch = 0;
-    g->part[3].type = CP3_FIN;    g->part[3].seg = 1; g->part[3].yaw = 192; g->part[3].pitch = 0;
+    g->part[0].type = CP3_FILTER; g->part[0].seg = 0; g->part[0].yaw = 0;   g->part[0].scale = 128;
+    g->part[1].type = CP3_TAIL;   g->part[1].seg = 2; g->part[1].yaw = 128; g->part[1].scale = 128;
+    g->part[2].type = CP3_FIN;    g->part[2].seg = 1; g->part[2].yaw = 64;  g->part[2].scale = 128;
+    g->part[2].mirror = 1;                          /* one gene, a pair of fins */
 }
 
 void cp3_genome_normalise(Cp3Genome *g, int budget)
@@ -138,11 +183,22 @@ void cp3_genome_random(Cp3Genome *g, CpRng *r, int budget)
     g->girth = (uint8_t)(60 + cp_rng_int(r, 180));
     for (int i = 0; i < CP3_MAX_PARTS; i++) {
         if (cp_rng_f(r) < 0.30f) continue;
-        g->part[i].type  = (uint8_t)(1 + cp_rng_int(r, CP3_PART_COUNT - 1));
-        g->part[i].seg   = (uint8_t)cp_rng_int(r, g->nseg);
-        g->part[i].yaw   = (uint8_t)cp_rng_int(r, 256);
-        g->part[i].pitch = (int8_t)(cp_rng_int(r, 128) - 64);
+        g->part[i].type   = (uint8_t)(1 + cp_rng_int(r, CP3_PART_COUNT - 1));
+        g->part[i].seg    = (uint8_t)cp_rng_int(r, g->nseg);
+        g->part[i].yaw    = (uint8_t)cp_rng_int(r, 256);
+        g->part[i].pitch  = (int8_t)(cp_rng_int(r, 128) - 64);
+        g->part[i].scale  = (uint8_t)cp_rng_int(r, 256);
+        g->part[i].mirror = (uint8_t)(cp_rng_f(r) < 0.45f);
     }
+    for (int i = 0; i < 4; i++) g->prof[i] = (uint8_t)cp_rng_int(r, 256);
+    g->arch  = (int8_t)(cp_rng_int(r, 128) - 64);
+    g->sweep = (int8_t)(cp_rng_int(r, 96) - 48);
+    g->hue   = (uint8_t)cp_rng_int(r, 256);
+    g->hue2  = (uint8_t)cp_rng_int(r, 256);
+    g->sat   = (uint8_t)(60 + cp_rng_int(r, 196));
+    g->val   = (uint8_t)(70 + cp_rng_int(r, 186));
+    g->pattern = (uint8_t)cp_rng_int(r, CP3_PAT_COUNT);
+    g->pscale  = (uint8_t)(40 + cp_rng_int(r, 216));
     cp3_genome_normalise(g, budget);
 }
 
@@ -158,20 +214,41 @@ void cp3_genome_mutate(Cp3Genome *g, CpRng *r, int budget, float rate)
     if (cp_rng_f(r) < rate)
         g->girth = (uint8_t)(g->girth + cp_rng_int(r, 41) - 20);
 
+    /* Shape and colour drift every generation. These are what make a lineage
+     * recognisable and a population varied; without them every fish is the
+     * same silhouette in one of six tints. */
+    for (int i = 0; i < 4; i++)
+        if (cp_rng_f(r) < rate)
+            g->prof[i] = (uint8_t)(g->prof[i] + cp_rng_int(r, 61) - 30);
+    if (cp_rng_f(r) < rate) g->arch  = (int8_t)(g->arch + cp_rng_int(r, 33) - 16);
+    if (cp_rng_f(r) < rate) g->sweep = (int8_t)(g->sweep + cp_rng_int(r, 25) - 12);
+    if (cp_rng_f(r) < rate) g->hue   = (uint8_t)(g->hue + cp_rng_int(r, 25) - 12);
+    if (cp_rng_f(r) < rate * 0.6f) g->hue2 = (uint8_t)(g->hue2 + cp_rng_int(r, 41) - 20);
+    if (cp_rng_f(r) < rate * 0.6f) g->sat  = (uint8_t)(g->sat + cp_rng_int(r, 41) - 20);
+    if (cp_rng_f(r) < rate * 0.6f) g->val  = (uint8_t)(g->val + cp_rng_int(r, 41) - 20);
+    if (cp_rng_f(r) < rate * 0.3f) g->pattern = (uint8_t)cp_rng_int(r, CP3_PAT_COUNT);
+    if (cp_rng_f(r) < rate * 0.5f) g->pscale = (uint8_t)(g->pscale + cp_rng_int(r, 61) - 30);
+
     for (int i = 0; i < CP3_MAX_PARTS; i++) {
         if (cp_rng_f(r) >= rate) continue;
         float roll = cp_rng_f(r);
         if (g->part[i].type == CP3_NONE) {
             if (roll < 0.55f) {              /* gain a part */
-                g->part[i].type  = (uint8_t)(1 + cp_rng_int(r, CP3_PART_COUNT - 1));
-                g->part[i].seg   = (uint8_t)cp_rng_int(r, g->nseg ? g->nseg : 1);
-                g->part[i].yaw   = (uint8_t)cp_rng_int(r, 256);
-                g->part[i].pitch = (int8_t)(cp_rng_int(r, 128) - 64);
+                g->part[i].type   = (uint8_t)(1 + cp_rng_int(r, CP3_PART_COUNT - 1));
+                g->part[i].seg    = (uint8_t)cp_rng_int(r, g->nseg ? g->nseg : 1);
+                g->part[i].yaw    = (uint8_t)cp_rng_int(r, 256);
+                g->part[i].pitch  = (int8_t)(cp_rng_int(r, 128) - 64);
+                g->part[i].scale  = (uint8_t)cp_rng_int(r, 256);
+                g->part[i].mirror = (uint8_t)(cp_rng_f(r) < 0.45f);
             }
-        } else if (roll < 0.18f) {           /* lose a part */
+        } else if (roll < 0.16f) {           /* lose a part */
             g->part[i].type = CP3_NONE;
-        } else if (roll < 0.42f) {           /* swap what it is */
+        } else if (roll < 0.34f) {           /* swap what it is */
             g->part[i].type = (uint8_t)(1 + cp_rng_int(r, CP3_PART_COUNT - 1));
+        } else if (roll < 0.46f) {           /* gain or lose the mirrored twin */
+            g->part[i].mirror = (uint8_t)(!g->part[i].mirror);
+        } else if (roll < 0.68f) {           /* resize it */
+            g->part[i].scale = (uint8_t)(g->part[i].scale + cp_rng_int(r, 81) - 40);
         } else {                             /* move it */
             g->part[i].seg   = (uint8_t)cp_rng_int(r, g->nseg ? g->nseg : 1);
             g->part[i].yaw   = (uint8_t)(g->part[i].yaw + cp_rng_int(r, 65) - 32);
@@ -221,36 +298,44 @@ void cp3_genome_autodesign(Cp3Genome *g, CpRng *r, int budget, int style)
     g->girth = 120;
     spent += 4;                      /* the third segment */
 
-    #define BUY(TYPE, SEG, YAW, PITCH)                                        \
+    /* paired placements are bought as one mirrored gene, at double cost */
+    #define BUYM(TYPE, SEG, YAW, PITCH, MIR)                                  \
         do {                                                                  \
-            if (slot < CP3_MAX_PARTS && spent + cp3_part_cost(TYPE) <= budget) { \
+            int _c = cp3_part_cost(TYPE) * ((MIR) ? 2 : 1);                   \
+            if (slot < CP3_MAX_PARTS && spent + _c <= budget) {               \
                 g->part[slot].type = (uint8_t)(TYPE);                         \
                 g->part[slot].seg = (uint8_t)(SEG);                           \
                 g->part[slot].yaw = (uint8_t)(YAW);                           \
                 g->part[slot].pitch = (int8_t)(PITCH);                        \
-                spent += cp3_part_cost(TYPE);                                 \
+                g->part[slot].scale = 128;                                    \
+                g->part[slot].mirror = (uint8_t)(MIR);                        \
+                spent += _c;                                                  \
                 slot++;                                                       \
             }                                                                 \
         } while (0)
+    #define BUY(TYPE, SEG, YAW, PITCH) BUYM(TYPE, SEG, YAW, PITCH, 0)
 
     switch (style % CP3_STYLE_COUNT) {
     case CP3_STYLE_HUNTER:
+        g->prof[0] = 95; g->prof[1] = 205; g->prof[2] = 130; g->prof[3] = 45;
+        g->hue = 12; g->hue2 = 200; g->sat = 170; g->val = 175;
+        g->pattern = CP3_PAT_COUNTER; g->pscale = 110;
         BUY(CP3_JAW, 0, 0, 0);
         BUY(CP3_TAIL, 2, 128, 0);
-        BUY(CP3_FIN, 1, 64, 0);
-        BUY(CP3_FIN, 1, 192, 0);
-        BUY(CP3_EYE, 0, 40, 20);
-        BUY(CP3_EYE, 0, 216, 20);
+        BUYM(CP3_FIN, 1, 64, 0, 1);
+        BUYM(CP3_EYE, 0, 40, 20, 1);
         BUY(CP3_SPIKE, 1, 0, -40);
         BUY(CP3_TAIL, 2, 128, 30);
         BUY(CP3_PLATE, 1, 128, 0);
         BUY(CP3_SPIKE, 2, 0, 40);
         break;
     case CP3_STYLE_DIVER:
+        g->prof[0] = 150; g->prof[1] = 175; g->prof[2] = 165; g->prof[3] = 60;
+        g->hue = 175; g->hue2 = 130; g->sat = 120; g->val = 120;
+        g->pattern = CP3_PAT_SPOTS; g->pscale = 190;
         BUY(CP3_FILTER, 0, 0, 0);
         BUY(CP3_TAIL, 2, 128, 0);
-        BUY(CP3_FIN, 1, 64, 0);
-        BUY(CP3_FIN, 1, 192, 0);
+        BUYM(CP3_FIN, 1, 64, 0, 1);
         BUY(CP3_LUNG, 1, 128, 0);
         BUY(CP3_LIGHT, 0, 0, -50);   /* a lamp on the brow */
         BUY(CP3_EYE, 0, 40, 20);
@@ -259,10 +344,12 @@ void cp3_genome_autodesign(Cp3Genome *g, CpRng *r, int budget, int style)
         BUY(CP3_JAW, 0, 0, 0);
         break;
     default: /* grazer */
+        g->prof[0] = 120; g->prof[1] = 215; g->prof[2] = 175; g->prof[3] = 55;
+        g->hue = 95; g->hue2 = 35; g->sat = 165; g->val = 205;
+        g->pattern = CP3_PAT_BANDS; g->pscale = 130;
         BUY(CP3_FILTER, 0, 0, 0);
         BUY(CP3_TAIL, 2, 128, 0);
-        BUY(CP3_FIN, 1, 64, 0);
-        BUY(CP3_FIN, 1, 192, 0);
+        BUYM(CP3_FIN, 1, 64, 0, 1);
         BUY(CP3_FILTER, 0, 0, 30);
         BUY(CP3_EYE, 0, 40, 20);
         BUY(CP3_FIN, 2, 128, 60);
@@ -272,6 +359,7 @@ void cp3_genome_autodesign(Cp3Genome *g, CpRng *r, int budget, int style)
         break;
     }
     #undef BUY
+    #undef BUYM
 
     if (r) {
         for (int i = 0; i < CP3_MAX_PARTS; i++)
@@ -286,7 +374,10 @@ void cp3_genome_stats(const Cp3Genome *g, Cp3Stats *o)
     memset(o, 0, sizeof(*o));
     for (int i = 0; i < CP3_MAX_PARTS; i++) {
         int t = g->part[i].type;
-        if (t > CP3_NONE && t < CP3_PART_COUNT) { o->n[t]++; o->n_parts++; }
+        if (t <= CP3_NONE || t >= CP3_PART_COUNT) continue;
+        int mult = g->part[i].mirror ? 2 : 1;      /* a pair of fins is two fins */
+        o->n[t] = (uint8_t)(o->n[t] + mult);
+        o->n_parts = (uint8_t)(o->n_parts + mult);
     }
     o->cost = (int16_t)cp3_genome_cost(g);
     const uint8_t *n = o->n;

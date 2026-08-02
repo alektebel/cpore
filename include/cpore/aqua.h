@@ -59,16 +59,43 @@ int         cp3_part_cost(int type);
 
 typedef struct {
     uint8_t type;
-    uint8_t seg;      /* which spine segment it sits on   */
-    uint8_t yaw;      /* 0..255 around the body axis      */
-    int8_t  pitch;    /* -64..63, up/down from the flank  */
+    uint8_t seg;      /* which spine segment it sits on          */
+    uint8_t yaw;      /* 0..255 around the body axis             */
+    int8_t  pitch;    /* -64..63, up/down from the flank         */
+    uint8_t scale;    /* 0..255 -> 0.45x .. 1.9x the type's size */
+    uint8_t mirror;   /* nonzero: the part also exists at -yaw.
+                       * Bilateral symmetry is the single thing that makes a
+                       * generated body read as an animal rather than a lump,
+                       * so it is genetic, and a mirrored part costs twice. */
 } Cp3Part;
+
+/* Pattern genome. Colour carries as much perceived variety as shape does, and
+ * it is far cheaper, so it gets its own genes and its own inheritance. */
+enum { CP3_PAT_PLAIN = 0, CP3_PAT_BANDS, CP3_PAT_SPOTS, CP3_PAT_COUNTER,
+       CP3_PAT_COUNT };
 
 typedef struct {
     Cp3Part part[CP3_MAX_PARTS];
     uint8_t nseg;     /* 2..CP3_MAX_SEG spine segments */
     uint8_t girth;    /* 0..255 -> body radius          */
+
+    /* Body profile: radius multipliers at four stations from nose to tail.
+     * One girth scalar could only make a fish fatter; four stations give
+     * eels, torpedoes, discs, tadpoles and barrels out of the same code. */
+    uint8_t prof[4];  /* 0..255 -> 0.30x .. 1.80x */
+    int8_t  arch;     /* spine bow, up/down  */
+    int8_t  sweep;    /* spine bow, sideways */
+
+    uint8_t hue, hue2;  /* base and pattern colour */
+    uint8_t sat, val;   /* saturation and lightness */
+    uint8_t pattern;    /* CP3_PAT_*  */
+    uint8_t pscale;     /* pattern frequency */
 } Cp3Genome;
+
+/* profile multiplier at t in [0,1] along the body, from the four stations */
+float cp3_profile(const Cp3Genome *g, float t);
+/* base and pattern colour as linear rgb */
+void  cp3_genome_colour(const Cp3Genome *g, float *rgb, float *rgb2);
 
 /* observation / action shape */
 #define CP3_OBS_FOOD_K   8
@@ -186,6 +213,11 @@ void    cp3_env_census(const Cp3Env *e, int32_t *counts, float *means);
 void cp3_render(const Cp3World *w, uint8_t *rgba, int width, int height);
 void cp3_render_styled(const Cp3World *w, uint8_t *rgba, int width, int height,
                        int style);
+/* Render one genome side-on against a plain ground, at the caller's
+ * resolution and already palette-quantised. Used to lay out contact sheets so
+ * the variety a genome space actually produces can be looked at directly. */
+void cp3_render_portrait(const Cp3Genome *g, uint8_t *rgba_low, int lw, int lh,
+                         int style, uint32_t seed);
 
 #ifdef __cplusplus
 }

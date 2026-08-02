@@ -37,6 +37,32 @@ to 10 parts, each mounted at **a segment index and a yaw/pitch on that
 segment** — a direction in 3D, not an angle on a circle. Bite cones, armour
 coverage and thrust are all resolved against those directions.
 
+### Every animal is different
+
+![gallery](docs/gallery.png)
+
+`./build/cpore_aqua --gallery 3 --seed 5` — eight genomes drawn at random from
+the same design space.
+
+Getting there needed the genome to carry things that actually change a
+silhouette. It used to have one `girth` scalar and a straight spine, which is
+combinatorially large and visually tiny — every fish was the same shape in one
+of six tints. It now carries:
+
+- a **four-station radius profile** along the body, which is the difference
+  between "fatter" and eels, discs, barrels and tadpoles
+- **arch and sweep**, bowing the spine up/down and sideways
+- **per-part scale**, so a fin is not always fin-sized
+- **bilateral symmetry as a gene** — a mirrored part exists on both flanks and
+  costs twice. This is the single thing that makes a generated body read as an
+  animal rather than a lump, so it is inherited, mutated and paid for.
+- a **colour genome**: base and marking hue, saturation, value, and one of
+  plain / bands / spots / countershading, at a mutable frequency
+
+Colour carries as much perceived variety as shape and is far cheaper, so it
+gets its own genes and its own inheritance. Markings are deliberately crisp
+rather than gradients, because a 32-colour palette punishes soft ramps.
+
 | part | DNA | what it does |
 | --- | --- | --- |
 | filter / jaw | 5 / 12 | plankton / meat, and bites through a cone |
