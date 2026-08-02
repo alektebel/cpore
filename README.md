@@ -46,12 +46,33 @@ coverage and thrust are all resolved against those directions.
 | lung | 10 | buoyancy control, so holding a depth stops costing thrust |
 | light | 14 | a photophore: sight the depth cannot take away |
 
-The renderer is a **sphere-impostor rasteriser with a z-buffer**: everything
-solid is a sphere, so the scene is drawn by projecting centres, rasterising
-screen-space circles and solving depth and normal per pixel. Correct occlusion
-and real lighting for about the cost of drawing circles — no triangles, no
-matrices, no clipper. Surface and seabed are analytic ray-plane intersections.
-Output goes through the same palette pipeline as stage 1.
+### Rendering bodies
+
+Creatures are a **signed distance field unioned with a smooth minimum**, ray
+marched per pixel. That one operator is the difference between a body and a
+bag of parts: `smin()` fillets every junction instead of letting primitives
+intersect as separate lobes. It also sidesteps the entire mesh pipeline — no
+triangles, no UVs, no rigging — which is exactly why it suits bodies that are
+generated rather than authored.
+
+| before: plain union, sphere impostors | after: smooth-minimum SDF |
+| --- | --- |
+| ![beads](docs/aqua_beads.png) | ![blended](docs/aqua.png) |
+
+The clamp inside `creature_sdf` is load-bearing, and the first attempt did not
+have it. Chaining `smin()` over sixteen primitives compounds its correction
+term — each union can subtract up to `k/4` — so with a generous blend radius
+the field collapses far outside the body, the marcher hits the bounding sphere
+immediately, and every animal renders as one enormous ball. Tracking the true
+minimum alongside and refusing to blend more than one fillet below it keeps the
+field honest however many parts a genome piles on.
+
+Everything else is still a **sphere impostor into a z-buffer**: centres are
+projected, screen-space circles rasterised, depth and normal solved per pixel.
+Surface and seabed are analytic ray-plane intersections. Creatures smaller than
+9 px on screen fall back to impostors, since ray marching a body costs far more
+than splatting spheres and at that size nobody can tell. A 320x180 frame costs
+roughly 40 ms. Output goes through the same palette pipeline as stage 1.
 
 ## Natural selection
 

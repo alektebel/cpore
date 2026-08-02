@@ -220,6 +220,25 @@ static void draw_water(Ctx *c, const Cp3World *w, uint32_t seed)
 
 /* ---------------- creatures ---------------- */
 
+/* A creature is a list of round cones (tapered capsules) unioned with a
+ * SMOOTH minimum rather than a plain one. That single change is what turns a
+ * body from a string of beads into one animal: smin() fillets every junction
+ * instead of letting the parts intersect as separate lobes.
+ *
+ * Ray marching this field also sidesteps the entire mesh pipeline - no
+ * triangles, no UVs, no rigging - which is exactly why it suits bodies that
+ * are generated rather than authored. */
+
+#define MAX_PRIM 44
+
+typedef struct {
+    V3    a, b;        /* axis endpoints; a == b makes it a sphere */
+    float ra, rb;      /* radius at each end                       */
+    float k;           /* blend radius when merged into the body   */
+    V3    col;
+    float em;
+} Prim;
+
 static V3 part_albedo(int t, float *emissive)
 {
     *emissive = 0.0f;
@@ -245,7 +264,17 @@ static void basis3(float yaw, float pitch, V3 *fwd, V3 *right, V3 *up)
     *up    = v3(cy * sp, -cp, sy * sp);
 }
 
-static void draw_creature(Ctx *c, const Cp3Fish *f, int is_player)
+static void push(Prim *out, int *n, V3 a, V3 b, float ra, float rb,
+                 float k, V3 col, float em)
+{
+    if (*n >= MAX_PRIM) return;
+    Prim *p = &out[(*n)++];
+    p->a = a; p->b = b; p->ra = ra; p->rb = rb; p->k = k; p->col = col; p->em = em;
+}
+
+/* Build the body in world space. Shared by both the ray-marched and the
+ * impostor path, so near and far creatures are the same animal. */
+static int build_prims(const Cp3Fish *f, int is_player, Prim *out, V3 *centre, float *bound)
 {
     V3 fwd, right, up;
     basis3(f->yaw, f->pitch, &fwd, &right, &up);
@@ -254,8 +283,6 @@ static void draw_creature(Ctx *c, const Cp3Fish *f, int is_player)
     float R = f->s.radius;
     float L = f->s.length;
 
-    /* Lineage colour: descendants of a founder keep its tint, so a successful
-     * family is visible as one colour spreading through the shoal. */
     /* Lineage colour: descendants keep their founder's tint, so a successful
      * family reads as one hue spreading through the shoal. */
     static const float LIN[6][3] = {
@@ -265,16 +292,24 @@ static void draw_creature(Ctx *c, const Cp3Fish *f, int is_player)
     const float *lc = LIN[f->lineage % 6];
     V3 body = is_player ? v3(0.46f, 0.90f, 0.98f) : v3(lc[0], lc[1], lc[2]);
 
-    /* spine, head at the front, tapering to the tail, with a swim wiggle */
     V3 segpos[CP3_MAX_SEG];
     float segrad[CP3_MAX_SEG];
     for (int i = 0; i < nseg; i++) {
-        float t = (float)i / (float)(nseg - 1);            /* 0 head .. 1 tail */
+        float t = (float)i / (float)(nseg - 1);
         float along = (0.5f - t) * L;
         float wig = sinf(f->phase - t * 2.2f) * R * 0.55f * t;
         segpos[i] = add(add(cv(f->p), mul(fwd, along)), mul(right, wig));
         segrad[i] = R * (0.62f + 0.40f * sinf(PI * (0.18f + 0.72f * (1.0f - t))));
-        sphere(c, segpos[i], segrad[i], body, 0.0f);
+    }
+
+    int n = 0;
+    float bk = R * 0.34f;                  /* fillet along the spine */
+    for (int i = 0; i + 1 < nseg; i++)
+        push(out, &n, segpos[i], segpos[i + 1], segrad[i], segrad[i + 1], bk, body, 0.0f);
+    /* taper the last segment into a tail tip rather than ending on a ball */
+    {
+        V3 tip = add(segpos[nseg - 1], mul(fwd, -L * 0.22f));
+        push(out, &n, segpos[nseg - 1], tip, segrad[nseg - 1], R * 0.13f, bk, body, 0.0f);
     }
 
     for (int i = 0; i < CP3_MAX_PARTS; i++) {
@@ -290,42 +325,239 @@ static void draw_creature(Ctx *c, const Cp3Fish *f, int is_player)
 
         float er;
         V3 col = part_albedo(t, &er);
-        V3 base = add(segpos[sg], mul(ax, segrad[sg] * 0.85f));
+        V3 base = add(segpos[sg], mul(ax, segrad[sg] * 0.55f));
 
         switch (t) {
         case CP3_FIN:
         case CP3_TAIL: {
-            /* a blade suggested by three shrinking spheres along the axis */
-            float span = (t == CP3_TAIL ? 1.5f : 1.1f) * R;
+            float span = (t == CP3_TAIL ? 1.7f : 1.25f) * R;
             float flap = sinf(f->phase * 1.6f + (float)i) * 0.35f;
             V3 dir = norm(add(ax, mul(up, flap)));
-            for (int k = 0; k < 3; k++) {
-                float u = 0.35f + 0.42f * k;
-                sphere(c, add(base, mul(dir, span * u)), R * (0.34f - 0.07f * k), col, 0.0f);
-            }
+            /* a membrane: wide at the root, thin at the trailing edge */
+            push(out, &n, base, add(base, mul(dir, span)),
+                 R * 0.40f, R * 0.10f, R * 0.26f, col, 0.0f);
             break;
         }
         case CP3_SPIKE:
-            for (int k = 0; k < 3; k++)
-                sphere(c, add(base, mul(ax, R * 0.35f * k)), R * (0.28f - 0.08f * k), col, 0.0f);
+            push(out, &n, base, add(base, mul(ax, R * 1.15f)),
+                 R * 0.30f, R * 0.03f, R * 0.16f, col, 0.0f);
             break;
         case CP3_JAW:
-            sphere(c, add(base, mul(ax, R * 0.20f)), R * 0.42f, col, 0.0f);
-            sphere(c, add(base, mul(ax, R * 0.55f)), R * 0.24f, col, 0.0f);
+            push(out, &n, base, add(base, mul(ax, R * 0.75f)),
+                 R * 0.46f, R * 0.20f, R * 0.22f, col, 0.0f);
             break;
-        case CP3_EYE:
-            sphere(c, base, R * 0.30f, col, 0.0f);
-            sphere(c, add(base, mul(ax, R * 0.20f)), R * 0.16f, v3(0.04f, 0.05f, 0.08f), 0.0f);
+        case CP3_EYE: {
+            /* eyes stay their own lobe - a fillet here reads as a tumour */
+            V3 e = add(base, mul(ax, R * 0.22f));
+            push(out, &n, e, e, R * 0.28f, R * 0.28f, R * 0.05f, col, 0.0f);
+            V3 pu = add(e, mul(ax, R * 0.19f));
+            push(out, &n, pu, pu, R * 0.13f, R * 0.13f, R * 0.04f,
+                 v3(0.05f, 0.06f, 0.10f), 0.0f);
             break;
-        case CP3_LIGHT:
-            /* the only thing in the deep that is visible on its own terms */
-            sphere(c, add(base, mul(ax, R * 0.35f)), R * 0.26f, col, er);
+        }
+        case CP3_LIGHT: {
+            V3 e = add(base, mul(ax, R * 0.42f));
+            push(out, &n, e, e, R * 0.24f, R * 0.24f, R * 0.10f, col, er);
             break;
+        }
         default:
-            sphere(c, base, R * 0.32f, col, er);
+            push(out, &n, base, add(base, mul(ax, R * 0.28f)),
+                 R * 0.34f, R * 0.30f, R * 0.20f, col, er);
             break;
         }
     }
+
+    /* bounding sphere, so the marcher can skip straight to the body */
+    V3 mid = cv(f->p);
+    float rad = 0.0f;
+    for (int i = 0; i < n; i++) {
+        float da = sqrtf(dot(sub(out[i].a, mid), sub(out[i].a, mid))) + out[i].ra + out[i].k;
+        float db = sqrtf(dot(sub(out[i].b, mid), sub(out[i].b, mid))) + out[i].rb + out[i].k;
+        if (da > rad) rad = da;
+        if (db > rad) rad = db;
+    }
+    *centre = mid;
+    *bound = rad + 1.0f;
+    return n;
+}
+
+/* ---------------- the distance field ---------------- */
+
+/* round cone: a segment with a radius that varies along it. Approximate (the
+ * exact form needs the tangent correction) so the marcher takes 0.8 steps. */
+static float sd_cone(V3 p, const Prim *pr)
+{
+    V3 ba = sub(pr->b, pr->a);
+    float l2 = dot(ba, ba);
+    V3 pa = sub(p, pr->a);
+    float t = l2 > 1e-6f ? clampf(dot(pa, ba) / l2, 0.0f, 1.0f) : 0.0f;
+    V3 d = sub(pa, mul(ba, t));
+    return sqrtf(dot(d, d)) - mixf(pr->ra, pr->rb, t);
+}
+
+/* polynomial smooth minimum - the whole point of this file */
+static float smin(float a, float b, float k)
+{
+    if (k <= 1e-4f) return a < b ? a : b;
+    float h = clampf(0.5f + 0.5f * (a - b) / k, 0.0f, 1.0f);
+    return mixf(a, b, h) - k * h * (1.0f - h);
+}
+
+/* Distance plus a softmin-weighted colour, so the albedo blends across a
+ * junction at the same rate the geometry does.
+ *
+ * The clamp at the end is load-bearing. Chaining smin() over sixteen
+ * primitives compounds its correction term: every union can subtract up to
+ * k/4, and with a generous k the field collapses far outside the body, so the
+ * marcher hits the bounding sphere and every animal renders as one enormous
+ * ball. Tracking the true minimum alongside and refusing to blend more than
+ * one fillet's worth below it keeps the field honest no matter how many parts
+ * a genome piles on. */
+static float creature_sdf(const Prim *pr, int n, V3 q, V3 *col, float *em)
+{
+    float d = 1e9f, dmin = 1e9f, kmax = 0.0f;
+    V3 c = v3(0, 0, 0);
+    float e = 0.0f, wsum = 1e-6f;
+    for (int i = 0; i < n; i++) {
+        float di = sd_cone(q, &pr[i]);
+        if (di < dmin) dmin = di;
+        if (pr[i].k > kmax) kmax = pr[i].k;
+        d = smin(d, di, pr[i].k);
+        if (col) {
+            float w = expf(-di * 0.30f);
+            c = add(c, mul(pr[i].col, w));
+            e += pr[i].em * w;
+            wsum += w;
+        }
+    }
+    if (col) { *col = mul(c, 1.0f / wsum); *em = e / wsum; }
+    float floor_d = dmin - kmax * 0.55f;
+    return d < floor_d ? floor_d : d;
+}
+
+static V3 sdf_normal(const Prim *pr, int n, V3 q)
+{
+    const float h = 0.35f;
+    float dx = creature_sdf(pr, n, v3(q.x + h, q.y, q.z), NULL, NULL)
+             - creature_sdf(pr, n, v3(q.x - h, q.y, q.z), NULL, NULL);
+    float dy = creature_sdf(pr, n, v3(q.x, q.y + h, q.z), NULL, NULL)
+             - creature_sdf(pr, n, v3(q.x, q.y - h, q.z), NULL, NULL);
+    float dz = creature_sdf(pr, n, v3(q.x, q.y, q.z + h), NULL, NULL)
+             - creature_sdf(pr, n, v3(q.x, q.y, q.z - h), NULL, NULL);
+    return norm(v3(dx, dy, dz));
+}
+
+static void shade_hit(Ctx *c, int x, int y, V3 q, V3 nrm, V3 albedo, float em, float vz)
+{
+    V3 sun = norm(SUN);
+    float lam = clampf(-dot(nrm, sun), 0.0f, 1.0f);
+    float ndotv = clampf(-dot(nrm, c->fwd), 0.0f, 1.0f);
+    float rim = powf(1.0f - ndotv, 2.5f);
+    float ll = lit(q.y);
+    float amb = 0.30f + 0.40f * ll;
+    float k = amb + 0.95f * lam * (0.45f + 0.55f * ll);
+
+    V3 col = v3(albedo.x * k, albedo.y * k, albedo.z * k);
+    col = add(col, mul(v3(0.50f, 0.86f, 1.0f), rim * 0.42f));
+    if (em > 0.0f) col = add(col, mul(albedo, em));
+    put(c, x, y, fogged(col, vz, q.y));
+}
+
+/* ---------------- ray-marched path ---------------- */
+
+static void march_creature(Ctx *c, const Prim *pr, int n, V3 centre, float bound)
+{
+    /* project the bounding sphere to a screen rect */
+    V3 d = sub(centre, c->eye);
+    float vz = dot(d, c->fwd);
+    if (vz < 8.0f) return;
+    float vx = dot(d, c->right), vy = dot(d, c->up);
+    float sx = c->W * 0.5f + c->focal * vx / vz;
+    float sy = c->H * 0.5f - c->focal * vy / vz;
+    float pr_px = c->focal * bound / vz;
+
+    int x0 = (int)floorf(sx - pr_px), x1 = (int)ceilf(sx + pr_px);
+    int y0 = (int)floorf(sy - pr_px), y1 = (int)ceilf(sy + pr_px);
+    if (x1 < 0 || y1 < 0 || x0 >= c->W || y0 >= c->H) return;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 >= c->W) x1 = c->W - 1;
+    if (y1 >= c->H) y1 = c->H - 1;
+
+    for (int y = y0; y <= y1; y++) {
+        for (int x = x0; x <= x1; x++) {
+            float px = ((float)x + 0.5f - c->W * 0.5f) / c->focal;
+            float py = -((float)y + 0.5f - c->H * 0.5f) / c->focal;
+            V3 ray = norm(add(add(mul(c->right, px), mul(c->up, py)), c->fwd));
+
+            /* enter at the bounding sphere rather than at the camera */
+            V3 oc = sub(c->eye, centre);
+            float b = dot(oc, ray);
+            float cc = dot(oc, oc) - bound * bound;
+            float disc = b * b - cc;
+            if (disc <= 0.0f) continue;
+            float sq = sqrtf(disc);
+            float t = -b - sq, tmax = -b + sq;
+            if (tmax < 0.0f) continue;
+            if (t < 0.0f) t = 0.0f;
+
+            float *zp = &c->zb[(size_t)y * c->W + x];
+            int hit = 0;
+            V3 q = v3(0, 0, 0);
+            for (int i = 0; i < 64 && t < tmax; i++) {
+                q = add(c->eye, mul(ray, t));
+                float dist = creature_sdf(pr, n, q, NULL, NULL);
+                if (dist < 0.12f) { hit = 1; break; }
+                t += dist * 0.8f;      /* the cone SDF is approximate */
+            }
+            if (!hit) continue;
+
+            float hz = dot(sub(q, c->eye), c->fwd);
+            if (hz >= *zp) continue;
+            *zp = hz;
+
+            V3 albedo; float em;
+            creature_sdf(pr, n, q, &albedo, &em);
+            shade_hit(c, x, y, q, sdf_normal(pr, n, q), albedo, em, hz);
+        }
+    }
+}
+
+/* ---------------- impostor path (distant creatures) ---------------- */
+
+static void impostor_creature(Ctx *c, const Prim *pr, int n)
+{
+    for (int i = 0; i < n; i++) {
+        sphere(c, pr[i].a, pr[i].ra, pr[i].col, pr[i].em);
+        if (pr[i].ra != pr[i].rb || pr[i].a.x != pr[i].b.x ||
+            pr[i].a.y != pr[i].b.y || pr[i].a.z != pr[i].b.z) {
+            V3 mid = mul(add(pr[i].a, pr[i].b), 0.5f);
+            sphere(c, mid, (pr[i].ra + pr[i].rb) * 0.5f, pr[i].col, pr[i].em);
+            sphere(c, pr[i].b, pr[i].rb, pr[i].col, pr[i].em);
+        }
+    }
+}
+
+/* Ray marching a body is far more expensive than splatting spheres, so only
+ * creatures big enough on screen for the difference to be visible pay for it.
+ * Everything else keeps the impostors it always had. */
+#define MARCH_MIN_PX 9.0f
+
+static void draw_creature(Ctx *c, const Cp3Fish *f, int is_player)
+{
+    Prim pr[MAX_PRIM];
+    V3 centre;
+    float bound;
+    int n = build_prims(f, is_player, pr, &centre, &bound);
+    if (n <= 0) return;
+
+    V3 d = sub(centre, c->eye);
+    float vz = dot(d, c->fwd);
+    if (vz < 8.0f) return;
+    float px = c->focal * bound / vz;
+
+    if (px >= MARCH_MIN_PX) march_creature(c, pr, n, centre, bound);
+    else                    impostor_creature(c, pr, n);
 }
 
 /* ---------------- HUD ---------------- */
