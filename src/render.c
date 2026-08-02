@@ -669,14 +669,22 @@ static void draw_hud(Canvas *c, const CpWorld *w, float camx, float camy,
 
 /* deep water, grouped as per-hue ramps so shading stays inside a hue */
 static const uint8_t PAL_ABYSS[32][3] = {
-    {  6, 12, 20}, { 10, 22, 34}, { 14, 34, 48}, { 20, 48, 62},
-    { 28, 62, 78}, { 38, 80, 94}, { 52,102,114}, { 74,128,138},
-    { 26, 64, 38}, { 44,104, 56}, { 78,158, 74}, {132,206,104},
-    {186,232,140}, { 92, 34, 30}, {148, 54, 40}, {198, 90, 56},
-    {236,148, 96}, { 18, 62, 84}, { 34,104,134}, { 62,160,190},
-    {126,214,232}, {198,244,250}, { 86, 28, 54}, {138, 44, 80},
-    {192, 80,120}, {232,140,172}, { 56, 40, 96}, { 92, 68,148},
-    {142,112,200}, {182,176,152}, {224,220,200}, {252,252,248},
+    /* water ramp: seven steps from seabed black to lit shallows. The two
+     * darkest are reserved for silhouette and outline, not for scenery. */
+    {  4,  8, 14}, {  9, 19, 30}, { 14, 32, 46}, { 21, 48, 64},
+    { 30, 66, 84}, { 42, 88,106}, { 60,116,132},
+    /* greens */
+    { 22, 54, 32}, { 40, 98, 52}, { 74,154, 72}, {126,202,102}, {182,232,140},
+    /* warm: carrion, sand, and the orange half of the creature genome */
+    { 74, 30, 22}, {126, 52, 34}, {180, 84, 46}, {224,134, 72}, {246,196,132},
+    /* cyans: the player, photophores, highlights */
+    { 24, 78,102}, { 40,124,158}, { 74,182,208}, {150,226,240},
+    /* magenta / rose */
+    { 90, 26, 58}, {148, 44, 92}, {204, 86,136}, {238,152,186},
+    /* violet */
+    { 54, 40,100}, { 96, 72,158}, {148,116,206},
+    /* neutrals and the two brightest, kept for specular and bone */
+    { 74, 80, 78}, {150,158,152}, {214,220,214}, {252,252,248},
 };
 
 /* original Game Boy DMG: four greens, and nothing else. Everything has to be
@@ -765,12 +773,28 @@ static void quantise(uint8_t *fb, int W, int H, const Vis *v)
             float d = ((float)BAYER[(y & 3) * 4 + (x & 3)] / 16.0f - 0.469f) * v->dither;
             float pr = px_[0] + d, pg = px_[1] + d, pb = px_[2] + d;
 
+            /* Chroma of the source pixel, so a dim red can be told from a
+             * mid grey of the same brightness. Without this term the neutral
+             * entries win every dimly-lit saturated pixel and the whole
+             * population renders grey however colourful its genome is. */
+            float pmax = pr > pg ? (pr > pb ? pr : pb) : (pg > pb ? pg : pb);
+            float pmin = pr < pg ? (pr < pb ? pr : pb) : (pg < pb ? pg : pb);
+            float pc = pmax - pmin;
+
             int best = 0;
             float bestd = 1e18f;
             for (int i = 0; i < v->pal_n; i++) {
-                float dr = pr - v->pal[i][0], dg = pg - v->pal[i][1], db = pb - v->pal[i][2];
+                float er = pr - v->pal[i][0], eg = pg - v->pal[i][1], eb = pb - v->pal[i][2];
                 /* luma-weighted, so the match tracks perceived brightness */
-                float e = dr * dr * 0.30f + dg * dg * 0.59f + db * db * 0.11f;
+                float e = er * er * 0.30f + eg * eg * 0.59f + eb * eb * 0.11f;
+                int qmax = v->pal[i][0] > v->pal[i][1]
+                         ? (v->pal[i][0] > v->pal[i][2] ? v->pal[i][0] : v->pal[i][2])
+                         : (v->pal[i][1] > v->pal[i][2] ? v->pal[i][1] : v->pal[i][2]);
+                int qmin = v->pal[i][0] < v->pal[i][1]
+                         ? (v->pal[i][0] < v->pal[i][2] ? v->pal[i][0] : v->pal[i][2])
+                         : (v->pal[i][1] < v->pal[i][2] ? v->pal[i][1] : v->pal[i][2]);
+                float dc = pc - (float)(qmax - qmin);
+                e += dc * dc * 0.30f;
                 if (e < bestd) { bestd = e; best = i; }
             }
             px_[0] = v->pal[best][0];

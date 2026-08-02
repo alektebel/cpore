@@ -93,6 +93,29 @@ immediately, and every animal renders as one enormous ball. Tracking the true
 minimum alongside and refusing to blend more than one fillet below it keeps the
 field honest however many parts a genome piles on.
 
+### Lighting
+
+Key, fill and ambient are separate terms with real separation between them,
+because one flat ambient floor squeezed every surface into the same six mid
+tones and left the palette's darks and brights unused. Occlusion and soft
+shadows come straight out of the distance field. Output is tonemapped
+filmically rather than clamped — three light terms plus emissive routinely
+exceed 1.0, and clipping turns a bright surface into a flat plate of one
+colour that then quantises to a single palette entry, throwing away the shape
+underneath.
+
+Two bugs worth recording. Fog was mixing every surface toward blue-grey before
+quantisation, so saturated genomes arrived desaturated and landed on neutral
+palette entries; it is now held off for the first 90 units, which keeps
+foreground animals at full chroma while still burying the distance. And the
+sun vector pointed *up* — y is depth here, so light travelling down from the
+surface is +y, and with −1 the key lit every belly and left every back black.
+
+Depth also carries caustics on the seabed, light shafts along the sun's
+bearing, projected shadow patches that widen and fade with an animal's height,
+and drifting streaked marine snow. A depth-discontinuity outline pass runs last
+and is the cheapest readability win in the file.
+
 Everything else is still a **sphere impostor into a z-buffer**: centres are
 projected, screen-space circles rasterised, depth and normal solved per pixel.
 Surface and seabed are analytic ray-plane intersections. Creatures smaller than
@@ -342,6 +365,9 @@ All of it found by running the table, not by reading the code:
   an artifact of a heuristic that is good at chasing pellets.
 
 ## Roadmap
+
+Full version, including what is deliberately *not* being done and why, in
+[docs/ROADMAP.md](docs/ROADMAP.md).
 
 1. Structure-of-arrays world layout, then shard envs across cores.
 2. PPO on the cell stage, jointly over control and the design head — does a

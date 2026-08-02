@@ -48,6 +48,7 @@ typedef struct {
     int      W, H;
     V3       eye, fwd, right, up;
     float    focal;
+    float    fogk;    /* 1 in the world, 0 for a studio portrait */
 } Ctx;
 
 /* Rendering light is deliberately a gentler curve than cp3_daylight().
@@ -71,26 +72,49 @@ static float fog_dist(float depth)
     return 420.0f + 700.0f * lit(depth);
 }
 
+/* Filmic roll-off instead of a hard clamp. Three light terms plus emissive
+ * routinely push past 1.0, and clipping turns every bright surface into a
+ * flat plate of one colour - which then quantises to a single palette entry
+ * and throws away the shape underneath it. */
+static inline float tonemap(float x)
+{
+    if (x < 0.0f) x = 0.0f;
+    float a = x * (2.51f * x + 0.03f);
+    float b = x * (2.43f * x + 0.59f) + 0.14f;
+    return clampf(a / b, 0.0f, 1.0f);
+}
+
 static inline void put(Ctx *c, int x, int y, V3 col)
 {
     uint8_t *p = c->fb + 4 * ((size_t)y * c->W + x);
-    p[0] = (uint8_t)(clampf(col.x, 0, 1) * 255.0f);
-    p[1] = (uint8_t)(clampf(col.y, 0, 1) * 255.0f);
-    p[2] = (uint8_t)(clampf(col.z, 0, 1) * 255.0f);
+    p[0] = (uint8_t)(tonemap(col.x) * 255.0f);
+    p[1] = (uint8_t)(tonemap(col.y) * 255.0f);
+    p[2] = (uint8_t)(tonemap(col.z) * 255.0f);
     p[3] = 255;
 }
 
-/* apply distance fog toward the water colour at the shaded point's depth */
-static V3 fogged(V3 col, float dist, float depth)
+/* Distance fog toward the water colour.
+ *
+ * Fog is the single biggest destroyer of colour in this renderer: it mixes
+ * every surface toward a blue-grey, so a saturated genome arrives at the
+ * quantiser already desaturated and lands on a neutral palette entry. Holding
+ * it off for the first stretch keeps foreground animals at full chroma while
+ * still burying the distance, which is what depth is for. */
+static V3 fogged(const Ctx *c, V3 col, float dist, float depth)
 {
-    float f = 1.0f - expf(-dist / fog_dist(depth));
+    if (c->fogk <= 0.0f) return col;
+    float d = dist - 90.0f;                  /* no fog on what is right here */
+    if (d < 0.0f) d = 0.0f;
+    float f = (1.0f - expf(-d / fog_dist(depth))) * c->fogk;
     V3 w = water_col(depth);
     return v3(mixf(col.x, w.x, f), mixf(col.y, w.y, f), mixf(col.z, w.z, f));
 }
 
 /* ---------------- sphere impostor ---------------- */
 
-static const V3 SUN = { 0.32f, -1.0f, 0.22f };   /* down from the surface */
+/* Direction the light travels. y is depth, so sunlight goes +y. This was
+ * -1 for a long time, which lit every belly and left every back black. */
+static const V3 SUN = { 0.30f, 1.0f, 0.20f };
 
 static void sphere(Ctx *c, V3 wp, float rad, V3 albedo, float emissive)
 {
@@ -139,27 +163,64 @@ static void sphere(Ctx *c, V3 wp, float rad, V3 albedo, float emissive)
 
             /* light in the water falls off with depth; deep things are only
              * visible because they glow or because we brought a lamp */
-            float here = wp.y;
-            float ll = lit(here);
-            float amb = 0.30f + 0.40f * ll;
-            float k = amb + 0.95f * lam * (0.45f + 0.55f * ll);
+            float ll = lit(wp.y);
+            float amb = 0.26f + 0.22f * ll;
+            float k = amb + 1.05f * lam * (0.35f + 0.65f * ll) + 0.26f * nz;
 
             V3 col = v3(albedo.x * k, albedo.y * k, albedo.z * k);
             /* rim light does most of the silhouette work once the water gets
              * dark, so it is worth more than it looks */
-            col = add(col, mul(v3(0.50f, 0.86f, 1.0f), rim * 0.42f));
+            col = add(col, mul(v3(0.34f, 0.62f, 0.80f), rim * 0.30f));
             if (emissive > 0.0f) col = add(col, mul(albedo, emissive));
 
-            put(c, x, y, fogged(col, z, wp.y));
+            put(c, x, y, fogged(c, col, z, wp.y));
         }
     }
 }
 
 /* ---------------- background: surface, seabed, open water ---------------- */
 
+/* Caustics: two interfering ripples, squared twice to pull smooth interference
+ * into the bright filaments the eye reads as sunlight through moving water.
+ * Nothing else says "underwater" this cheaply. */
+static float caustic(float x, float z, float t)
+{
+    float a = sinf(x * 0.045f + t * 0.7f) * sinf(z * 0.038f - t * 0.5f);
+    float b = sinf((x + z) * 0.026f + t * 0.9f);
+    float v = 0.5f + 0.5f * (a * 0.62f + b * 0.38f);
+    v *= v; v *= v;
+    return v;
+}
+
+/* Creatures cast a soft patch on the seabed. A projection, not a shadow ray,
+ * but grounding is what stops everything looking like it floats. */
+typedef struct { float x, z, r, h; } Blot;
+
+static int gather_blots(const Cp3World *w, Blot *out, int max)
+{
+    int n = 0;
+    for (int i = 0; i < CP3_MAX_FISH && n < max; i++) {
+        if (!w->fish[i].alive) continue;
+        out[n].x = w->fish[i].p.x; out[n].z = w->fish[i].p.z;
+        out[n].r = w->fish[i].s.length * 0.5f + w->fish[i].s.radius;
+        out[n].h = CP3_H - w->fish[i].p.y;
+        n++;
+    }
+    if (n < max) {
+        out[n].x = w->player.p.x; out[n].z = w->player.p.z;
+        out[n].r = w->player.s.length * 0.5f + w->player.s.radius;
+        out[n].h = CP3_H - w->player.p.y;
+        n++;
+    }
+    return n;
+}
+
 static void draw_water(Ctx *c, const Cp3World *w, uint32_t seed)
 {
-    (void)w;
+    float t = (float)w->step * CP3_DT;
+    Blot blot[24];
+    int nblot = gather_blots(w, blot, 24);
+    V3 sun = norm(SUN);
     for (int y = 0; y < c->H; y++) {
         for (int x = 0; x < c->W; x++) {
             float px = ((float)x + 0.5f - c->W * 0.5f) / c->focal;
@@ -171,15 +232,27 @@ static void draw_water(Ctx *c, const Cp3World *w, uint32_t seed)
             float depth = clampf(c->eye.y, 0.0f, CP3_H);
 
             if (ray.y > 0.001f) {                    /* looking down: seabed */
-                float t = (CP3_H - c->eye.y) / ray.y;
-                if (t > 0.0f && t < 6000.0f) {
-                    V3 hit = add(c->eye, mul(ray, t));
+                float tt = (CP3_H - c->eye.y) / ray.y;
+                if (tt > 0.0f && tt < 6000.0f) {
+                    V3 hit = add(c->eye, mul(ray, tt));
                     /* a cheap sand texture: two out-of-phase ripples */
                     float g = 0.5f + 0.5f * sinf(hit.x * 0.035f + sinf(hit.z * 0.021f) * 2.0f);
                     float m = 0.5f + 0.5f * sinf(hit.z * 0.028f);
-                    float sand = 0.46f + 0.20f * g + 0.13f * m;
-                    col = v3(sand * 0.72f, sand * 0.66f, sand * 0.48f);
-                    dist = t;
+                    float sand = 0.40f + 0.17f * g + 0.11f * m;
+                    sand += caustic(hit.x, hit.z, t) * 0.55f * lit(CP3_H * 0.55f);
+
+                    for (int b = 0; b < nblot; b++) {
+                        float dx = hit.x - blot[b].x, dz = hit.z - blot[b].z;
+                        /* the higher an animal swims, the wider and fainter
+                         * the patch it throws */
+                        float spread = blot[b].r * (1.0f + blot[b].h / 260.0f);
+                        float d2 = (dx * dx + dz * dz) / (spread * spread);
+                        if (d2 >= 1.0f) continue;
+                        float k = (1.0f - d2) * (1.0f - d2);
+                        sand *= 1.0f - 0.62f * k / (1.0f + blot[b].h / 190.0f);
+                    }
+                    col = v3(sand * 0.74f, sand * 0.67f, sand * 0.49f);
+                    dist = tt;
                     depth = CP3_H;
                 } else {
                     col = water_col(CP3_H);
@@ -187,11 +260,11 @@ static void draw_water(Ctx *c, const Cp3World *w, uint32_t seed)
                     depth = CP3_H;
                 }
             } else if (ray.y < -0.001f) {            /* looking up: the surface */
-                float t = (0.0f - c->eye.y) / ray.y;
-                if (t > 0.0f && t < 6000.0f) {
-                    V3 hit = add(c->eye, mul(ray, t));
-                    float ca = sinf(hit.x * 0.02f + (float)seed * 0.001f)
-                             * sinf(hit.z * 0.017f);
+                float tt = (0.0f - c->eye.y) / ray.y;
+                if (tt > 0.0f && tt < 6000.0f) {
+                    V3 hit = add(c->eye, mul(ray, tt));
+                    float ca = sinf(hit.x * 0.02f + (float)seed * 0.001f + t * 0.4f)
+                             * sinf(hit.z * 0.017f - t * 0.3f);
                     float shim = 0.55f + 0.45f * ca;
                     /* brightest looking straight up, where the sun comes in */
                     float grz = powf(clampf(-ray.y, 0.0f, 1.0f), 0.6f);
@@ -200,7 +273,7 @@ static void draw_water(Ctx *c, const Cp3World *w, uint32_t seed)
                     col = v3(0.14f + 0.34f * shim * grz,
                              0.38f + 0.30f * shim * grz,
                              0.52f + 0.24f * shim * grz);
-                    dist = t;
+                    dist = tt;
                     depth = 0.0f;
                 } else {
                     col = water_col(0.0f);
@@ -212,7 +285,15 @@ static void draw_water(Ctx *c, const Cp3World *w, uint32_t seed)
                 dist = 4000.0f;
             }
 
-            put(c, x, y, fogged(col, dist, depth));
+            col = fogged(c, col, dist, depth);
+            /* Light shafts: the water glows along the sun's bearing. A cheap
+             * stand-in for volumetric scattering, and it is what sells "a body
+             * of water" rather than a void with things in it. */
+            float towards = clampf(-dot(ray, sun), 0.0f, 1.0f);
+            float shaft = powf(towards, 7.0f) * lit(c->eye.y) * 0.55f;
+            col = add(col, v3(0.16f * shaft, 0.34f * shaft, 0.44f * shaft));
+
+            put(c, x, y, col);
             c->zb[(size_t)y * c->W + x] = 1e30f;
         }
     }
@@ -301,7 +382,7 @@ static int build_prims(const Cp3Fish *f, int is_player, Prim *out,
     if (is_player) {
         /* the agent's own animal keeps its genome's shape but is tinted toward
          * a fixed hue, because you must be able to find yourself in a shoal */
-        body = v3(0.30f + body.x * 0.25f, 0.66f + body.y * 0.28f, 0.82f + body.z * 0.16f);
+        body = v3(0.16f + body.x * 0.22f, 0.44f + body.y * 0.26f, 0.58f + body.z * 0.18f);
     }
     skin->base = body;
     skin->mark = v3(mark[0], mark[1], mark[2]);
@@ -497,6 +578,36 @@ static V3 apply_pattern(const Skin *sk, V3 q, V3 albedo, float bodyw)
               mixf(albedo.z, sk->mark.z, m));
 }
 
+/* Ambient occlusion straight out of the distance field: step along the normal
+ * and see how much closer the surface is than it should be. Creases and the
+ * gaps between fins darken, which is most of what makes a form look solid. */
+static float sdf_ao(const Prim *pr, int n, V3 q, V3 nrm)
+{
+    float occ = 0.0f, sca = 1.0f;
+    for (int i = 1; i <= 4; i++) {
+        float h = 0.55f * (float)i;
+        float d = creature_sdf(pr, n, add(q, mul(nrm, h)), NULL, NULL, NULL);
+        occ += (h - d) * sca;
+        sca *= 0.70f;
+    }
+    return clampf(1.0f - 1.6f * occ, 0.20f, 1.0f);
+}
+
+/* Soft shadow by cone tracing: march toward the light and track the closest
+ * approach, which gives a penumbra for free. */
+static float sdf_shadow(const Prim *pr, int n, V3 q, V3 ldir)
+{
+    float res = 1.0f, t = 0.9f;
+    for (int i = 0; i < 20 && t < 26.0f; i++) {
+        float d = creature_sdf(pr, n, add(q, mul(ldir, t)), NULL, NULL, NULL);
+        if (d < 0.05f) return 0.15f;
+        float k = 7.0f * d / t;
+        if (k < res) res = k;
+        t += clampf(d, 0.4f, 3.0f);
+    }
+    return clampf(res, 0.15f, 1.0f);
+}
+
 static V3 sdf_normal(const Prim *pr, int n, V3 q)
 {
     const float h = 0.35f;
@@ -509,20 +620,33 @@ static V3 sdf_normal(const Prim *pr, int n, V3 q)
     return norm(v3(dx, dy, dz));
 }
 
-static void shade_hit(Ctx *c, int x, int y, V3 q, V3 nrm, V3 albedo, float em, float vz)
+static void shade_hit(Ctx *c, int x, int y, V3 q, V3 nrm, V3 albedo, float em, float vz,
+                      float ao, float shadow)
 {
     V3 sun = norm(SUN);
     float lam = clampf(-dot(nrm, sun), 0.0f, 1.0f);
     float ndotv = clampf(-dot(nrm, c->fwd), 0.0f, 1.0f);
     float rim = powf(1.0f - ndotv, 2.5f);
     float ll = lit(q.y);
-    float amb = 0.30f + 0.40f * ll;
-    float k = amb + 0.95f * lam * (0.45f + 0.55f * ll);
+    /* key from the surface, a cool fill from the open water, and a warm
+     * bounce off the seabed. Three terms with real separation give the
+     * palette something to spend its darks and brights on; one flat ambient
+     * floor squeezed every surface into the same six mid tones. */
+    float up_amt = clampf(-dot(nrm, v3(0.0f, -1.0f, 0.0f)), 0.0f, 1.0f);
+    float amb  = 0.26f + 0.22f * ll;
+    float key  = 1.05f * lam * (0.35f + 0.65f * ll) * shadow;
+    /* A fill from the camera side. It is a cheat - there is no lamp on the
+     * lens - but every dark-water scene uses one, because without it a
+     * subject facing away from the sun is a black hole in the frame. */
+    float fill = 0.26f * ndotv;
+    float bounce = 0.14f * (1.0f - up_amt) * (0.3f + 0.7f * ll);
 
-    V3 col = v3(albedo.x * k, albedo.y * k, albedo.z * k);
-    col = add(col, mul(v3(0.50f, 0.86f, 1.0f), rim * 0.42f));
+    /* occlusion belongs on the terms that come from everywhere, not on the
+     * key - a shadowed crease is dark because less sky reaches it */
+    V3 col = mul(albedo, (amb + fill + bounce) * ao + key);
+    col = add(col, mul(v3(0.34f, 0.62f, 0.80f), rim * 0.26f * ao));
     if (em > 0.0f) col = add(col, mul(albedo, em));
-    put(c, x, y, fogged(col, vz, q.y));
+    put(c, x, y, fogged(c, col, vz, q.y));
 }
 
 /* ---------------- ray-marched path ---------------- */
@@ -582,7 +706,10 @@ static void march_creature(Ctx *c, const Prim *pr, int n, V3 centre, float bound
             V3 albedo; float em, bw;
             creature_sdf(pr, n, q, &albedo, &em, &bw);
             albedo = apply_pattern(sk, q, albedo, bw);
-            shade_hit(c, x, y, q, sdf_normal(pr, n, q), albedo, em, hz);
+            V3 nrm = sdf_normal(pr, n, q);
+            float ao = sdf_ao(pr, n, q, nrm);
+            float sh = sdf_shadow(pr, n, q, mul(norm(SUN), -1.0f));
+            shade_hit(c, x, y, q, nrm, albedo, em, hz, ao, sh);
         }
     }
 }
@@ -623,6 +750,33 @@ static void draw_creature(Ctx *c, const Cp3Fish *f, int is_player)
 
     if (px >= MARCH_MIN_PX) march_creature(c, pr, n, centre, bound, &sk);
     else                    impostor_creature(c, pr, n);
+}
+
+/* ---------------- outline pass ----------------
+ * Darken pixels sitting on the near side of a sharp depth step. It is the
+ * cheapest readability win available: creatures separate from the water and
+ * from each other without touching the shading at all. */
+static void outline_pass(Ctx *c)
+{
+    for (int y = 1; y < c->H - 1; y++) {
+        for (int x = 1; x < c->W - 1; x++) {
+            float z = c->zb[(size_t)y * c->W + x];
+            if (z > 1e29f) continue;                  /* open water */
+            /* the threshold scales with distance, or far objects outline
+             * themselves into mush while near ones get nothing */
+            float thr = 0.05f * z + 1.5f;
+            const float zl = c->zb[(size_t)y * c->W + x - 1];
+            const float zr = c->zb[(size_t)y * c->W + x + 1];
+            const float zu = c->zb[(size_t)(y - 1) * c->W + x];
+            const float zd = c->zb[(size_t)(y + 1) * c->W + x];
+            if (zl - z > thr || zr - z > thr || zu - z > thr || zd - z > thr) {
+                uint8_t *p = c->fb + 4 * ((size_t)y * c->W + x);
+                p[0] = (uint8_t)(p[0] * 0.34f);
+                p[1] = (uint8_t)(p[1] * 0.38f);
+                p[2] = (uint8_t)(p[2] * 0.46f);
+            }
+        }
+    }
 }
 
 /* ---------------- HUD ---------------- */
@@ -733,11 +887,14 @@ void cp3_render_styled(const Cp3World *w, uint8_t *rgba, int OW, int OH, int sty
 
     Ctx c;
     c.fb = fb; c.zb = zb; c.W = lw; c.H = lh;
-    c.focal = (float)lw * 0.85f;
+    c.focal = (float)lw * 0.78f;
+    c.fogk = 1.0f;
 
     /* chase camera: behind and a little above, looking slightly down the body */
-    float back = p->s.length * 2.4f + p->s.radius * 6.5f + 44.0f;
-    c.eye = add(add(cv(p->p), mul(pf, -back)), mul(pu, p->s.radius * 2.2f + 9.0f));
+    /* The player grows across four generations, so the camera has to back off
+     * with it or a late-game animal fills a third of the frame. */
+    float back = p->s.length * 3.4f + p->s.radius * 9.0f + 70.0f;
+    c.eye = add(add(cv(p->p), mul(pf, -back)), mul(pu, p->s.radius * 2.6f + 16.0f));
     c.eye.y = clampf(c.eye.y, 4.0f, CP3_H - 4.0f);
     V3 look = norm(sub(add(cv(p->p), mul(pf, 34.0f)), c.eye));
     c.fwd = look;
@@ -759,11 +916,53 @@ void cp3_render_styled(const Cp3World *w, uint8_t *rgba, int OW, int OH, int sty
             sphere(&c, wp, f->r, v3(0.80f, 0.36f, 0.24f), 0.05f);
     }
 
+    /* Marine snow. Static specks would read as dead pixels, so each drifts on
+     * a slow current and is drawn as a short streak along its own motion -
+     * that streak is most of what tells you the water has depth and that you
+     * are moving through it. */
+    {
+        CpRng dr;
+        cp_rng_seed(&dr, w->seed ^ 0x51E7u);
+        float t = (float)w->step * CP3_DT;
+        for (int i = 0; i < 520; i++) {
+            float bx = cp_rng_range(&dr, 0.0f, CP3_W);
+            float by = cp_rng_range(&dr, 0.0f, CP3_H);
+            float bz = cp_rng_range(&dr, 0.0f, CP3_D);
+            float ph = cp_rng_range(&dr, 0.0f, 6.28f);
+            float sp = cp_rng_range(&dr, 0.4f, 1.6f);
+            V3 q = v3(bx + sinf(t * 0.11f + ph) * 26.0f,
+                      by + sinf(t * 0.07f + ph * 1.7f) * 9.0f + fmodf(t * sp, 40.0f) - 20.0f,
+                      bz + cosf(t * 0.09f + ph) * 26.0f);
+            V3 d = sub(q, c.eye);
+            float vz = dot(d, c.fwd);
+            if (vz < 30.0f || vz > 900.0f) continue;
+            float sx = c.W * 0.5f + c.focal * dot(d, c.right) / vz;
+            float sy = c.H * 0.5f - c.focal * dot(d, c.up) / vz;
+            int ix = (int)sx, iy = (int)sy;
+            if (ix < 0 || iy < 0 || ix >= c.W || iy >= c.H) continue;
+            if (vz >= c.zb[(size_t)iy * c.W + ix]) continue;
+            float a = (0.30f - 0.24f * (vz / 900.0f)) * (0.35f + 0.65f * lit(q.y));
+            uint8_t *px = fb + 4 * ((size_t)iy * c.W + ix);
+            px[0] = (uint8_t)(px[0] + (200 - px[0]) * a);
+            px[1] = (uint8_t)(px[1] + (225 - px[1]) * a);
+            px[2] = (uint8_t)(px[2] + (235 - px[2]) * a);
+            /* streak: one pixel toward where it came from */
+            int jy = iy + (sp > 1.0f ? 1 : -1);
+            if (jy >= 0 && jy < c.H && vz < c.zb[(size_t)jy * c.W + ix]) {
+                uint8_t *p2 = fb + 4 * ((size_t)jy * c.W + ix);
+                p2[0] = (uint8_t)(p2[0] + (200 - p2[0]) * a * 0.45f);
+                p2[1] = (uint8_t)(p2[1] + (225 - p2[1]) * a * 0.45f);
+                p2[2] = (uint8_t)(p2[2] + (235 - p2[2]) * a * 0.45f);
+            }
+        }
+    }
+
     for (int i = 0; i < CP3_MAX_FISH; i++)
         if (w->fish[i].alive) draw_creature(&c, &w->fish[i], 0);
 
     draw_creature(&c, p, 1);
 
+    outline_pass(&c);
     draw_hud3(fb, lw, lh, w);
     cp_vis_quantise(fb, lw, lh, style);
     cp_vis_blit(fb, lw, lh, rgba, OW, OH, style);
@@ -808,6 +1007,7 @@ void cp3_render_portrait(const Cp3Genome *g, uint8_t *fb, int lw, int lh,
     Ctx c;
     c.fb = fb; c.zb = zb; c.W = lw; c.H = lh;
     c.focal = (float)lw * 1.15f;
+    c.fogk = 0.0f;   /* studio shot: no fog to eat the colour */
     /* three-quarter view: straight side-on hides everything mounted fore
      * and aft, which is most of what the genome varies */
     V3 dir = norm(v3(-0.62f, -0.30f, 0.72f));
@@ -831,6 +1031,7 @@ void cp3_render_portrait(const Cp3Genome *g, uint8_t *fb, int lw, int lh,
     }
 
     march_creature(&c, pr, n, centre, bound, &sk);
+    outline_pass(&c);
     cp_vis_quantise(fb, lw, lh, style);
     free(zb);
 }
