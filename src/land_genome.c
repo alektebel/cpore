@@ -126,21 +126,6 @@ int cp4_genome_cost(const Cp4Genome *g)
     return c;
 }
 
-static int count_of(const Cp4Genome *g, int t)
-{
-    int n = 0;
-    for (int i = 0; i < CP4_MAX_PARTS; i++)
-        if (g->part[i].type == t) n += (g->part[i].mirror ? 2 : 1);
-    return n;
-}
-
-static int mouths(const Cp4Genome *g)
-{
-    return count_of(g, CP4_MOUTH_G) + count_of(g, CP4_MOUTH_C) + count_of(g, CP4_MOUTH_O);
-}
-
-static int legs(const Cp4Genome *g) { return count_of(g, CP4_LEG); }
-
 /* How many *slots* hold a part of this kind, as opposed to how many copies it
  * places. The trimmer has to guard on slots: a single mirrored mouth places
  * two copies, so a guard written against the copy count read "more than one

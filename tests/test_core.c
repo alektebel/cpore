@@ -1057,13 +1057,16 @@ int main(void)
         Cp4World *w = (Cp4World *)malloc(sizeof(Cp4World));
         for (int seed = 0; seed < 5; seed++) {
             cp4_world_reset(w, (uint32_t)(seed * 71 + 5), NULL);
-            /* Legs are no longer the only way to get around, so the claim is
-             * about whatever moves an animal - a population that drifts toward
-             * fins in a flooded world is selection working, not failing. */
+            /* The trait to watch is whether an animal can feed itself at all.
+             * Counting legs was the obvious choice and the wrong one: a
+             * population that sheds a leg pair to cut its upkeep is selection
+             * working, not failing, and in a flooded world it drifts toward
+             * fins anyway. Founders are drawn uniformly, so many of them have
+             * a mouth that suits nothing on the map; the ones that can eat
+             * simply breed more. */
             float l0 = 0.0f;
             for (int i = 0; i < CP4_MAX_BEASTS; i++)
-                l0 += w->beast[i].s.n[CP4_LEG] + w->beast[i].s.n[CP4_FIN]
-                    + w->beast[i].s.n[CP4_WING];
+                l0 += w->beast[i].s.graze_eff + w->beast[i].s.carn_eff;
             l0 /= CP4_MAX_BEASTS;
 
             float a[CP4_ACT_DIM];
@@ -1076,8 +1079,7 @@ int main(void)
             int alive = 0;
             for (int i = 0; i < CP4_MAX_BEASTS; i++) {
                 if (!w->beast[i].alive) continue;
-                l1 += w->beast[i].s.n[CP4_LEG] + w->beast[i].s.n[CP4_FIN]
-                    + w->beast[i].s.n[CP4_WING];
+                l1 += w->beast[i].s.graze_eff + w->beast[i].s.carn_eff;
                 alive++;
             }
             if (alive) l1 /= alive;
@@ -1086,10 +1088,10 @@ int main(void)
             if (l1 > l0) rose_legs++;
             trials++;
         }
-        printf("        over %d worlds: mean generation %.1f, movers %+.2f\n",
+        printf("        over %d worlds: mean generation %.1f, feeding %+.2f\n",
                trials, (double)(gens / trials), (double)(d_legs / trials));
         CHECK(gens / trials > 1.5f, "land: generations turn over inside an episode");
-        CHECK(rose_legs >= 4, "land: selection raises the population's mobility");
+        CHECK(rose_legs >= 5, "land: selection raises the population's ability to feed itself");
         free(w);
     }
 

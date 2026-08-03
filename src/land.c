@@ -209,6 +209,76 @@ float cp4_fertility(int b)
 #define RESIDENT   1250.0f     /* how far out the world is populated */
 #define RECYCLE    1650.0f     /* beyond this, move it round in front */
 
+/* ---------------- the flora hash ----------------
+ *
+ * Cells are hashed rather than indexed, because the world has no bounds to
+ * index against. Insert and remove are called from exactly two places each -
+ * whenever a plant appears and whenever one is eaten or rots - and every read
+ * goes through FLORA_NEAR below, so the grid cannot drift out of step with the
+ * array it describes. */
+static inline int32_t flora_bucket(float x, float z)
+{
+    int32_t cx = (int32_t)floorf(x / CP4_FCELL);
+    int32_t cz = (int32_t)floorf(z / CP4_FCELL);
+    uint32_t h = (uint32_t)cx * 0x9E3779B1u ^ (uint32_t)cz * 0x85EBCA77u;
+    h ^= h >> 15;
+    return (int32_t)(h & (CP4_FGRID - 1));
+}
+
+static void flora_insert(Cp4World *w, int i)
+{
+    int32_t b = flora_bucket(w->flora[i].p.x, w->flora[i].p.z);
+    w->fnext[i] = w->fgrid[b];
+    w->fgrid[b] = (int16_t)i;
+}
+
+static void flora_unlink(Cp4World *w, int i)
+{
+    int32_t b = flora_bucket(w->flora[i].p.x, w->flora[i].p.z);
+    int16_t cur = w->fgrid[b], prev = -1;
+    while (cur >= 0) {
+        if (cur == (int16_t)i) {
+            if (prev < 0) w->fgrid[b] = w->fnext[cur];
+            else          w->fnext[prev] = w->fnext[cur];
+            w->fnext[i] = -1;
+            return;
+        }
+        prev = cur;
+        cur = w->fnext[cur];
+    }
+}
+
+/* Clear a plant and take it out of the grid in one place, so the two can never
+ * disagree. */
+static void flora_clear(Cp4World *w, int i)
+{
+    if (w->flora[i].type == CP4_FLORA_NONE) return;
+    flora_unlink(w, i);
+    w->flora[i].type = CP4_FLORA_NONE;
+}
+
+/* Walk every plant whose cell could hold something within R of (X,Z). The body
+ * runs with `f` bound to the plant and `fi` to its index. */
+#define FLORA_NEAR(W, X, Z, R, ...)                                            \
+    do {                                                                       \
+        int _c0x = (int)floorf(((X) - (R)) / CP4_FCELL);                       \
+        int _c1x = (int)floorf(((X) + (R)) / CP4_FCELL);                       \
+        int _c0z = (int)floorf(((Z) - (R)) / CP4_FCELL);                       \
+        int _c1z = (int)floorf(((Z) + (R)) / CP4_FCELL);                       \
+        for (int _cz = _c0z; _cz <= _c1z; _cz++)                               \
+            for (int _cx = _c0x; _cx <= _c1x; _cx++) {                         \
+                uint32_t _h = (uint32_t)_cx * 0x9E3779B1u                       \
+                            ^ (uint32_t)_cz * 0x85EBCA77u;                     \
+                _h ^= _h >> 15;                                                \
+                for (int16_t fi = (W)->fgrid[_h & (CP4_FGRID - 1)]; fi >= 0;   \
+                     fi = (W)->fnext[fi]) {                                    \
+                    const Cp4Flora *f = &(W)->flora[fi];                       \
+                    if (f->type == CP4_FLORA_NONE) continue;                   \
+                    __VA_ARGS__                                                \
+                }                                                              \
+            }                                                                  \
+    } while (0)
+
 static int alloc_flora(Cp4World *w)
 {
     for (int n = 0; n < CP4_MAX_FLORA; n++) {
@@ -234,6 +304,8 @@ static Cp4Vec ring_point(Cp4World *w, Cp4Vec at, float rmin, float rmax)
  * the surface. That is what turns a medium into somewhere worth going. */
 static void spawn_flora(Cp4World *w, int i, Cp4Vec at, float rmin, float rmax)
 {
+    /* recycling reuses an occupied slot, so retire the old plant first */
+    flora_clear(w, i);
     for (int tries = 0; tries < 10; tries++) {
         Cp4Vec p = ring_point(w, at, rmin, rmax);
         float y = cp4_height(w->seed, p.x, p.z);
@@ -261,7 +333,22 @@ static void spawn_flora(Cp4World *w, int i, Cp4Vec at, float rmin, float rmax)
             f->r = cp_rng_range(&w->rng, 8.0f, 15.0f);
             f->type = CP4_FLORA_KELP;
         } else if (cp_rng_f(&w->rng) < 0.38f) {
-            /* buried: the y is inside the soil, so only a burrower reaches it */
+            /* Buried: the y is inside the soil, so only a burrower reaches it.
+             *
+             * Roots grow in patches. Scattering them uniformly meant a
+             * burrower - which moves at a third of a walker's speed - swept
+             * enough ground for about thirteen tubers an episode and finished
+             * on half the meter. Clustering means finding one is worth
+             * following, which is what a slow, thorough search should reward. */
+            if (w->last_tuber >= 0 && cp_rng_f(&w->rng) < 0.62f) {
+                const Cp4Flora *near = &w->flora[w->last_tuber];
+                if (near->type == CP4_FLORA_TUBER) {
+                    p.x = near->p.x + cp_rng_range(&w->rng, -85.0f, 85.0f);
+                    p.z = near->p.z + cp_rng_range(&w->rng, -85.0f, 85.0f);
+                    y = cp4_height(w->seed, p.x, p.z);
+                    if (y > CP4_SEA) continue;      /* the patch ran into water */
+                }
+            }
             f->p = v4(p.x, y + cp_rng_range(&w->rng, 8.0f, 34.0f), p.z);
             /* found by touch rather than by sight, so the reach is generous */
             f->r = cp_rng_range(&w->rng, 11.0f, 19.0f);
@@ -272,6 +359,8 @@ static void spawn_flora(Cp4World *w, int i, Cp4Vec at, float rmin, float rmax)
             f->type = CP4_FLORA_BUSH;
         }
         f->regrow = 0.0f;
+        if (f->type == CP4_FLORA_TUBER) w->last_tuber = (int32_t)i;
+        flora_insert(w, i);
         return;
     }
 }
@@ -286,6 +375,7 @@ static void spawn_carcass(Cp4World *w, Cp4Vec at)
     f->r = cp_rng_range(&w->rng, 8.0f, 14.0f);
     f->type = CP4_FLORA_CARCASS;
     f->regrow = cp_rng_range(&w->rng, CARCASS_LIFE, CARCASS_LIFE * 2.0f);
+    flora_insert(w, i);
     w->n_flora++;
 }
 
@@ -398,7 +488,12 @@ void cp4_world_reset(Cp4World *w, uint32_t seed, const Cp4Genome *genome)
     w->home.alive = 0;
     w->daylight = cp4_daylight(0);
 
-    for (int i = 0; i < CP4_MAX_FLORA; i++) w->flora[i].type = CP4_FLORA_NONE;
+    w->last_tuber = -1;
+    for (int i = 0; i < CP4_FGRID; i++) w->fgrid[i] = -1;
+    for (int i = 0; i < CP4_MAX_FLORA; i++) {
+        w->flora[i].type = CP4_FLORA_NONE;
+        w->fnext[i] = -1;
+    }
     {
         /* never seed more than the array holds - the first cut of the density
          * bump walked straight off the end of it */
@@ -761,9 +856,7 @@ static void beast_think(Cp4World *w, Cp4Beast *b, int idx)
      * walks toward kelp it will drown reaching or a tuber it cannot dig for,
      * ignores the bush beside it, and starves - which is exactly what
      * happened to every rival population when the food split four ways. */
-    for (int i = 0; i < CP4_MAX_FLORA; i++) {
-        const Cp4Flora *f = &w->flora[i];
-        if (f->type == CP4_FLORA_NONE) continue;
+    FLORA_NEAR(w, b->p.x, b->p.z, see, {
         int meat = (f->type == CP4_FLORA_CARCASS);
         if (meat ? !eats_meat : !eats_plant) continue;
         int med = cp4_flora_medium(f->type);
@@ -773,7 +866,7 @@ static void beast_think(Cp4World *w, Cp4Beast *b, int idx)
         if (d2 > see2 || d2 >= best) continue;
         best = d2; b->des = f->p; b->has_target = 1;
         b->want_med = (uint8_t)med;
-    }
+    });
 
     /* What this species has learned about the player. A wary lineage breaks
      * off and runs while a naive one is still grazing, which is the whole
@@ -1006,7 +1099,7 @@ void cp4_world_step(Cp4World *w, const float act[CP4_ACT_DIM])
             if (i >= CP4_MAX_FLORA) break;
             if (w->flora[i].type != CP4_FLORA_CARCASS) continue;
             w->flora[i].regrow -= dt * 6.0f;
-            if (w->flora[i].regrow <= 0.0f) { w->flora[i].type = CP4_FLORA_NONE; w->n_flora--; }
+            if (w->flora[i].regrow <= 0.0f) { flora_clear(w, i); w->n_flora--; }
         }
     }
 
@@ -1014,9 +1107,8 @@ void cp4_world_step(Cp4World *w, const float act[CP4_ACT_DIM])
      * Reach is gated by medium: kelp is only edible from the water and a tuber
      * only from inside the soil. That single check is what makes fins and
      * digging claws pay for themselves rather than being movement toys. */
-    for (int i = 0; i < CP4_MAX_FLORA; i++) {
-        Cp4Flora *f = &w->flora[i];
-        if (f->type == CP4_FLORA_NONE) continue;
+    FLORA_NEAR(w, p->p.x, p->p.z, p->s.radius + 30.0f, {
+        int i = fi;
         if (cp4_flora_medium(f->type) != p->medium) continue;
         float rr = p->s.radius + f->r + 10.0f;
         if (flat2(f->p, p->p) > rr * rr) continue;
@@ -1048,26 +1140,24 @@ void cp4_world_step(Cp4World *w, const float act[CP4_ACT_DIM])
         }
         p->hp = clampf(p->hp + 5.0f, 0.0f, p->hp_max);
         reward += 0.05f;
-        f->type = CP4_FLORA_NONE;
+        flora_clear(w, i);
         w->n_flora--;
-    }
+    });
 
     /* ---- npc feeding, breeding, dying ---- */
     for (int i = 0; i < CP4_MAX_BEASTS; i++) {
         Cp4Beast *b = &w->beast[i];
         if (!b->alive) continue;
-        for (int j = 0; j < CP4_MAX_FLORA; j++) {
-            Cp4Flora *f = &w->flora[j];
-            if (f->type == CP4_FLORA_NONE) continue;
+        FLORA_NEAR(w, b->p.x, b->p.z, b->s.radius + 26.0f, {
             if (cp4_flora_medium(f->type) != b->medium) continue;
             int meat = (f->type == CP4_FLORA_CARCASS);
             if (meat ? b->s.carn_eff <= 0.0f : b->s.graze_eff <= 0.0f) continue;
             float rr = b->s.radius + f->r + 8.0f;
             if (flat2(f->p, b->p) > rr * rr) continue;
             b->energy += (meat ? 40.0f : 26.0f) * (meat ? b->s.carn_eff : b->s.graze_eff);
-            f->type = CP4_FLORA_NONE;
+            flora_clear(w, fi);
             w->n_flora--;
-        }
+        });
 
         if (b->energy >= BREED_AT) {
             int slot = -1;
@@ -1454,9 +1544,7 @@ void cp4_world_observe(const Cp4World *w, float *o)
 
     float fd[CP4_OBS_FLORA_K]; int fi_[CP4_OBS_FLORA_K];
     for (int i = 0; i < CP4_OBS_FLORA_K; i++) { fd[i] = 1e18f; fi_[i] = -1; }
-    for (int i = 0; i < CP4_MAX_FLORA; i++) {
-        const Cp4Flora *f = &w->flora[i];
-        if (f->type == CP4_FLORA_NONE) continue;
+    FLORA_NEAR(w, p->p.x, p->p.z, see, {
         int meat = (f->type == CP4_FLORA_CARCASS);
         if (meat ? s->carn_eff <= 0.0f : s->graze_eff <= 0.0f) continue;
         /* Food in a medium this body cannot enter is not food. Reporting kelp
@@ -1467,8 +1555,8 @@ void cp4_world_observe(const Cp4World *w, float *o)
         if (med == CP4_UNDER && s->dig <= 0.0f) continue;
         float d2 = flat2(f->p, p->p);
         if (d2 > see2) continue;
-        topk(fd, fi_, CP4_OBS_FLORA_K, d2, i);
-    }
+        topk(fd, fi_, CP4_OBS_FLORA_K, d2, fi);
+    });
     for (int i = 0; i < CP4_OBS_FLORA_K; i++) {
         if (fi_[i] < 0) {
             for (int z = 0; z < CP4_OBS_FLORA; z++) o[k++] = 0.0f;
@@ -1580,9 +1668,7 @@ void cp4_policy_greedy(const Cp4World *w, float act[CP4_ACT_DIM])
      * needs to know about media at all: it has to be willing to go into the
      * water or under the ground to reach what it eats, and it must not pick a
      * target it has no way of reaching. */
-    for (int i = 0; i < CP4_MAX_FLORA; i++) {
-        const Cp4Flora *f = &w->flora[i];
-        if (f->type == CP4_FLORA_NONE) continue;
+    FLORA_NEAR(w, p->p.x, p->p.z, see, {
         int meat = (f->type == CP4_FLORA_CARCASS);
         if (meat ? s->carn_eff <= 0.0f : s->graze_eff <= 0.0f) continue;
         int med = cp4_flora_medium(f->type);
@@ -1593,7 +1679,7 @@ void cp4_policy_greedy(const Cp4World *w, float act[CP4_ACT_DIM])
         float d2 = flat2(f->p, p->p);
         if (d2 > see2 || d2 >= best) continue;
         best = d2; target = f->p; have = 1; want_medium = med;
-    }
+    });
 
     /* Run from what you cannot fight.
      *
@@ -1705,10 +1791,12 @@ void cp4_policy_greedy(const Cp4World *w, float act[CP4_ACT_DIM])
     int ascend = 0;
     if (p->medium == CP4_IN_AIR && climb > 0.4f) ascend = 1;
     if (p->medium == CP4_IN_WATER && climb > 0.4f) ascend = 1;
-    /* A winged animal with nothing worth walking to goes up to look for
-     * something, because altitude is the only thing the sky pays. */
-    if (s->fly > 0.0f && p->grounded && (!have || best > 260.0f * 260.0f)
-        && p->stam > s->stamina * 0.35f) ascend = 1;
+    /* A winged animal travels by air. Gliding costs almost nothing now, so
+     * anything more than a short walk is worth taking off for - at a
+     * 260-unit threshold the flyer spent four fifths of its life on foot and
+     * got none of the range it paid sixteen DNA a wing for. */
+    if (s->fly > 0.0f && p->grounded && (!have || best > 130.0f * 130.0f)
+        && p->stam > s->stamina * 0.20f) ascend = 1;
     act[3] = ascend ? 1.0f : 0.0f;
 
     act[4] = attack ? 1.0f : 0.0f;

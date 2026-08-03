@@ -41,6 +41,9 @@ Items are struck through as they land.
   unchanged.
 - ~~**Nests the player builds.**~~ Bank food, heal, and hatch followers that
   carry a mutated copy of your own genome.
+- ~~**A spatial hash for stage 3's flora.**~~ The NPC feeding pass was
+  beasts x flora every step and held the stage to 7.6k steps/s; hashed cells
+  took it to 25.5k without changing any behaviour the tests can see.
 - ~~**Species that remember you.**~~ Wariness, a learned guard against being
   struck from behind, and fatigue at a repeated display - all inside one
   episode, all fading, and all reported to the agent.

@@ -15,7 +15,7 @@ int main(int argc, char **argv)
 {
     uint32_t seed = 5;
     int steps = 3000, W = 1280, H = 720, every = 0, vis = CP_VIS_ABYSS, gallery = 0, table = 0,
-        climate = 0;
+        climate = 0, nseeds = 12;
     const char *out = "land.png";
     Cp4Genome g;
     cp4_genome_starter(&g);
@@ -28,6 +28,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--every") && i + 1 < argc) every = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--gallery") && i + 1 < argc) gallery = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--table"))                 table = 1;
+        else if (!strcmp(argv[i], "--seeds") && i + 1 < argc) nseeds = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--climate"))               climate = 1;
         else if (!strcmp(argv[i], "--size") && i + 1 < argc)  sscanf(argv[++i], "%dx%d", &W, &H);
         else if (!strcmp(argv[i], "--vis") && i + 1 < argc) {
@@ -47,7 +48,7 @@ int main(int argc, char **argv)
         } else {
             printf("usage: cpore_land [--seed N] [--steps N] [--out F] [--size WxH]\n"
                    "                  [--every N] [--style NAME] [--gallery GEN]\n"
-                   "                  [--vis NAME] [--list-parts] [--table]\n"
+                   "                  [--vis NAME] [--list-parts] [--table] [--seeds N]\n"
                    "  styles: grazer predator charmer swimmer flyer burrower\n");
             return 1;
         }
@@ -96,7 +97,7 @@ int main(int argc, char **argv)
             long med[CP4_MEDIUM_COUNT] = { 0, 0, 0, 0 };
             long ate[4] = { 0, 0, 0, 0 };
             float far = 0.0f, dna = 0.0f;
-            const int NS = 12;
+            const int NS = nseeds;
             for (int sd = 0; sd < NS; sd++) {
                 Cp4Genome sg;
                 cp4_genome_autodesign(&sg, NULL, CP4_GEN_BUDGET[0], st);

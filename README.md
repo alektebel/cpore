@@ -196,12 +196,16 @@ live in their medium and eat from it:
 
 | build | evolved | ground / water / air / under | eats |
 |---|---|---|---|
-| grazer | 8/12 | 93% / 6% / 0% / 0% | 233 bushes, 246 songs |
-| predator | 8/12 | 91% / 8% / 0% / 0% | 108 carrion |
-| charmer | 10/12 | 92% / 7% / 0% / 0% | 213 bushes, 228 songs |
-| swimmer | 7/12 | 21% / 76% / 1% / 0% | 411 kelp |
-| flyer | 5/12 | 89% / 6% / 4% / 0% | 224 bushes, 34 species found |
-| burrower | 4/12 | 17% / 3% / 0% / 79% | 169 tubers |
+| grazer | 11/30 | 99% / 0% / 0% / 0% | 938 bushes, 786 songs |
+| predator | 23/30 | 98% / 1% / 0% / 0% | 344 carrion |
+| charmer | 15/30 | 97% / 2% / 0% / 0% | 835 bushes, 727 songs |
+| swimmer | 18/30 | 22% / 77% / 0% / 0% | 1325 kelp |
+| flyer | 8/30 | 76% / 3% / 20% / 0% | 646 bushes, 123 species found |
+| burrower | 7/30 | 26% / 1% / 0% / 71% | 447 tubers |
+
+Twelve seeds turned out to be too few to tune against — a change that only
+shuffles the RNG stream re-rolls every outcome, and I spent a while chasing
+swings that were noise. `--seeds 30` is the honest read.
 
 You can also **build a nest**. It costs energy, it banks the food you carry
 back to it, it heals you, and once the larder is full it hatches a follower
@@ -238,7 +242,7 @@ rises on its own.
 ./build/cpore_land --list-parts
 ./build/cpore_land --style swimmer --seed 3 --steps 1200 --out water.png
 ./build/cpore_land --style burrower --seed 16 --out under.png
-./build/cpore_land --table            # every archetype, every medium
+./build/cpore_land --table --seeds 30    # every archetype, every medium
 ./build/cpore_land --climate --seed 42   # what this world is made of
 ./build/cpore_land --gallery 3 --seed 11 --out gallery.png
 ```
@@ -456,13 +460,25 @@ installed; nothing else requires them.
 Single thread, `-O2`, on the machine this was developed on:
 
 ```
-world state: 22776 bytes/env   obs dim: 97   act dim: 28
+stage 1 (cell)   state 22776 B   obs  97   act 28
 
 64 envs                                  1 env
   step only              81k steps/s       182k steps/s
   step + observe         73k steps/s       178k steps/s
   step + observe + base  60k steps/s       153k steps/s
+
+stage 3 (creature)   state 39648 B   obs 168   act 58
+  step + observe + baseline            25.5k steps/s
 ```
+
+Stage 3 carries far more per step — 440 plants, 64 animals, four media and a
+terrain field sampled several times per animal — so it will never match the
+cell stage. It did start at 7.6k though: the NPC feeding pass was every animal
+against every plant, sixty-four times five hundred every step. A spatial hash
+over the flora, keyed by hashed cell coordinates because the world has no
+bounds to index against, took it to 25.5k. Every read goes through one macro
+and every write through one function, so the grid cannot drift out of step with
+the array it describes.
 
 Read that as roughly **30M entity-updates/s** — every step advances ~370
 entities, so this is not comparable to a 1M-steps/s Pong. The 64-env number is

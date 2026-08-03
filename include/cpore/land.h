@@ -35,6 +35,8 @@ extern "C" {
 #define CP4_MAX_NESTS      7
 #define CP4_MAX_PARTS     12
 #define CP4_MAX_SEG        6
+#define CP4_FCELL      150.0f   /* flora hash cell, a little over a sight step */
+#define CP4_FGRID      2048     /* buckets; must be a power of two */
 
 #define CP4_DNA_GOAL   100.0f
 #define CP4_GENERATIONS  4
@@ -267,6 +269,15 @@ typedef struct {
 
     Cp4Flora  flora[CP4_MAX_FLORA];
     int32_t   n_flora, flora_cursor;
+    /* Spatial hash over the flora, as linked lists into flora[].
+     *
+     * Without it the NPC feeding pass is beasts x flora - sixty-four animals
+     * against five hundred plants every step - which is what held the stage to
+     * a tenth of stage 1's throughput. The world has no bounds, so the grid is
+     * a hash of the cell coordinates rather than an array indexed by them. */
+    int16_t   fgrid[CP4_FGRID];
+    int16_t   fnext[CP4_MAX_FLORA];
+    int32_t   last_tuber;    /* roots grow in patches, so they seed off each other */
     Cp4Beast  beast[CP4_MAX_BEASTS];
     Cp4Nest   nest[CP4_MAX_NESTS];
     Cp4Home   home;
