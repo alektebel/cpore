@@ -14,7 +14,8 @@
 int main(int argc, char **argv)
 {
     uint32_t seed = 5;
-    int steps = 3000, W = 1280, H = 720, every = 0, vis = CP_VIS_ABYSS, gallery = 0, table = 0;
+    int steps = 3000, W = 1280, H = 720, every = 0, vis = CP_VIS_ABYSS, gallery = 0, table = 0,
+        climate = 0;
     const char *out = "land.png";
     Cp4Genome g;
     cp4_genome_starter(&g);
@@ -27,6 +28,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--every") && i + 1 < argc) every = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--gallery") && i + 1 < argc) gallery = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--table"))                 table = 1;
+        else if (!strcmp(argv[i], "--climate"))               climate = 1;
         else if (!strcmp(argv[i], "--size") && i + 1 < argc)  sscanf(argv[++i], "%dx%d", &W, &H);
         else if (!strcmp(argv[i], "--vis") && i + 1 < argc) {
             const char *nm = argv[++i];
@@ -49,6 +51,35 @@ int main(int argc, char **argv)
                    "  styles: grazer predator charmer swimmer flyer burrower\n");
             return 1;
         }
+    }
+
+    /* --climate: what the world is actually made of. A biome field that is
+     * ninety percent one biome is a uniform world with extra code in it, so
+     * this prints the mix and a coarse map to look at. */
+    if (climate) {
+        long hist[CP4_BIOME_COUNT];
+        long sea = 0, total = 0;
+        memset(hist, 0, sizeof(hist));
+        const int N = 64;
+        const float SPAN = 9000.0f;
+        for (int gy = 0; gy < N; gy++) {
+            for (int gx = 0; gx < N; gx++) {
+                float x = ((float)gx / N - 0.5f) * SPAN + CP4_W * 0.5f;
+                float z = ((float)gy / N - 0.5f) * SPAN + CP4_D * 0.5f;
+                total++;
+                if (cp4_height(seed, x, z) > CP4_SEA) { sea++; putchar('~'); continue; }
+                int b = cp4_biome(seed, x, z);
+                hist[b]++;
+                putchar("IUTFGSDJ"[b]);
+            }
+            putchar('\n');
+        }
+        printf("\nseed %u over %.0f units square:\n", seed, (double)SPAN);
+        printf("  water  %4.1f%%\n", 100.0 * (double)sea / (double)total);
+        for (int b = 0; b < CP4_BIOME_COUNT; b++)
+            printf("  %-8s %4.1f%%  fertility %.2f\n", cp4_biome_name(b),
+                   100.0 * (double)hist[b] / (double)total, (double)cp4_fertility(b));
+        return 0;
     }
 
     /* --table: every archetype against the same seeds. The question this

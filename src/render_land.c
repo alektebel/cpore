@@ -253,25 +253,33 @@ static float terrain_shadow(const Ctx *c, V3 q)
  * is too steep to hold soil, pale scree on the peaks, and grass in between
  * with its hue drifting on a low-frequency noise so the map has regions
  * instead of one uniform green. */
+/* Ground colour.
+ *
+ * Sand at the waterline, rock where it is too steep to hold soil, and
+ * otherwise whatever the biome says. Blending between two biome colours on the
+ * temperature/moisture values rather than switching on the banded index is
+ * what stops the map looking like a political cartogram: the boundary between
+ * savanna and desert should be a gradient you walk through, not a line. */
+static V3 biome_colour(int b, float band)
+{
+    /* each biome as a low/high pair, mixed on elevation */
+    V3 lo, hi;
+    switch (b) {
+    case CP4_BIOME_ICE:     lo = v3(0.62f, 0.68f, 0.74f); hi = v3(0.80f, 0.84f, 0.88f); break;
+    case CP4_BIOME_TUNDRA:  lo = v3(0.36f, 0.36f, 0.30f); hi = v3(0.52f, 0.54f, 0.52f); break;
+    case CP4_BIOME_TAIGA:   lo = v3(0.13f, 0.24f, 0.17f); hi = v3(0.22f, 0.30f, 0.24f); break;
+    case CP4_BIOME_FOREST:  lo = v3(0.10f, 0.26f, 0.09f); hi = v3(0.18f, 0.34f, 0.14f); break;
+    case CP4_BIOME_GRASS:   lo = v3(0.17f, 0.31f, 0.11f); hi = v3(0.28f, 0.38f, 0.16f); break;
+    case CP4_BIOME_SAVANNA: lo = v3(0.36f, 0.32f, 0.13f); hi = v3(0.46f, 0.40f, 0.19f); break;
+    case CP4_BIOME_DESERT:  lo = v3(0.56f, 0.44f, 0.24f); hi = v3(0.66f, 0.54f, 0.32f); break;
+    default:                lo = v3(0.09f, 0.24f, 0.08f); hi = v3(0.14f, 0.32f, 0.11f); break;
+    }
+    return v3(mixf(lo.x, hi.x, band), mixf(lo.y, hi.y, band), mixf(lo.z, hi.z, band));
+}
+
 static V3 ground_albedo(const Ctx *c, V3 q, float slope, float dist)
 {
     float elev = -q.y;
-    /* two scales of patchiness: broad regions, then meadow-sized patches that
-     * still resolve a few hundred units out */
-    float band  = fbm2(c->seed ^ 0x2Au, q.x * 0.00085f, q.z * 0.00085f);
-    float patch = rnoise(c->seed ^ 0x91u, q.x * 0.0065f, q.z * 0.0065f);
-
-    V3 grass = v3(0.13f + 0.12f * band, 0.27f + 0.14f * band, 0.10f + 0.08f * band);
-    V3 dry   = v3(0.34f, 0.31f, 0.15f);
-    V3 rock  = v3(0.25f, 0.23f, 0.21f);
-    V3 sand  = v3(0.48f, 0.42f, 0.27f);
-    V3 scree = v3(0.46f, 0.47f, 0.50f);
-
-    /* dry grassland in the lowlands, greener as it climbs */
-    float wet = clampf((elev + 20.0f) / 120.0f, 0.0f, 1.0f);
-    float mix = clampf(wet * (0.55f + 0.75f * patch), 0.0f, 1.0f);
-    V3 col = v3(mixf(dry.x, grass.x, mix), mixf(dry.y, grass.y, mix),
-                mixf(dry.z, grass.z, mix));
 
     /* Below the waterline the land ramp is simply wrong - it paints a drowned
      * seabed as dry grassland, which is what made the first underwater shot a
@@ -283,17 +291,28 @@ static V3 ground_albedo(const Ctx *c, V3 q, float slope, float dist)
         return mul(silt, ripple);
     }
 
+    float band = clampf((elev + 20.0f) / 150.0f, 0.0f, 1.0f);
+    V3 col = biome_colour(cp4_biome(c->seed, q.x, q.z), band);
+
+    /* patchiness inside a biome, so a meadow is not one flat green */
+    float patch = rnoise(c->seed ^ 0x91u, q.x * 0.0065f, q.z * 0.0065f);
+    col = mul(col, 0.82f + 0.34f * patch);
+
+    V3 rock = v3(0.25f, 0.23f, 0.21f);
     float rocky = clampf((0.80f - slope) * 4.0f, 0.0f, 1.0f);
     col = v3(mixf(col.x, rock.x, rocky), mixf(col.y, rock.y, rocky),
              mixf(col.z, rock.z, rocky));
 
+    V3 sand = v3(0.48f, 0.42f, 0.27f);
     float shore = clampf(1.0f - fabsf(elev + CP4_SEA) / 22.0f, 0.0f, 1.0f);
     col = v3(mixf(col.x, sand.x, shore), mixf(col.y, sand.y, shore),
              mixf(col.z, sand.z, shore));
 
-    float high = clampf((elev - 96.0f) / 34.0f, 0.0f, 1.0f);
-    col = v3(mixf(col.x, scree.x, high), mixf(col.y, scree.y, high),
-             mixf(col.z, scree.z, high));
+    /* snow caps everything high enough, whatever biome it stands in */
+    V3 snow = v3(0.74f, 0.78f, 0.82f);
+    float high = clampf((elev - 112.0f) / 40.0f, 0.0f, 1.0f);
+    col = v3(mixf(col.x, snow.x, high), mixf(col.y, snow.y, high),
+             mixf(col.z, snow.z, high));
 
     /* Fine speckle, so a flat field is not a flat colour - but it has to fade
      * out with distance. One sample per pixel of an 0.08-frequency noise turns
@@ -1149,17 +1168,22 @@ static void draw_hud4(uint8_t *fb, int W, int H, const Cp4World *w)
             { 0.86f, 0.88f, 0.96f }, { 0.84f, 0.66f, 0.40f },
         };
         int m = p->medium % CP4_MEDIUM_COUNT;
-        snprintf(buf, sizeof(buf), "%s", cp4_medium_name(m));
+        int bi = cp4_biome(w->seed, p->p.x, p->p.z);
+        snprintf(buf, sizeof(buf), "%s %s", cp4_medium_name(m), cp4_biome_name(bi));
         for (char *q = buf; *q; q++) if (*q >= 'a' && *q <= 'z') *q = (char)(*q - 32);
-        cp_px_rect(fb, W, H, 118, 6, 4, 4, MC[m][0], MC[m][1], MC[m][2], 1.0f);
-        cp_px_text(fb, W, H, 124, 5, 1, buf, MC[m][0], MC[m][1], MC[m][2], 1.0f);
+        /* Where you are and what kind of place it is, on its own dark strip.
+         * Against an open sky an olive label is simply invisible. */
+        int lw2 = cp_px_text_w(buf, 1) + 14;
+        cp_px_rect(fb, W, H, 116, 3, lw2, 10, 0.05f, 0.06f, 0.04f, 0.84f);
+        cp_px_rect(fb, W, H, 119, 6, 4, 4, MC[m][0], MC[m][1], MC[m][2], 1.0f);
+        cp_px_text(fb, W, H, 126, 5, 1, buf, MC[m][0], MC[m][1], MC[m][2], 1.0f);
         if (p->s.breath < 1.0e8f && (m == CP4_IN_WATER || m == CP4_UNDER)) {
             float f = clampf(p->breath / (p->s.breath > 1.0f ? p->s.breath : 1.0f),
                              0.0f, 1.0f);
-            cp_px_rect(fb, W, H, 118, 13, 40, 3, 0.03f, 0.04f, 0.03f, 1.0f);
+            cp_px_rect(fb, W, H, 118, 15, 40, 3, 0.03f, 0.04f, 0.03f, 1.0f);
             int fw = (int)(40.0f * f);
             if (fw > 0)
-                cp_px_rect(fb, W, H, 118, 13, fw, 3,
+                cp_px_rect(fb, W, H, 118, 15, fw, 3,
                            f < 0.3f ? 0.94f : 0.42f, f < 0.3f ? 0.36f : 0.82f, 0.94f, 1.0f);
         }
     }

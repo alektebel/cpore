@@ -646,6 +646,79 @@ int main(void)
         free(w);
     }
 
+    /* --- BIOMES ---
+     * An unbounded world is only worth crossing if what is over there differs
+     * from what is here. The claim is that the climate field produces regions
+     * rather than noise, that every biome actually occurs somewhere, and that
+     * a biome is a mechanic - fertility has to vary, or it is a paint job. */
+    {
+        long hist[CP4_BIOME_COUNT];
+        int seen_all = 1, pure = 1, coherent = 1;
+        float worst_share = 0.0f;
+        for (int seed = 0; seed < 6; seed++) {
+            memset(hist, 0, sizeof(hist));
+            long land = 0;
+            for (int gy = 0; gy < 48; gy++) {
+                for (int gx = 0; gx < 48; gx++) {
+                    float x = ((float)gx / 48.0f - 0.5f) * 9000.0f + CP4_W * 0.5f;
+                    float z = ((float)gy / 48.0f - 0.5f) * 9000.0f + CP4_D * 0.5f;
+                    if (cp4_height((uint32_t)seed, x, z) > CP4_SEA) continue;
+                    hist[cp4_biome((uint32_t)seed, x, z)]++;
+                    land++;
+                }
+            }
+            if (land < 200) continue;
+            for (int b = 0; b < CP4_BIOME_COUNT; b++) {
+                float share = (float)hist[b] / (float)land;
+                if (share > worst_share) worst_share = share;
+            }
+            /* no single biome may swallow the world */
+            if (worst_share > 0.80f) pure = 0;
+        }
+        /* every biome has to exist on some seed, or the classifier has dead
+         * branches and the design space is smaller than it claims */
+        {
+            long total[CP4_BIOME_COUNT];
+            memset(total, 0, sizeof(total));
+            for (int seed = 0; seed < 24; seed++)
+                for (int gy = 0; gy < 24; gy++)
+                    for (int gx = 0; gx < 24; gx++) {
+                        float x = ((float)gx / 24.0f - 0.5f) * 9000.0f + CP4_W * 0.5f;
+                        float z = ((float)gy / 24.0f - 0.5f) * 9000.0f + CP4_D * 0.5f;
+                        if (cp4_height((uint32_t)seed, x, z) > CP4_SEA) continue;
+                        total[cp4_biome((uint32_t)seed, x, z)]++;
+                    }
+            for (int b = 0; b < CP4_BIOME_COUNT; b++) if (!total[b]) seen_all = 0;
+        }
+        /* a biome must be a region you walk into, not a patch you step over:
+         * two points thirty units apart should almost always agree */
+        {
+            int same = 0, n = 0;
+            for (int i = 0; i < 3000; i++) {
+                float x = (float)(i * 137 % 7000) - 3500.0f + CP4_W * 0.5f;
+                float z = (float)(i * 271 % 7000) - 3500.0f + CP4_D * 0.5f;
+                if (cp4_height(5, x, z) > CP4_SEA) continue;
+                if (cp4_height(5, x + 30.0f, z) > CP4_SEA) continue;
+                n++;
+                if (cp4_biome(5, x, z) == cp4_biome(5, x + 30.0f, z)) same++;
+            }
+            if (n && (float)same / (float)n < 0.90f) coherent = 0;
+        }
+        /* and fertility has to actually differ, or biomes are decoration */
+        float lo = 1e9f, hi = -1e9f;
+        for (int b = 0; b < CP4_BIOME_COUNT; b++) {
+            float f = cp4_fertility(b);
+            if (f < lo) lo = f;
+            if (f > hi) hi = f;
+        }
+        printf("        biggest single biome share %.0f%%, fertility spans %.2f..%.2f\n",
+               (double)(worst_share * 100.0f), (double)lo, (double)hi);
+        CHECK(seen_all, "land: every biome occurs somewhere");
+        CHECK(pure, "land: no seed is one biome wearing a hat");
+        CHECK(coherent, "land: biomes are regions, not noise");
+        CHECK(hi > lo * 3.0f, "land: a biome changes what grows, not just the colour");
+    }
+
     /* --- THE FOUR MEDIA ---
      * Ground, water, air and soil have to be four ways to live, not one way
      * plus three decorations. Each archetype is run from its own starting

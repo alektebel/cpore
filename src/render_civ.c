@@ -171,16 +171,26 @@ static void draw_terrain(Map *m, const Cp5World *w)
                 /* hillshade from the north-west, the convention every relief
                  * map uses because it is the one the eye reads as raised */
                 float lam = clampf(-(nx * 0.42f + ny * 0.80f + nz * 0.42f), 0.0f, 1.5f);
-                float band = clampf((elev + 20.0f) / 130.0f, 0.0f, 1.0f);
-                C3 low  = c3(0.30f, 0.28f, 0.14f);
-                C3 mid  = c3(0.17f, 0.33f, 0.14f);
-                C3 high = c3(0.42f, 0.42f, 0.40f);
-                C3 g = band < 0.5f
-                     ? c3(mixf(low.r, mid.r, band * 2.0f), mixf(low.g, mid.g, band * 2.0f),
-                          mixf(low.b, mid.b, band * 2.0f))
-                     : c3(mixf(mid.r, high.r, (band - 0.5f) * 2.0f),
-                          mixf(mid.g, high.g, (band - 0.5f) * 2.0f),
-                          mixf(mid.b, high.b, (band - 0.5f) * 2.0f));
+                float band = clampf((elev + 20.0f) / 150.0f, 0.0f, 1.0f);
+                /* The same biome field stage 3 walks through. A civilisation
+                 * map that showed one uniform green would be hiding the most
+                 * legible thing about the ground it is fought over. */
+                C3 g;
+                switch (cp4_biome(m->seed, wx, wz)) {
+                case CP4_BIOME_ICE:     g = c3(0.66f, 0.71f, 0.76f); break;
+                case CP4_BIOME_TUNDRA:  g = c3(0.40f, 0.41f, 0.35f); break;
+                case CP4_BIOME_TAIGA:   g = c3(0.14f, 0.26f, 0.18f); break;
+                case CP4_BIOME_FOREST:  g = c3(0.11f, 0.28f, 0.10f); break;
+                case CP4_BIOME_GRASS:   g = c3(0.20f, 0.34f, 0.13f); break;
+                case CP4_BIOME_SAVANNA: g = c3(0.40f, 0.35f, 0.15f); break;
+                case CP4_BIOME_DESERT:  g = c3(0.60f, 0.48f, 0.27f); break;
+                default:                g = c3(0.10f, 0.26f, 0.09f); break;
+                }
+                /* elevation still shows through, and snow caps the peaks */
+                g = c3(g.r * (0.82f + 0.36f * band), g.g * (0.82f + 0.36f * band),
+                       g.b * (0.82f + 0.36f * band));
+                float high = clampf((elev - 112.0f) / 40.0f, 0.0f, 1.0f);
+                g = c3(mixf(g.r, 0.78f, high), mixf(g.g, 0.81f, high), mixf(g.b, 0.85f, high));
                 float k = 0.45f + 0.85f * lam;
                 col = c3(g.r * k, g.g * k, g.b * k);
             }

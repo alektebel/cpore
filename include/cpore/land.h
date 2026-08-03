@@ -138,6 +138,25 @@ void  cp4_genome_colour(const Cp4Genome *g, float *rgb, float *rgb2);
 #define CP4_STYLE_COUNT     6
 const char *cp4_style_name(int style);
 
+/* ---- climate ----
+ * Two more pure functions of position, on top of the height field. An
+ * unbounded world is only worth walking across if what is over there differs
+ * from what is here, and temperature and moisture are the cheapest pair that
+ * produces regions rather than noise: they decide the ground colour, what
+ * grows in it and how much of it grows.
+ *
+ * Both come back in 0..1. Temperature falls with altitude as well as varying
+ * geographically, so a mountain is cold wherever it stands. */
+enum { CP4_BIOME_ICE = 0, CP4_BIOME_TUNDRA, CP4_BIOME_TAIGA, CP4_BIOME_FOREST,
+       CP4_BIOME_GRASS, CP4_BIOME_SAVANNA, CP4_BIOME_DESERT, CP4_BIOME_JUNGLE,
+       CP4_BIOME_COUNT };
+
+void  cp4_climate(uint32_t seed, float x, float z, float *temp, float *moist);
+int   cp4_biome(uint32_t seed, float x, float z);
+const char *cp4_biome_name(int b);
+/* how much grows here, 0..1 - a desert is not merely a different colour */
+float cp4_fertility(int biome);
+
 /* ---- terrain ----
  * A deterministic function of world seed and position, so it needs no storage
  * and the same seed always grows the same hills. */
@@ -200,10 +219,11 @@ typedef struct {
 #define CP4_OBS_BEAST_K 6
 #define CP4_OBS_FLORA   7     /* dx, dz, dy, and one flag per food type */
 /* 18 body/world, then 14 for medium and home: four one-hot media, three
- * capability gates, breath, height over ground, and four for the nest. Then
- * neighbours, own parts, own stats. Miscounting this overflows the caller's
- * observation buffer, which is what test_obs_dim below exists to catch. */
-#define CP4_OBS_DIM   (18 + 14 + CP4_OBS_FLORA_K * CP4_OBS_FLORA \
+ * capability gates, breath, height over ground, and four for the nest. Then 2
+ * for the climate here, neighbours, own parts, own stats. Miscounting this
+ * overflows the caller's observation buffer, which is what the exact-count
+ * test exists to catch. */
+#define CP4_OBS_DIM   (18 + 14 + 2 + CP4_OBS_FLORA_K * CP4_OBS_FLORA \
                           + CP4_OBS_BEAST_K * 8 + (CP4_PART_COUNT - 1) + 7)
 /* turn, pitch, move, ascend/jump, attack, sing, dig, nest */
 #define CP4_ACT_CTRL   8

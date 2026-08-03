@@ -100,6 +100,81 @@ void cp4_normal(uint32_t seed, float x, float z, float *nx, float *ny, float *nz
     *nx = ax / l; *ny = ay / l; *nz = az / l;
 }
 
+/* ---------------- climate ----------------
+ *
+ * Temperature and moisture, both pure functions of position like the height
+ * field, so biomes cost no storage and stream for free. Their frequency is
+ * deliberately lower than the terrain's: a biome should be a region you walk
+ * into and out of over minutes, not a patch you cross in one stride.
+ *
+ * Temperature also falls with altitude, which is what puts snow on a peak in
+ * the middle of a savanna and is most of what makes the skyline interesting. */
+void cp4_climate(uint32_t seed, float x, float z, float *temp, float *moist)
+{
+    float t = vnoise(seed ^ 0x7EA1u, x * 0.00026f, z * 0.00026f);
+    float m = vnoise(seed ^ 0x3B0Du, x * 0.00034f, z * 0.00034f);
+    /* a second octave so the boundaries wander instead of being ellipses */
+    t = t * 0.78f + vnoise(seed ^ 0x11C7u, x * 0.0011f, z * 0.0011f) * 0.22f;
+    m = m * 0.78f + vnoise(seed ^ 0x55A3u, x * 0.0013f, z * 0.0013f) * 0.22f;
+
+    /* Value noise clusters hard around 0.5, so the raw field almost never
+     * reaches the hot-and-dry corner: the first survey came out 30% frozen
+     * and 0.1% desert. Expanding about the midpoint is what gives all eight
+     * biomes a share of the map. */
+    t = 0.5f + (t - 0.5f) * 1.55f;
+    m = 0.5f + (m - 0.5f) * 1.70f;
+
+    float elev = -cp4_height(seed, x, z);
+    t -= clampf((elev - 60.0f) / 190.0f, 0.0f, 1.0f) * 0.38f;   /* lapse rate */
+    /* the sea is the source of all the rain there is */
+    m += clampf((CP4_SEA - elev) / 120.0f, 0.0f, 1.0f) * 0.16f;
+
+    if (temp)  *temp  = clampf(t, 0.0f, 1.0f);
+    if (moist) *moist = clampf(m, 0.0f, 1.0f);
+}
+
+int cp4_biome(uint32_t seed, float x, float z)
+{
+    float t, m;
+    cp4_climate(seed, x, z, &t, &m);
+    if (t < 0.11f) return CP4_BIOME_ICE;
+    if (t < 0.34f) return m > 0.45f ? CP4_BIOME_TAIGA : CP4_BIOME_TUNDRA;
+    if (t > 0.72f) {
+        if (m < 0.30f) return CP4_BIOME_DESERT;
+        if (m > 0.66f) return CP4_BIOME_JUNGLE;
+        return CP4_BIOME_SAVANNA;
+    }
+    if (m < 0.34f) return CP4_BIOME_SAVANNA;
+    if (m > 0.60f) return CP4_BIOME_FOREST;
+    return CP4_BIOME_GRASS;
+}
+
+const char *cp4_biome_name(int b)
+{
+    static const char *B[CP4_BIOME_COUNT] = {
+        "ice", "tundra", "taiga", "forest", "grass", "savanna", "desert", "jungle"
+    };
+    return (b >= 0 && b < CP4_BIOME_COUNT) ? B[b] : "?";
+}
+
+/* How much a biome grows. This is the whole reason biomes are a mechanic and
+ * not a paint job: crossing a desert costs you, and a jungle is worth the
+ * walk. */
+float cp4_fertility(int b)
+{
+    switch (b) {
+    case CP4_BIOME_ICE:     return 0.20f;
+    case CP4_BIOME_TUNDRA:  return 0.32f;
+    case CP4_BIOME_TAIGA:   return 0.72f;
+    case CP4_BIOME_FOREST:  return 1.00f;
+    case CP4_BIOME_GRASS:   return 0.85f;
+    case CP4_BIOME_SAVANNA: return 0.55f;
+    case CP4_BIOME_DESERT:  return 0.16f;
+    case CP4_BIOME_JUNGLE:  return 1.15f;
+    default:                return 0.7f;
+    }
+}
+
 /* ---------------- spawning ----------------
  *
  * The world is unbounded. Terrain is a pure function of position, so there is
@@ -142,6 +217,16 @@ static void spawn_flora(Cp4World *w, int i, Cp4Vec at, float rmin, float rmax)
         float y = cp4_height(w->seed, p.x, p.z);
         Cp4Flora *f = &w->flora[i];
         int drowned = y > CP4_SEA;
+
+        /* Fertility as a rejection test rather than a density parameter: a
+         * spot in a desert usually fails and the attempt lands somewhere else
+         * in the ring. That is what turns a biome from a colour into a reason
+         * to be somewhere - crossing sand costs you, a jungle is worth the
+         * walk, and none of it needs a second flora array. */
+        if (!drowned && tries < 9) {
+            float fert = cp4_fertility(cp4_biome(w->seed, p.x, p.z));
+            if (cp_rng_f(&w->rng) > fert) continue;
+        }
 
         if (drowned) {
             /* Deep enough to swim in and shallow enough to hold light. The
@@ -1213,6 +1298,12 @@ void cp4_world_observe(const Cp4World *w, float *o)
     o[k++] = w->sing_cd <= 0.0f ? 1.0f : 0.0f;
     o[k++] = clampf(-ground / 200.0f, -1.0f, 2.0f);          /* elevation */
     o[k++] = clampf((CP4_SEA - ground) / 60.0f, -2.0f, 2.0f); /* height over water */
+    {   /* the climate here, so "somewhere else" is a thing the agent can see */
+        float tt, mm;
+        cp4_climate(w->seed, p->p.x, p->p.z, &tt, &mm);
+        o[k++] = tt;
+        o[k++] = mm;
+    }
     {   /* slope ahead: the terrain's own gradient, in the body frame */
         float nx, ny, nz;
         cp4_normal(w->seed, p->p.x + fx * 30.0f, p->p.z + fz * 30.0f, &nx, &ny, &nz);

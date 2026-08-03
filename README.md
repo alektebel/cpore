@@ -155,18 +155,37 @@ Every medium has its own food, so a medium is somewhere worth going rather than
 somewhere you merely can go. Air is the exception: what the sky pays is range,
 which in a world with no edges is what finds the next species to impress.
 
+**Biomes** are the other half of making distance mean something. Temperature
+and moisture are two more pure functions of position, so they cost no storage
+and stream for free; temperature also falls with altitude, which is what puts
+snow on a peak in the middle of a savanna. Eight biomes fall out of the pair,
+and fertility varies fivefold across them — a desert is not a different colour,
+it is a place where crossing costs you and almost nothing grows. `--climate`
+prints the mix and a coarse map:
+
+```
+seed 42                  seed 7                   seed 21
+  ice      14.3%           ice      13.3%           forest   54.7%
+  taiga    18.0%           savanna  17.4%           grass    16.0%
+  forest   17.8%           forest   13.1%           taiga     9.0%
+  ...                      jungle    9.2%           jungle    6.2%
+```
+
+Seeds have character: 42 is cold and forested, 7 is hot with savanna and
+jungle, 21 is one big temperate wood.
+
 Six archetypes, each run from its own starting build by the scripted baseline
 over twelve seeds — the point of the table is that the specialists actually
 live in their medium and eat from it:
 
 | build | evolved | ground / water / air / under | eats |
 |---|---|---|---|
-| grazer | 3/12 | 97% / 2% / 0% / 0% | 235 bushes |
-| predator | 5/12 | 98% / 1% / 0% / 0% | 209 carrion |
-| charmer | 7/12 | 97% / 2% / 0% / 0% | 132 bushes, 229 songs |
-| swimmer | 7/12 | 25% / 74% / 0% / 0% | 487 kelp |
-| flyer | 3/12 | 90% / 2% / 7% / 0% | 169 bushes, 52 species found |
-| burrower | 2/12 | 10% / 1% / 0% / 87% | 292 tubers |
+| grazer | 8/12 | 93% / 6% / 0% / 0% | 233 bushes, 246 songs |
+| predator | 8/12 | 91% / 8% / 0% / 0% | 108 carrion |
+| charmer | 10/12 | 92% / 7% / 0% / 0% | 213 bushes, 228 songs |
+| swimmer | 7/12 | 21% / 76% / 1% / 0% | 411 kelp |
+| flyer | 5/12 | 89% / 6% / 4% / 0% | 224 bushes, 34 species found |
+| burrower | 4/12 | 17% / 3% / 0% / 79% | 169 tubers |
 
 You can also **build a nest**. It costs energy, it banks the food you carry
 back to it, it heals you, and once the larder is full it hatches a follower
@@ -186,6 +205,7 @@ rises on its own.
 ./build/cpore_land --style swimmer --seed 3 --steps 1200 --out water.png
 ./build/cpore_land --style burrower --seed 16 --out under.png
 ./build/cpore_land --table            # every archetype, every medium
+./build/cpore_land --climate --seed 42   # what this world is made of
 ./build/cpore_land --gallery 3 --seed 11 --out gallery.png
 ```
 

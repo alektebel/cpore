@@ -41,6 +41,10 @@ Items are struck through as they land.
   unchanged.
 - ~~**Nests the player builds.**~~ Bank food, heal, and hatch followers that
   carry a mutated copy of your own genome.
+- ~~**Biomes.**~~ Temperature and moisture as two more pure functions of
+  position, eight biomes off the pair, and fertility varying fivefold across
+  them so a biome is a mechanic rather than a paint job. The same field colours
+  the stage-4 map, because it is the same planet.
 
 ## Next
 
@@ -74,12 +78,12 @@ plumbing exercise.
 
 ## Larger
 
-**12. Biomes.** Stage 3 is unbounded now and the resident-window design held
-up — snapshot, determinism and throughput all survived it. What is still
-missing is variety across that extent: the continental field decides land from
-sea, but temperature, substrate and weather do not vary, so a thousand units
-north looks like a thousand units south. Stage 2 is still a fixed box and
-should inherit the same treatment.
+**12. Weather, and biomes for stage 2.** Stage 3 has eight biomes off a
+temperature/moisture pair, and fertility varies fivefold across them, so
+crossing a desert costs and a jungle pays. What is still missing is time:
+nothing changes over an episode — no seasons, no storms, no day and night.
+Stage 2 is also still a fixed box and should inherit both the resident-window
+treatment and a substrate/current equivalent of biomes.
 
 **13. Articulated physics and learned locomotion.** Bodies do not swim. Thrust
 is applied along a heading and the undulation is a decorative sine disconnected
