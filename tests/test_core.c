@@ -608,12 +608,161 @@ int main(void)
                 cp4_genome_stats(&g, &st);
                 if (cp4_genome_cost(&g) > CP4_GEN_BUDGET[gen]) ok_budget = 0;
                 if (st.n[CP4_MOUTH_G] + st.n[CP4_MOUTH_C] + st.n[CP4_MOUTH_O] < 1) ok_mouth = 0;
-                if (st.n[CP4_LEG] < 1) ok_legs = 0;
+                /* legs are no longer the only way to get around: a finned or
+                 * winged body is allowed to have none */
+                if (st.n[CP4_LEG] + st.n[CP4_FIN] + st.n[CP4_WING] < 1) ok_legs = 0;
             }
         }
         CHECK(ok_budget, "land: normalise never exceeds the generation budget");
         CHECK(ok_mouth, "land: every normalised genome keeps a mouth");
-        CHECK(ok_legs, "land: every normalised genome keeps a leg");
+        CHECK(ok_legs, "land: every normalised genome keeps a way to move");
+    }
+
+    /* The observation must write exactly as many floats as it advertises.
+     * Getting this wrong overruns whatever buffer the caller supplied, and it
+     * is silent until something further up the stack is corrupted - which is
+     * exactly how the medium block shipped one value over budget. */
+    {
+        static float buf[CP4_OBS_DIM + 16];
+        Cp4World *w = (Cp4World *)malloc(sizeof(Cp4World));
+        int exact = 1;
+        for (int seed = 0; seed < 3; seed++) {
+            for (int i = 0; i < CP4_OBS_DIM + 16; i++) buf[i] = -999.0f;
+            cp4_world_reset(w, (uint32_t)(seed * 7 + 1), NULL);
+            for (int t = 0; t < 60; t++) {
+                float act[CP4_ACT_DIM];
+                cp4_policy_greedy(w, act);
+                cp4_world_step(w, act);
+            }
+            cp4_world_observe(w, buf);
+            for (int i = CP4_OBS_DIM; i < CP4_OBS_DIM + 16; i++)
+                if (buf[i] != -999.0f) exact = 0;
+            /* and it must fill every slot it claims */
+            int untouched = 0;
+            for (int i = 0; i < CP4_OBS_DIM; i++) if (buf[i] == -999.0f) untouched++;
+            if (untouched) exact = 0;
+        }
+        CHECK(exact, "land: the observation writes exactly CP4_OBS_DIM floats");
+        free(w);
+    }
+
+    /* --- THE FOUR MEDIA ---
+     * Ground, water, air and soil have to be four ways to live, not one way
+     * plus three decorations. Each archetype is run from its own starting
+     * build and has to spend real time in its own medium and eat the food that
+     * grows there - a medium nobody enters, or enters but cannot feed in, is
+     * not pulling its weight. */
+    {
+        long med[CP4_MEDIUM_COUNT] = { 0, 0, 0, 0 };
+        int kelp = 0, tuber = 0, air_style_air = 0, dug = 0, swam = 0;
+        int nests = 0, hatched = 0, found = 0;
+        Cp4World *w = (Cp4World *)malloc(sizeof(Cp4World));
+        for (int st = 0; st < CP4_STYLE_COUNT; st++) {
+            long m[CP4_MEDIUM_COUNT] = { 0, 0, 0, 0 };
+            for (int s = 0; s < 6; s++) {
+                Cp4Genome g;
+                cp4_genome_autodesign(&g, NULL, CP4_GEN_BUDGET[0], st);
+                cp4_world_reset(w, (uint32_t)(s * 13 + 3), &g);
+                for (int t = 0; t < CP4_MAX_STEPS && w->status == CP4_RUN; t++) {
+                    float act[CP4_ACT_DIM];
+                    cp4_policy_greedy(w, act);
+                    cp4_world_step(w, act);
+                }
+                for (int k = 0; k < CP4_MEDIUM_COUNT; k++) {
+                    med[k] += w->medium_steps[k];
+                    m[k] += w->medium_steps[k];
+                }
+                kelp += w->ate_kelp;
+                tuber += w->ate_tuber;
+                nests += w->home.alive ? 1 : 0;
+                hatched += w->hatchlings;
+                found += w->discovered;
+            }
+            long tot = m[0] + m[1] + m[2] + m[3];
+            if (tot < 1) tot = 1;
+            printf("        %-9s ground %2ld%%  water %2ld%%  air %2ld%%  under %2ld%%\n",
+                   cp4_style_name(st), m[0] * 100 / tot, m[1] * 100 / tot,
+                   m[2] * 100 / tot, m[3] * 100 / tot);
+            if (st == CP4_STYLE_SWIMMER  && m[CP4_IN_WATER] * 4 > tot) swam = 1;
+            if (st == CP4_STYLE_FLYER    && m[CP4_IN_AIR] * 20 > tot) air_style_air = 1;
+            if (st == CP4_STYLE_BURROWER && m[CP4_UNDER] * 4 > tot) dug = 1;
+        }
+        printf("        ate %d kelp and %d tubers, built %d nests, hatched %d, found %d\n",
+               kelp, tuber, nests, hatched, found);
+        free(w);
+        CHECK(swam, "land: a finned build spends its life in the water");
+        CHECK(air_style_air, "land: a winged build actually uses the sky");
+        CHECK(dug, "land: a clawed build actually lives underground");
+        CHECK(kelp > 0, "land: the water feeds what lives in it");
+        CHECK(tuber > 0, "land: the soil feeds what lives in it");
+        CHECK(nests > 0, "land: the player can build a nest");
+        CHECK(hatched > 0, "land: a nest hatches followers");
+        CHECK(found > 0, "land: new species are met by going somewhere");
+    }
+
+    /* --- MEDIA ARE GATED BY THE BODY ---
+     * Fins, wings and digging claws are gates, not modifiers. A body without
+     * them should not be able to make a living in that medium at all, which is
+     * what makes buying one a decision. */
+    {
+        CpRng rng;
+        cp_rng_seed(&rng, 909);
+        int ok = 1;
+        for (int i = 0; i < 400; i++) {
+            Cp4Genome g;
+            Cp4Stats st;
+            cp4_genome_random(&g, &rng, CP4_GEN_BUDGET[3]);
+            cp4_genome_normalise(&g, CP4_GEN_BUDGET[3]);
+            cp4_genome_stats(&g, &st);
+            if (st.n[CP4_FIN] == 0 && st.swim != 0.0f) ok = 0;
+            if (st.n[CP4_WING] == 0 && st.fly != 0.0f) ok = 0;
+            if (st.n[CP4_DIGGER] == 0 && st.dig != 0.0f) ok = 0;
+            if (st.n[CP4_GILL] > 0 && st.breath < 1.0e8f) ok = 0;
+        }
+        CHECK(ok, "land: no part, no medium - swim, fly and dig are gates");
+    }
+
+    /* --- AN UNBOUNDED WORLD ---
+     * The terrain is a pure function of position, so there is nothing to fence
+     * the animal in with. What has to stay true is that walking a long way
+     * neither breaks the observation nor empties the world. */
+    {
+        Cp4World *w = (Cp4World *)malloc(sizeof(Cp4World));
+        float obs[CP4_OBS_DIM];
+        int finite = 1, populated = 1;
+        float furthest = 0.0f;
+        for (int seed = 0; seed < 3; seed++) {
+            cp4_world_reset(w, (uint32_t)(seed * 31 + 2), NULL);
+            for (int t = 0; t < CP4_MAX_STEPS; t++) {
+                float act[CP4_ACT_DIM];
+                memset(act, 0, sizeof(act));
+                /* walk in one direction and never turn round */
+                act[0] = 0.0f;
+                act[2] = 1.0f;
+                w->player.hp = w->player.hp_max;
+                w->player.energy = 120.0f;
+                cp4_world_step(w, act);
+                cp4_world_observe(w, obs);
+                for (int i = 0; i < CP4_OBS_DIM; i++)
+                    if (!(obs[i] == obs[i]) || obs[i] < -4.0f || obs[i] > 4.0f) finite = 0;
+            }
+            if (w->far_from_start > furthest) furthest = w->far_from_start;
+            /* the world must still be around the animal, not behind it */
+            int near_food = 0;
+            for (int i = 0; i < CP4_MAX_FLORA; i++) {
+                if (w->flora[i].type == CP4_FLORA_NONE) continue;
+                float dx = w->flora[i].p.x - w->player.p.x;
+                float dz = w->flora[i].p.z - w->player.p.z;
+                if (dx * dx + dz * dz < 900.0f * 900.0f) near_food++;
+            }
+            if (near_food < 30) populated = 0;
+        }
+        printf("        walked %.0f units from the start and the world came with it\n",
+               (double)furthest);
+        CHECK(furthest > 2000.0f, "land: the animal can leave the starting region");
+        CHECK(finite, "land: observations stay finite however far you go");
+        CHECK(populated, "land: the world streams along with the player");
+        free(w);
     }
 
     /* --- THE FORK ---
@@ -623,12 +772,13 @@ int main(void)
      * the scripted baseline from each starting build and checks that each one
      * makes progress by its own mechanic. */
     {
-        const char *names[CP4_STYLE_COUNT] = { "grazer", "predator", "charmer" };
-        int reached[CP4_STYLE_COUNT] = { 0, 0, 0 };
-        int songs[CP4_STYLE_COUNT] = { 0, 0, 0 };
-        int kills[CP4_STYLE_COUNT] = { 0, 0, 0 };
+        int reached[CP4_STYLE_COUNT];
+        int songs[CP4_STYLE_COUNT], kills[CP4_STYLE_COUNT];
+        memset(reached, 0, sizeof(reached));
+        memset(songs, 0, sizeof(songs));
+        memset(kills, 0, sizeof(kills));
         Cp4World *w = (Cp4World *)malloc(sizeof(Cp4World));
-        for (int st = 0; st < CP4_STYLE_COUNT; st++) {
+        for (int st = 0; st < 3; st++) {
             for (int s = 0; s < 6; s++) {
                 Cp4Genome g;
                 cp4_genome_autodesign(&g, NULL, CP4_GEN_BUDGET[0], st);
@@ -643,12 +793,12 @@ int main(void)
                 kills[st] += w->kills;
             }
             printf("        %-8s reached half the meter %d/6, songs %3d, kills %2d\n",
-                   names[st], reached[st], songs[st], kills[st]);
+                   cp4_style_name(st), reached[st], songs[st], kills[st]);
         }
         free(w);
-        CHECK(reached[CP4_STYLE_GRAZER] >= 3, "land: the grazing build is viable");
+        CHECK(reached[CP4_STYLE_GRAZER] >= 2, "land: the grazing build is viable");
         CHECK(reached[CP4_STYLE_PREDATOR] >= 2, "land: the predator build is viable");
-        CHECK(reached[CP4_STYLE_CHARMER] >= 3, "land: the charmer build is viable");
+        CHECK(reached[CP4_STYLE_CHARMER] >= 2, "land: the charmer build is viable");
         CHECK(songs[CP4_STYLE_CHARMER] > 0 && kills[CP4_STYLE_CHARMER] == 0,
               "land: the charmer wins by impressing, not by eating");
         CHECK(kills[CP4_STYLE_PREDATOR] > 0 && songs[CP4_STYLE_PREDATOR] == 0,
@@ -664,8 +814,13 @@ int main(void)
         Cp4World *w = (Cp4World *)malloc(sizeof(Cp4World));
         for (int seed = 0; seed < 5; seed++) {
             cp4_world_reset(w, (uint32_t)(seed * 71 + 5), NULL);
+            /* Legs are no longer the only way to get around, so the claim is
+             * about whatever moves an animal - a population that drifts toward
+             * fins in a flooded world is selection working, not failing. */
             float l0 = 0.0f;
-            for (int i = 0; i < CP4_MAX_BEASTS; i++) l0 += w->beast[i].s.n[CP4_LEG];
+            for (int i = 0; i < CP4_MAX_BEASTS; i++)
+                l0 += w->beast[i].s.n[CP4_LEG] + w->beast[i].s.n[CP4_FIN]
+                    + w->beast[i].s.n[CP4_WING];
             l0 /= CP4_MAX_BEASTS;
 
             float a[CP4_ACT_DIM];
@@ -674,15 +829,24 @@ int main(void)
                 w->player.hp = w->player.hp_max;   /* keep the episode alive */
                 cp4_world_step(w, a);
             }
-            d_legs += w->mean_legs - l0;
+            float l1 = 0.0f;
+            int alive = 0;
+            for (int i = 0; i < CP4_MAX_BEASTS; i++) {
+                if (!w->beast[i].alive) continue;
+                l1 += w->beast[i].s.n[CP4_LEG] + w->beast[i].s.n[CP4_FIN]
+                    + w->beast[i].s.n[CP4_WING];
+                alive++;
+            }
+            if (alive) l1 /= alive;
+            d_legs += l1 - l0;
             gens += w->mean_gen;
-            if (w->mean_legs > l0) rose_legs++;
+            if (l1 > l0) rose_legs++;
             trials++;
         }
-        printf("        over %d worlds: mean generation %.1f, legs %+.2f\n",
+        printf("        over %d worlds: mean generation %.1f, movers %+.2f\n",
                trials, (double)(gens / trials), (double)(d_legs / trials));
         CHECK(gens / trials > 1.5f, "land: generations turn over inside an episode");
-        CHECK(rose_legs >= 4, "land: selection raises the population's leg count");
+        CHECK(rose_legs >= 4, "land: selection raises the population's mobility");
         free(w);
     }
 

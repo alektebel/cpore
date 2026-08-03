@@ -501,10 +501,13 @@ class AquaEnv:
 # ---------------------------------------------------------------------------
 
 LAND_PART_NAMES = ("none", "graze", "jaw", "beak", "leg", "foot", "claw",
-                   "horn", "plate", "eye", "ear", "voice", "plume", "wing")
+                   "horn", "plate", "eye", "ear", "voice", "plume", "wing",
+                   "fin", "gill", "digger")
 LAND_PART = {n: i for i, n in enumerate(LAND_PART_NAMES)}
-LAND_PART_COST = (0, 6, 14, 18, 9, 7, 12, 13, 13, 7, 8, 12, 11, 16)
+LAND_PART_COST = (0, 6, 14, 18, 9, 7, 12, 13, 13, 7, 8, 12, 11, 16, 9, 11, 12)
 LAND_GEN_BUDGET = (64, 105, 150, 205)
+LAND_STYLES = ("grazer", "predator", "charmer", "swimmer", "flyer", "burrower")
+MEDIA = ("ground", "water", "air", "under")
 LAND_MAX_PARTS = 12
 
 
@@ -571,8 +574,8 @@ class LandEnv:
         self._term = c_int32()
         self._trunc = c_int32()
         self._state_size = int(self._lib.cp4_env_state_size())
-        self._cnt = (c_int32 * 7)()
-        self._mean = (c_float * 5)()
+        self._cnt = (c_int32 * 19)()
+        self._mean = (c_float * 8)()
         self.default_genome = genome
         self.render_size = render_size
         self.vis = vis
@@ -659,9 +662,15 @@ class LandEnv:
         return {"births": self._cnt[0], "deaths": self._cnt[1], "pop": self._cnt[2],
                 "allies": self._cnt[3], "enemies": self._cnt[4],
                 "befriended": self._cnt[5], "kills": self._cnt[6],
+                "discovered": self._cnt[7], "hatchlings": self._cnt[8],
+                "has_nest": bool(self._cnt[9]), "medium": MEDIA[self._cnt[10] % 4],
+                "steps": {m: self._cnt[11 + i] for i, m in enumerate(MEDIA)},
+                "ate": {"bush": self._cnt[15], "kelp": self._cnt[16],
+                        "tuber": self._cnt[17], "meat": self._cnt[18]},
                 "mean_gen": self._mean[0], "mean_parts": self._mean[1],
                 "mean_legs": self._mean[2], "mean_charm": self._mean[3],
-                "dna": self._mean[4]}
+                "dna": self._mean[4], "travelled": self._mean[5],
+                "furthest": self._mean[6], "nest_store": self._mean[7]}
 
     def save_state(self) -> bytes:
         buf = ctypes.create_string_buffer(self._state_size)

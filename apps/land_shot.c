@@ -10,12 +10,11 @@
  *   ./build/cpore_land --gallery 2 --out gallery.png
  */
 
-static const char *STYLES[CP4_STYLE_COUNT] = { "grazer", "predator", "charmer" };
 
 int main(int argc, char **argv)
 {
     uint32_t seed = 5;
-    int steps = 3000, W = 1280, H = 720, every = 0, vis = CP_VIS_ABYSS, gallery = 0;
+    int steps = 3000, W = 1280, H = 720, every = 0, vis = CP_VIS_ABYSS, gallery = 0, table = 0;
     const char *out = "land.png";
     Cp4Genome g;
     cp4_genome_starter(&g);
@@ -27,6 +26,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--out") && i + 1 < argc)   out = argv[++i];
         else if (!strcmp(argv[i], "--every") && i + 1 < argc) every = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--gallery") && i + 1 < argc) gallery = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--table"))                 table = 1;
         else if (!strcmp(argv[i], "--size") && i + 1 < argc)  sscanf(argv[++i], "%dx%d", &W, &H);
         else if (!strcmp(argv[i], "--vis") && i + 1 < argc) {
             const char *nm = argv[++i];
@@ -39,15 +39,66 @@ int main(int argc, char **argv)
         } else if (!strcmp(argv[i], "--style") && i + 1 < argc) {
             const char *nm = argv[++i];
             int st = 0;
-            for (int k = 0; k < CP4_STYLE_COUNT; k++) if (!strcmp(nm, STYLES[k])) st = k;
+            for (int k = 0; k < CP4_STYLE_COUNT; k++) if (!strcmp(nm, cp4_style_name(k))) st = k;
             cp4_genome_autodesign(&g, NULL, CP4_GEN_BUDGET[0], st);
             have = 1;
         } else {
             printf("usage: cpore_land [--seed N] [--steps N] [--out F] [--size WxH]\n"
-                   "                  [--every N] [--style grazer|predator|charmer]\n"
-                   "                  [--gallery GEN] [--vis NAME] [--list-parts]\n");
+                   "                  [--every N] [--style NAME] [--gallery GEN]\n"
+                   "                  [--vis NAME] [--list-parts] [--table]\n"
+                   "  styles: grazer predator charmer swimmer flyer burrower\n");
             return 1;
         }
+    }
+
+    /* --table: every archetype against the same seeds. The question this
+     * answers is whether the four media are four ways to live or one way plus
+     * three decorations - if a medium never shows up in the step counts, or
+     * shows up but feeds nobody, it is not pulling its weight. */
+    if (table) {
+        Cp4World *tw = (Cp4World *)malloc(sizeof(Cp4World));
+        if (!tw) { fprintf(stderr, "oom\n"); return 1; }
+        printf("  %-9s  %-5s %-4s  %-26s  %s\n", "style", "evolv", "died",
+               "steps grnd/watr/air/undr", "ate bush/kelp/tuber/meat");
+        for (int st = 0; st < CP4_STYLE_COUNT; st++) {
+            int evolved = 0, died = 0, nests = 0, hatch = 0, disc = 0, songs = 0;
+            long med[CP4_MEDIUM_COUNT] = { 0, 0, 0, 0 };
+            long ate[4] = { 0, 0, 0, 0 };
+            float far = 0.0f, dna = 0.0f;
+            const int NS = 12;
+            for (int sd = 0; sd < NS; sd++) {
+                Cp4Genome sg;
+                cp4_genome_autodesign(&sg, NULL, CP4_GEN_BUDGET[0], st);
+                cp4_world_reset(tw, (uint32_t)(sd * 13 + 3), &sg);
+                for (int t = 0; t < CP4_MAX_STEPS && tw->status == CP4_RUN; t++) {
+                    float a[CP4_ACT_DIM];
+                    cp4_policy_greedy(tw, a);
+                    cp4_world_step(tw, a);
+                }
+                if (tw->status == CP4_EVOLVED) evolved++;
+                if (tw->status == CP4_DEAD) died++;
+                for (int m = 0; m < CP4_MEDIUM_COUNT; m++) med[m] += tw->medium_steps[m];
+                ate[0] += tw->ate_plant; ate[1] += tw->ate_kelp;
+                ate[2] += tw->ate_tuber; ate[3] += tw->ate_meat;
+                nests += tw->home.alive ? 1 : 0;
+                hatch += tw->hatchlings;
+                disc  += tw->discovered;
+                songs += tw->songs;
+                far   += tw->far_from_start;
+                dna   += tw->dna;
+            }
+            long tot = med[0] + med[1] + med[2] + med[3];
+            if (tot < 1) tot = 1;
+            printf("  %-9s  %2d/%-3d %-4d  %3ld%% %3ld%% %3ld%% %3ld%%%14s  %4ld %4ld %5ld %4ld"
+                   "   dna %5.0f  nests %d hatch %-3d found %-3d sing %-4d roamed %.0f\n",
+                   cp4_style_name(st), evolved, NS, died,
+                   med[0] * 100 / tot, med[1] * 100 / tot,
+                   med[2] * 100 / tot, med[3] * 100 / tot, "",
+                   ate[0], ate[1], ate[2], ate[3],
+                   (double)(dna / NS), nests, hatch, disc, songs, (double)(far / NS));
+        }
+        free(tw);
+        return 0;
     }
 
     /* --gallery: a contact sheet of random genomes, so the variety the design

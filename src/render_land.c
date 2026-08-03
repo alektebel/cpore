@@ -39,6 +39,10 @@ typedef struct {
     float    hazek;      /* 1 in the world, 0 for a studio portrait */
     uint32_t seed;
     float    time;
+    /* Where the camera itself is. The stage has four media and three of them
+     * look nothing like standing on a hill, so the background, the fog colour
+     * and the fog distance all switch on these. */
+    int      submerged, buried;
 } Ctx;
 
 /* Direction the light travels. y is down, so a sun in the sky sends light
@@ -90,6 +94,16 @@ static V3 horizon_col(void) { return v3(0.52f, 0.76f, 0.85f); }
 static V3 sky_col(const Ctx *c, V3 ray)
 {
     float up = clampf(-ray.y, 0.0f, 1.0f);          /* y is down */
+
+    /* Underground there is no sky at all, and underwater the sky is a ceiling
+     * of light a long way off rather than a dome. */
+    if (c->buried) return v3(0.035f, 0.024f, 0.016f);
+    if (c->submerged) {
+        V3 deep = v3(0.030f, 0.115f, 0.155f);
+        V3 surf = v3(0.240f, 0.520f, 0.560f);
+        float t = powf(up, 1.4f);
+        return v3(mixf(deep.x, surf.x, t), mixf(deep.y, surf.y, t), mixf(deep.z, surf.z, t));
+    }
     /* Saturated on purpose. A realistic pale sky is only a few percent from
      * neutral, and a 32-colour quantiser rounds that straight to grey. */
     /* Cyan-leaning rather than a true sky blue. The abyss palette has a cyan
@@ -130,15 +144,28 @@ static V3 sky_col(const Ctx *c, V3 ray)
     return col;
 }
 
+/* What the distance turns into, and how fast. Air buries a ridge at three
+ * kilometres, water at a couple of hundred metres, and soil at arm's length -
+ * the fog distance is most of what tells the eye which medium it is in. */
+static V3 medium_fog(const Ctx *c, float *dist_out, float *cap)
+{
+    if (c->buried)    { *dist_out = 26.0f;   *cap = 1.00f; return v3(0.045f, 0.030f, 0.020f); }
+    if (c->submerged) { *dist_out = 300.0f;  *cap = 0.95f; return v3(0.055f, 0.185f, 0.235f); }
+    *dist_out = 3000.0f; *cap = 0.80f;
+    return horizon_col();
+}
+
 static V3 hazed(const Ctx *c, V3 col, float dist)
 {
     if (c->hazek <= 0.0f) return col;
-    float d = dist - 200.0f;                  /* no haze on what is right here */
+    float fd, cap;
+    V3 h = medium_fog(c, &fd, &cap);
+    float near = c->buried ? 2.0f : (c->submerged ? 25.0f : 200.0f);
+    float d = dist - near;                    /* no haze on what is right here */
     if (d < 0.0f) d = 0.0f;
     /* capped, so even the furthest ridge keeps a little of its own colour and
      * the horizon stays a place rather than a wall */
-    float f = (1.0f - expf(-d / 3000.0f)) * 0.80f * c->hazek;
-    V3 h = horizon_col();
+    float f = (1.0f - expf(-d / fd)) * cap * c->hazek;
     return v3(mixf(col.x, h.x, f), mixf(col.y, h.y, f), mixf(col.z, h.z, f));
 }
 
@@ -174,6 +201,35 @@ static int terrain_march(const Ctx *c, V3 ro, V3 rd, float tmax, float *tout)
         dt *= 1.028f;
     }
     (void)lh;
+    return 0;
+}
+
+/* The view from inside the soil.
+ *
+ * The surface marcher is no use here: it looks for the first point where a ray
+ * goes *into* the ground, and from a burrow every ray starts there. What
+ * matters underground is the opposite crossing - where the ray comes out into
+ * open air - because that is the only place light gets in. Everything nearer
+ * than that is dirt, and the fog distance of twenty-six units does the rest. */
+static int terrain_exit(const Ctx *c, V3 ro, V3 rd, float tmax, float *tout)
+{
+    float t = 0.5f, dt = 0.9f;
+    for (int i = 0; i < 90 && t < tmax; i++) {
+        V3 q = add(ro, mul(rd, t));
+        if (q.y < cp4_height(c->seed, q.x, q.z)) {   /* out of the ground */
+            float lo = t - dt, hi = t;
+            for (int k = 0; k < 5; k++) {
+                float mid = 0.5f * (lo + hi);
+                V3 m = add(ro, mul(rd, mid));
+                if (m.y < cp4_height(c->seed, m.x, m.z)) hi = mid;
+                else lo = mid;
+            }
+            *tout = 0.5f * (lo + hi);
+            return 1;
+        }
+        t += dt;
+        dt *= 1.06f;
+    }
     return 0;
 }
 
@@ -216,6 +272,16 @@ static V3 ground_albedo(const Ctx *c, V3 q, float slope, float dist)
     float mix = clampf(wet * (0.55f + 0.75f * patch), 0.0f, 1.0f);
     V3 col = v3(mixf(dry.x, grass.x, mix), mixf(dry.y, grass.y, mix),
                 mixf(dry.z, grass.z, mix));
+
+    /* Below the waterline the land ramp is simply wrong - it paints a drowned
+     * seabed as dry grassland, which is what made the first underwater shot a
+     * flat brown sheet. Silt and sand instead, paling as it shallows. */
+    if (elev < -CP4_SEA) {
+        float d = clampf((-elev - CP4_SEA) / 90.0f, 0.0f, 1.0f);
+        V3 silt = v3(mixf(0.52f, 0.20f, d), mixf(0.48f, 0.22f, d), mixf(0.36f, 0.20f, d));
+        float ripple = 0.86f + 0.28f * rnoise(c->seed ^ 0x6Bu, q.x * 0.035f, q.z * 0.02f);
+        return mul(silt, ripple);
+    }
 
     float rocky = clampf((0.80f - slope) * 4.0f, 0.0f, 1.0f);
     col = v3(mixf(col.x, rock.x, rocky), mixf(col.y, rock.y, rocky),
@@ -272,6 +338,43 @@ static void draw_world(Ctx *c, const Cp4World *w)
             float px = ((float)x + 0.5f - c->W * 0.5f) / c->focal;
             float py = -((float)y + 0.5f - c->H * 0.5f) / c->focal;
             V3 ray = norm(add(add(mul(c->right, px), mul(c->up, py)), c->fwd));
+
+            /* Buried: soil in every direction, and a bright mouth wherever
+             * the tunnel breaks the surface. */
+            if (c->buried) {
+                float te = 0.0f;
+                int out = terrain_exit(c, c->eye, ray, 200.0f, &te);
+                float wall = out ? te : 200.0f;
+
+                /* The wall of the burrow, lit as if by the light behind you:
+                 * near soil is bright, far soil is black. That falloff is the
+                 * only depth cue down here, because there is no horizon and no
+                 * sky to silhouette anything against. */
+                V3 q = add(c->eye, mul(ray, wall > 30.0f ? 30.0f : wall));
+                float grain = fbm2(c->seed ^ 0x7Du, q.x * 0.11f, q.z * 0.11f)
+                            + 0.35f * rnoise(c->seed ^ 0x11u, q.x * 0.55f, q.z * 0.55f);
+                float lampl = expf(-wall / 22.0f);
+                float e = (0.22f + 0.55f * grain) * lampl;
+                V3 col = v3(e * 1.15f, e * 0.78f, e * 0.48f);
+
+                /* Daylight, but only through a genuinely short throat of soil.
+                 * Blending on the exit distance alone made every ray find the
+                 * sky and the whole burrow rendered as a pale grey field. */
+                if (out) {
+                    float up = clampf(-ray.y, 0.0f, 1.0f);
+                    float thin = expf(-te / 5.5f) * (0.25f + 0.75f * up);
+                    V3 day = v3(0.50f + 0.30f * up, 0.64f + 0.26f * up, 0.74f + 0.22f * up);
+                    col = v3(mixf(col.x, day.x, thin), mixf(col.y, day.y, thin),
+                             mixf(col.z, day.z, thin));
+                }
+                put(c, x, y, col);
+                /* The soil is a backdrop, not geometry: there is no tunnel
+                 * mesh, so writing the exit distance here put a wall in front
+                 * of the animal and the z-test threw the whole creature away.
+                 * Depth underground is carried by the lamp falloff instead. */
+                c->zb[(size_t)y * c->W + x] = 1e30f;
+                continue;
+            }
 
             float tg = 0.0f;
             int hit = terrain_march(c, c->eye, ray, FARCLIP, &tg);
@@ -382,6 +485,9 @@ static V3 part_albedo4(int t, float *emissive)
     case CP4_VOICE:   return v3(0.92f, 0.42f, 0.40f);
     case CP4_PLUME:   return v3(0.86f, 0.30f, 0.62f);
     case CP4_WING:    return v3(0.60f, 0.62f, 0.72f);
+    case CP4_FIN:     return v3(0.42f, 0.70f, 0.80f);
+    case CP4_GILL:    return v3(0.84f, 0.34f, 0.36f);
+    case CP4_DIGGER:  return v3(0.74f, 0.68f, 0.52f);
     default:          return v3(0.6f, 0.6f, 0.6f);
     }
 }
@@ -588,6 +694,32 @@ static int build_prims4(const Cp4Beast *b, int is_player, Prim *out,
                      R * 0.46f * sc, R * 0.10f * sc, R * 0.22f, col, 0.0f, 0.0f);
                 break;
             }
+            case CP4_FIN: {
+                /* a broad blade that sweeps, so a swimmer reads as propelling
+                 * itself rather than as a legged animal that fell in */
+                float sweep_f = sinf(b->phase * 1.4f + (float)i + (float)m * 3.1f) * 0.40f;
+                V3 dir = norm(add(ax, mul(up, sweep_f)));
+                push(out, &n, bs, add(bs, mul(dir, R * 1.5f * sc)),
+                     R * 0.42f * sc, R * 0.09f * sc, R * 0.24f, col, 0.0f, 0.0f);
+                break;
+            }
+            case CP4_GILL: {
+                /* three slits along the flank, the one part that says "this
+                 * body belongs in the water" while it is standing on a beach */
+                for (int q = 0; q < 3; q++) {
+                    V3 at = add(bs, mul(fwd, -(float)q * R * 0.26f));
+                    push(out, &n, at, add(at, mul(up, -R * 0.34f * sc)),
+                         R * 0.10f * sc, R * 0.05f * sc, R * 0.05f, col, 0.0f, 0.0f);
+                }
+                break;
+            }
+            case CP4_DIGGER: {
+                /* a heavy spade, blunter and wider than a claw */
+                V3 dir = norm(add(ax, mul(fwd, 0.55f)));
+                push(out, &n, bs, add(bs, mul(dir, R * 0.85f * sc)),
+                     R * 0.30f * sc, R * 0.34f * sc, R * 0.12f, col, 0.0f, 0.0f);
+                break;
+            }
             default:
                 push(out, &n, bs, add(bs, mul(ax, R * 0.30f * sc)),
                      R * 0.32f * sc, R * 0.28f * sc, R * 0.18f, col, er, 0.0f);
@@ -665,6 +797,28 @@ static void shade_hit(Ctx *c, int x, int y, V3 nrm, V3 albedo, float em, float v
     float sky   = 0.46f * (0.35f + 0.65f * up_amt);
     float grnd  = 0.28f * (1.0f - up_amt);
     float fill  = 0.26f * ndotv;
+
+    /* Underground and deep underwater the sun is not a factor, so the body is
+     * lit from the camera with a distance falloff instead. Without it an
+     * animal in its own burrow is black on black - the shading model has to
+     * follow the medium the same way the background does. */
+    if (c->buried || c->submerged) {
+        float lamp = expf(-vz / (c->buried ? 55.0f : 190.0f));
+        float k = (c->buried ? 0.95f : 0.55f) * lamp * (0.30f + 0.70f * ndotv);
+        V3 tint = c->buried ? v3(1.00f, 0.86f, 0.66f) : v3(0.72f, 0.94f, 1.00f);
+        V3 base = c->buried ? v3(0.10f, 0.09f, 0.07f)
+                            : mul(v3(0.16f, 0.34f, 0.40f), 0.55f);
+        V3 lit = add(mul(v3(albedo.x * tint.x, albedo.y * tint.y, albedo.z * tint.z),
+                         k + (c->submerged ? 0.42f * (0.35f + 0.65f * up_amt) * ao : 0.0f)),
+                     mul(albedo, 0.0f));
+        lit = add(lit, mul(base, ao));
+        if (c->submerged) lit = add(lit, mul(v3(albedo.x, albedo.y, albedo.z),
+                                             0.30f * lam * shadow));
+        lit = add(lit, mul(v3(0.72f, 0.80f, 0.92f), rim * 0.16f * ao));
+        if (em > 0.0f) lit = add(lit, mul(albedo, em));
+        put(c, x, y, hazed(c, lit, vz));
+        return;
+    }
 
     V3 sunc = v3(1.00f, 0.95f, 0.82f);
     V3 skyc = v3(0.66f, 0.80f, 1.00f);
@@ -829,7 +983,39 @@ static void draw_flora(Ctx *c, const Cp4World *w)
     for (int i = 0; i < CP4_MAX_FLORA; i++) {
         const Cp4Flora *f = &w->flora[i];
         if (f->type == CP4_FLORA_NONE) continue;
+        /* A tuber is buried, so it is only visible from inside the soil, and a
+         * frond of kelp underwater is hardly worth drawing from a hilltop
+         * three hundred units up. Culling by medium is both cheaper and more
+         * honest than drawing everything and letting the fog hide it. */
+        int med = cp4_flora_medium(f->type);
+        if (med == CP4_UNDER && !c->buried) continue;
         V3 at = cv(f->p);
+        uint32_t sd = (uint32_t)i * 2654435761u;
+
+        if (f->type == CP4_FLORA_KELP) {
+            /* a holdfast and three fronds leaning on the current */
+            float h = f->r * 2.4f;
+            float lean = sinf(c->time * 0.6f + (float)i) * f->r * 0.35f;
+            V3 leaf = v3(0.16f, 0.42f, 0.30f);
+            sphere(c, v3(at.x, at.y - f->r * 0.20f, at.z), f->r * 0.28f,
+                   v3(0.24f, 0.30f, 0.20f), 0.0f);
+            for (int q = 0; q < 3; q++) {
+                float a = (float)q * 2.09f;
+                sphere(c, v3(at.x + cosf(a) * f->r * 0.30f + lean,
+                             at.y - h * (0.45f + 0.18f * (float)q),
+                             at.z + sinf(a) * f->r * 0.30f),
+                       f->r * 0.34f, leaf, 0.0f);
+            }
+            continue;
+        }
+        if (f->type == CP4_FLORA_TUBER) {
+            /* a pale knot of root, lit only by whatever the burrow lets in */
+            sphere(c, at, f->r * 0.55f, v3(0.72f, 0.64f, 0.40f), 0.06f);
+            sphere(c, v3(at.x + f->r * 0.35f, at.y - f->r * 0.20f, at.z),
+                   f->r * 0.32f, v3(0.62f, 0.54f, 0.32f), 0.04f);
+            continue;
+        }
+        (void)sd;
         if (f->type == CP4_FLORA_BUSH) {
             /* a trunk and three lobes reads as a shrub from any angle, which a
              * single sphere very much does not */
@@ -850,6 +1036,31 @@ static void draw_flora(Ctx *c, const Cp4World *w)
             sphere(c, v3(at.x + f->r * 0.5f, at.y - f->r * 0.30f, at.z), f->r * 0.34f,
                    v3(0.80f, 0.78f, 0.70f), 0.0f);
         }
+    }
+}
+
+/* The player's own nest. It has to look built rather than found - a ring of
+ * stones would be indistinguishable from a rival's - so it is a woven bowl
+ * with eggs in it, and the eggs are the thing worth seeing. */
+static void draw_home(Ctx *c, const Cp4World *w)
+{
+    const Cp4Home *h = &w->home;
+    if (!h->alive) return;
+    V3 at = cv(h->p);
+    V3 wall = v3(0.46f, 0.33f, 0.18f);
+    for (int i = 0; i < 12; i++) {
+        float a = (float)i / 12.0f * 2.0f * PI;
+        sphere(c, v3(at.x + cosf(a) * 22.0f, at.y - 7.0f, at.z + sinf(a) * 22.0f),
+               7.0f, wall, 0.0f);
+    }
+    sphere(c, v3(at.x, at.y - 2.0f, at.z), 15.0f, v3(0.30f, 0.22f, 0.12f), 0.0f);
+    /* how full the larder is, as eggs rather than as a number */
+    int eggs = (int)(h->store / 20.0f);
+    if (eggs > 3) eggs = 3;
+    for (int i = 0; i < eggs; i++) {
+        float a = (float)i * 2.09f;
+        sphere(c, v3(at.x + cosf(a) * 7.0f, at.y - 10.0f, at.z + sinf(a) * 7.0f),
+               5.0f, v3(0.88f, 0.86f, 0.74f), 0.05f);
     }
 }
 
@@ -930,6 +1141,29 @@ static void draw_hud4(uint8_t *fb, int W, int H, const Cp4World *w)
     snprintf(buf, sizeof(buf), "ALLY %d  FOE %d", w->allies, w->enemies);
     cp_px_text(fb, W, H, 6, 35, 1, buf, 0.62f, 0.86f, 0.60f, 1.0f);
 
+    /* Which medium, and how long you may stay in it. In three of the four the
+     * clock is the thing that kills you, so it belongs next to health. */
+    {
+        static const float MC[CP4_MEDIUM_COUNT][3] = {
+            { 0.62f, 0.86f, 0.50f }, { 0.40f, 0.80f, 0.92f },
+            { 0.86f, 0.88f, 0.96f }, { 0.84f, 0.66f, 0.40f },
+        };
+        int m = p->medium % CP4_MEDIUM_COUNT;
+        snprintf(buf, sizeof(buf), "%s", cp4_medium_name(m));
+        for (char *q = buf; *q; q++) if (*q >= 'a' && *q <= 'z') *q = (char)(*q - 32);
+        cp_px_rect(fb, W, H, 118, 6, 4, 4, MC[m][0], MC[m][1], MC[m][2], 1.0f);
+        cp_px_text(fb, W, H, 124, 5, 1, buf, MC[m][0], MC[m][1], MC[m][2], 1.0f);
+        if (p->s.breath < 1.0e8f && (m == CP4_IN_WATER || m == CP4_UNDER)) {
+            float f = clampf(p->breath / (p->s.breath > 1.0f ? p->s.breath : 1.0f),
+                             0.0f, 1.0f);
+            cp_px_rect(fb, W, H, 118, 13, 40, 3, 0.03f, 0.04f, 0.03f, 1.0f);
+            int fw = (int)(40.0f * f);
+            if (fw > 0)
+                cp_px_rect(fb, W, H, 118, 13, fw, 3,
+                           f < 0.3f ? 0.94f : 0.42f, f < 0.3f ? 0.36f : 0.82f, 0.94f, 1.0f);
+        }
+    }
+
     /* Population panel: nothing scripts these numbers, they are whatever
      * survived out there while the player was busy. */
     PANEL(3, H - 46, 122, 43);
@@ -943,6 +1177,22 @@ static void draw_hud4(uint8_t *fb, int W, int H, const Cp4World *w)
     cp_px_text(fb, W, H, 6, H - 18, 1, buf, 0.60f, 0.84f, 0.62f, 1.0f);
     snprintf(buf, sizeof(buf), "WON %-3d ATE %d", w->befriended, w->kills);
     cp_px_text(fb, W, H, 6, H - 10, 1, buf, 0.86f, 0.72f, 0.44f, 1.0f);
+
+    /* The world has no edges, so how far you have gone and what you have found
+     * out there is a score in its own right. */
+    {
+        int mine = 0;
+        for (int i = 0; i < CP4_MAX_BEASTS; i++)
+            if (w->beast[i].alive && w->beast[i].nest == CP4_OWN_NEST) mine++;
+        snprintf(buf, sizeof(buf), "ROAM %d", (int)w->travelled);
+        cp_px_text(fb, W, H, 130, H - 10, 1, buf, 0.60f, 0.78f, 0.86f, 1.0f);
+        snprintf(buf, sizeof(buf), "FOUND %d", w->discovered);
+        cp_px_text(fb, W, H, 130, H - 18, 1, buf, 0.60f, 0.78f, 0.86f, 1.0f);
+        if (w->home.alive) {
+            snprintf(buf, sizeof(buf), "NEST %d KIN %d", (int)w->home.store, mine);
+            cp_px_text(fb, W, H, 130, H - 26, 1, buf, 0.90f, 0.80f, 0.50f, 1.0f);
+        }
+    }
 
     /* own build */
     PANEL(W - 128, H - 30, 108, 27);
@@ -1010,17 +1260,44 @@ void cp4_render_styled(const Cp4World *w, uint8_t *rgba, int OW, int OH, int sty
      * and lets the land actually have a skyline. */
     float back = p->s.length * 2.7f + p->s.stand * 3.4f + 62.0f;
     float lift = p->s.stand * 1.7f + 27.0f;
-    /* a touch off the centre line: dead astern shows the player its own
-     * backside and hides every part mounted on the flanks */
-    c.eye = add(add(add(cv(p->p), mul(pf, -back)), mul(pu, lift)),
-                mul(pr, back * 0.20f));
-    /* never let the camera end up inside a hill */
-    {
+
+    if (p->medium == CP4_UNDER) {
+        /* A burrow is a tight place, so the camera follows the animal into it
+         * rather than hanging in the air above. Keeping it above ground while
+         * shading the frame as soil is what made the first underground shot a
+         * flat grey field: every ray escaped into daylight immediately. */
+        back *= 0.36f;   /* a burrow is a tight place */
+        /* At the animal's own depth, not just under the surface: a camera
+         * pinned to the roof looks down a shaft at nothing. */
+        c.eye = add(cv(p->p), mul(pf, -back));
+        c.eye.y = p->p.y - p->s.stand * 0.30f;
+        float g = cp4_height(w->seed, c.eye.x, c.eye.z);
+        if (c.eye.y < g + 4.0f) c.eye.y = g + 4.0f;      /* stay in the soil */
+    } else {
+        /* a touch off the centre line: dead astern shows the player its own
+         * backside and hides every part mounted on the flanks */
+        c.eye = add(add(add(cv(p->p), mul(pf, -back)), mul(pu, lift)),
+                    mul(pr, back * 0.20f));
+        /* never let the camera end up inside a hill */
         float g = cp4_height(w->seed, c.eye.x, c.eye.z) - 14.0f;
         if (c.eye.y > g) c.eye.y = g;
         if (c.eye.y < -CP4_SKY) c.eye.y = -CP4_SKY;
     }
-    V3 look = norm(sub(add(cv(p->p), mul(pf, 170.0f)), c.eye));
+
+    /* The view mode follows the eye, not the animal. Deriving it from the
+     * player's medium instead let the two disagree - the shading said "soil"
+     * while the camera sat in the open air twenty units above the surface. */
+    {
+        float ge = cp4_height(w->seed, c.eye.x, c.eye.z);
+        c.buried    = c.eye.y > ge;
+        c.submerged = !c.buried && ge > CP4_SEA && c.eye.y > CP4_SEA;
+    }
+
+    V3 look;
+    if (p->medium == CP4_UNDER)
+        look = norm(sub(add(cv(p->p), mul(pf, 40.0f)), c.eye));
+    else
+        look = norm(sub(add(cv(p->p), mul(pf, 170.0f)), c.eye));
     c.fwd = look;
     c.right = norm(v3(-look.z, 0.0f, look.x));
     c.up = norm(v3(c.right.z * look.y - c.right.y * look.z,
@@ -1029,6 +1306,7 @@ void cp4_render_styled(const Cp4World *w, uint8_t *rgba, int OW, int OH, int sty
 
     draw_world(&c, w);
     draw_nests(&c, w);
+    draw_home(&c, w);
     draw_flora(&c, w);
     for (int i = 0; i < CP4_MAX_BEASTS; i++)
         if (w->beast[i].alive) draw_creature(&c, &w->beast[i], 0);
@@ -1079,6 +1357,7 @@ void cp4_render_portrait(const Cp4Genome *g, uint8_t *fb, int lw, int lh,
     c.hazek = 0.0f;
     c.seed = seed;
     c.time = 0.0f;
+    c.submerged = c.buried = 0;
     /* Three-quarter view, but only barely raised. Straight side-on hides
      * everything mounted fore and aft; look down more than about ten degrees
      * and the body hides the legs, which on a land animal is most of what

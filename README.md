@@ -123,37 +123,69 @@ Surface and seabed are analytic ray-plane intersections. Creatures smaller than
 than splatting spheres and at that size nobody can tell. A 320x180 frame costs
 roughly 40 ms. Output goes through the same palette pipeline as stage 1.
 
-## Stage 3: creature, on land
+## Stage 3: creature, and four ways to live
 
 ![creature stage](docs/land.png)
 
-Out of the water and onto a heightfield. `cp4_height()` is a pure function of
-seed and position, so the world stores no terrain at all — the simulation asks
-for the ground under an animal's feet, the renderer asks for it wherever a ray
-happens to land, and a snapshot is still a `memcpy` of one POD struct. The same
-seed always grows the same hills.
+`cp4_height()` is a pure function of seed and position, so the world stores no
+terrain at all — the simulation asks for the ground under an animal's feet, the
+renderer asks wherever a ray lands, and a snapshot is still a `memcpy` of one
+POD struct. Because nothing is stored, **nothing has to be bounded**: there are
+no walls, and what keeps the world finite is a resident window of flora,
+animals and nests that is recycled from behind the player to in front of them.
+Walk in one direction for a whole episode and the world comes with you, and the
+species ahead are ones you have not met.
 
-The subject of the stage is other species. Seven rival nests each hold a
-lineage that breeds, mutates and is selected by whether its occupants can feed
-themselves, and every encounter is the fork Spore built its creature stage
-around — **impress it or eat it**. Both fill the DNA meter, and they are bought
-out of the same budget, so charm and violence genuinely compete for parts:
+The stage has **four media**, and each is gated by a part rather than scaled by
+one. A body without fins does not swim slowly — it flounders and drowns. That
+is what makes a fin a decision instead of a stat bump, and it is the same shape
+as the mouth gate on what an animal can eat:
 
-| build | how it fills the meter | 6 seeds |
-|---|---|---|
-| grazer | plants for food, songs for DNA | reaches half the meter 6/6 |
-| predator | kills, 4–11 per run, no songs at all | 6/6 |
-| charmer | songs, 3–4 whole species won over | 6/6 |
+| medium | needs | costs | pays |
+|---|---|---|---|
+| ground | legs | baseline | bushes, and carrion |
+| water | fins, and gills or a breath meter | least upkeep | kelp |
+| air | wings, and lift has to beat mass | 1.75× upkeep | range — sight scales with altitude |
+| underground | digging claws | 1.3× upkeep, slow | tubers, and nothing on the surface can follow |
 
-Legs are a two-bone chain that reaches the actual ground plane and swings on
-the gait phase, because on land the contact between animal and terrain is the
-first thing the eye checks.
+![underwater](docs/land_water.png)
+![underground](docs/land_under.png)
+
+Every medium has its own food, so a medium is somewhere worth going rather than
+somewhere you merely can go. Air is the exception: what the sky pays is range,
+which in a world with no edges is what finds the next species to impress.
+
+Six archetypes, each run from its own starting build by the scripted baseline
+over twelve seeds — the point of the table is that the specialists actually
+live in their medium and eat from it:
+
+| build | evolved | ground / water / air / under | eats |
+|---|---|---|---|
+| grazer | 3/12 | 97% / 2% / 0% / 0% | 235 bushes |
+| predator | 5/12 | 98% / 1% / 0% / 0% | 209 carrion |
+| charmer | 7/12 | 97% / 2% / 0% / 0% | 132 bushes, 229 songs |
+| swimmer | 7/12 | 25% / 74% / 0% / 0% | 487 kelp |
+| flyer | 3/12 | 90% / 2% / 7% / 0% | 169 bushes, 52 species found |
+| burrower | 2/12 | 10% / 1% / 0% / 87% | 292 tubers |
+
+You can also **build a nest**. It costs energy, it banks the food you carry
+back to it, it heals you, and once the larder is full it hatches a follower
+carrying a mutated copy of your own genome. Followers are a lineage rather than
+a summon: they travel with you, they eat, and they can be killed.
+
+Rival nests still breed, mutate and are selected by whether their occupants can
+feed themselves — and they now know about media too, siting an aquatic lineage
+in water and letting a clawed one dig for its own roots. Over five worlds with
+no player intervention, six generations turn over and the population's mobility
+rises on its own.
 
 ![land gallery](docs/land_gallery.png)
 
 ```
 ./build/cpore_land --list-parts
-./build/cpore_land --style charmer --seed 21 --steps 2000 --out land.png
+./build/cpore_land --style swimmer --seed 3 --steps 1200 --out water.png
+./build/cpore_land --style burrower --seed 16 --out under.png
+./build/cpore_land --table            # every archetype, every medium
 ./build/cpore_land --gallery 3 --seed 11 --out gallery.png
 ```
 
@@ -324,7 +356,7 @@ src/aqua_genome.c       3D body plans: parts, costs, mutation
 src/aqua.c              the aquatic simulation, including the breeding population
 src/aqua_env.c          stage-2 RL wrapper
 src/land_genome.c       land body plans: parts, budgets, styles
-src/land.c              the creature simulation: terrain, nests, impress-or-eat
+src/land.c              the creature simulation: four media, nests, impress-or-eat
 src/land_env.c          stage-3 RL wrapper
 src/civ.c               the civilisation simulation: cities, units, doctrines
 src/civ_env.c           stage-4 RL wrapper, and the bridge from stage 3

@@ -69,20 +69,33 @@ const Cp4World *cp4_env_world(const Cp4Env *e) { return &e->w; }
  * struct layout, which is how the stage-2 census came to report nonsense. */
 void cp4_env_census(const Cp4Env *e, int32_t *counts, float *means)
 {
+    const Cp4World *w = &e->w;
     if (counts) {
-        counts[0] = e->w.births;
-        counts[1] = e->w.deaths;
-        counts[2] = e->w.pop;
-        counts[3] = e->w.allies;
-        counts[4] = e->w.enemies;
-        counts[5] = e->w.befriended;
-        counts[6] = e->w.kills;
+        counts[0] = w->births;
+        counts[1] = w->deaths;
+        counts[2] = w->pop;
+        counts[3] = w->allies;
+        counts[4] = w->enemies;
+        counts[5] = w->befriended;
+        counts[6] = w->kills;
+        counts[7] = w->discovered;
+        counts[8] = w->hatchlings;
+        counts[9] = w->home.alive;
+        counts[10] = w->player.medium;
+        for (int m = 0; m < CP4_MEDIUM_COUNT; m++) counts[11 + m] = w->medium_steps[m];
+        counts[15] = w->ate_plant;
+        counts[16] = w->ate_kelp;
+        counts[17] = w->ate_tuber;
+        counts[18] = w->ate_meat;
     }
     if (means) {
-        means[0] = e->w.mean_gen;
-        means[1] = e->w.mean_parts;
-        means[2] = e->w.mean_legs;
-        means[3] = e->w.mean_charm;
-        means[4] = e->w.dna;
+        means[0] = w->mean_gen;
+        means[1] = w->mean_parts;
+        means[2] = w->mean_legs;
+        means[3] = w->mean_charm;
+        means[4] = w->dna;
+        means[5] = w->travelled;
+        means[6] = w->far_from_start;
+        means[7] = w->home.store;
     }
 }

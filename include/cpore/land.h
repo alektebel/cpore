@@ -31,7 +31,7 @@ extern "C" {
 #define CP4_MAX_STEPS   9000
 
 #define CP4_MAX_BEASTS   64
-#define CP4_MAX_FLORA   380
+#define CP4_MAX_FLORA   560   /* must exceed TARGET_FLORA, plus carcasses */
 #define CP4_MAX_NESTS      7
 #define CP4_MAX_PARTS     12
 #define CP4_MAX_SEG        6
@@ -54,9 +54,20 @@ enum {
     CP4_EAR,        /* ear            - sight through cover and at night*/
     CP4_VOICE,      /* voice sac      - social reach                    */
     CP4_PLUME,      /* display plume  - social power                    */
-    CP4_WING,       /* wing           - glide, and a jump that carries  */
+    CP4_WING,       /* wing           - lift, and the whole sky with it  */
+    CP4_FIN,        /* fin/paddle     - thrust in water                  */
+    CP4_GILL,       /* gill           - breathe water instead of drowning*/
+    CP4_DIGGER,     /* digging claw   - burrow, and reach what is buried */
     CP4_PART_COUNT
 };
+
+/* ---- media ----
+ * The stage has four of them and a body plan decides which are open to it.
+ * This is the axis the whole extension turns on: each medium has its own
+ * physics, its own food, and its own part gating it, so wings and gills are
+ * choices bought out of the DNA budget rather than decoration. */
+enum { CP4_ON_GROUND = 0, CP4_IN_WATER, CP4_IN_AIR, CP4_UNDER, CP4_MEDIUM_COUNT };
+const char *cp4_medium_name(int m);
 
 extern const int CP4_GEN_BUDGET[CP4_GENERATIONS];
 const char *cp4_part_name(int type);
@@ -93,6 +104,12 @@ typedef struct {
     float charm, social_reach;     /* the other half of the stage */
     float stamina, upkeep;
     float radius, length, stand;   /* stand: how high the body rides */
+    /* ---- the media ----
+     * swim/fly/dig are zero for a body that cannot use that medium at all,
+     * which is what makes them gates rather than modifiers. breath is how many
+     * seconds underwater the animal has before it starts drowning; gills make
+     * it effectively infinite. */
+    float swim, buoy, fly, dig, breath;
     uint8_t n[CP4_PART_COUNT];
     uint8_t n_parts;
     int16_t cost;
@@ -109,10 +126,17 @@ void  cp4_genome_from_action(Cp4Genome *g, const float *design, int budget);
 void  cp4_genome_autodesign(Cp4Genome *g, CpRng *r, int budget, int style);
 float cp4_profile(const Cp4Genome *g, float t);
 void  cp4_genome_colour(const Cp4Genome *g, float *rgb, float *rgb2);
-#define CP4_STYLE_GRAZER  0
-#define CP4_STYLE_PREDATOR 1
-#define CP4_STYLE_CHARMER 2
-#define CP4_STYLE_COUNT   3
+/* Six archetypes, not three. The first three decide how you fill the DNA
+ * meter; the last three decide which medium you live in. They are orthogonal
+ * on purpose - a burrowing charmer is a legal and quite good animal. */
+#define CP4_STYLE_GRAZER    0
+#define CP4_STYLE_PREDATOR  1
+#define CP4_STYLE_CHARMER   2
+#define CP4_STYLE_SWIMMER   3
+#define CP4_STYLE_FLYER     4
+#define CP4_STYLE_BURROWER  5
+#define CP4_STYLE_COUNT     6
+const char *cp4_style_name(int style);
 
 /* ---- terrain ----
  * A deterministic function of world seed and position, so it needs no storage
@@ -122,7 +146,12 @@ void  cp4_normal(uint32_t seed, float x, float z, float *nx, float *ny, float *n
 
 typedef struct { float x, y, z; } Cp4Vec;
 
-enum { CP4_FLORA_NONE = 0, CP4_FLORA_BUSH = 1, CP4_FLORA_CARCASS = 2 };
+/* One food per medium, so a medium is somewhere worth going rather than
+ * somewhere you merely can go. Air is the exception - what the sky pays is
+ * speed, safety and the range to find nests, not a plant. */
+enum { CP4_FLORA_NONE = 0, CP4_FLORA_BUSH = 1, CP4_FLORA_CARCASS = 2,
+       CP4_FLORA_KELP = 3, CP4_FLORA_TUBER = 4, CP4_FLORA_COUNT };
+int cp4_flora_medium(int type);
 
 typedef struct {
     Cp4Vec  p;
@@ -137,8 +166,12 @@ typedef struct {
     Cp4Genome g;
     float     standing;      /* -1 hostile .. +1 allied */
     int32_t   members, befriended, eaten;
-    uint8_t   alive, style, pad[2];
+    uint8_t   alive, style, seen, pad;
 } Cp4Nest;
+
+/* nest index CP4_OWN_NEST marks one of the player's own hatchlings rather than
+ * a member of a rival species */
+#define CP4_OWN_NEST 255
 
 typedef struct {
     Cp4Vec    p, v;
@@ -148,16 +181,32 @@ typedef struct {
     Cp4Stats  s;
     Cp4Vec    des;
     float     think_t, sing_t, atk_cd;
+    float     breath;
     uint8_t   alive, nest, has_target, grounded;
-    uint8_t   gen, pad[3];
+    uint8_t   gen, medium, want_med, pad;
     float     age;
 } Cp4Beast;
 
+/* The player's own nest. Somewhere to bank food, heal, and hatch followers -
+ * the one piece of the world the agent builds rather than finds. */
+typedef struct {
+    Cp4Vec   p;
+    float    store, build;
+    int32_t  eggs, hatched;
+    uint8_t  alive, pad[3];
+} Cp4Home;
+
 #define CP4_OBS_FLORA_K 8
 #define CP4_OBS_BEAST_K 6
-#define CP4_OBS_DIM   (18 + CP4_OBS_FLORA_K * 5 + CP4_OBS_BEAST_K * 8 \
-                          + (CP4_PART_COUNT - 1) + 7)
-#define CP4_ACT_CTRL   6      /* turn, pitch, move, jump, attack, sing */
+#define CP4_OBS_FLORA   7     /* dx, dz, dy, and one flag per food type */
+/* 18 body/world, then 14 for medium and home: four one-hot media, three
+ * capability gates, breath, height over ground, and four for the nest. Then
+ * neighbours, own parts, own stats. Miscounting this overflows the caller's
+ * observation buffer, which is what test_obs_dim below exists to catch. */
+#define CP4_OBS_DIM   (18 + 14 + CP4_OBS_FLORA_K * CP4_OBS_FLORA \
+                          + CP4_OBS_BEAST_K * 8 + (CP4_PART_COUNT - 1) + 7)
+/* turn, pitch, move, ascend/jump, attack, sing, dig, nest */
+#define CP4_ACT_CTRL   8
 #define CP4_ACT_DIM   (CP4_ACT_CTRL + CP4_MAX_PARTS * 4 + 2)
 
 enum { CP4_RUN = 0, CP4_DEAD = 1, CP4_EVOLVED = 2, CP4_TIMEOUT = 3 };
@@ -176,6 +225,15 @@ typedef struct {
     int32_t   n_flora, flora_cursor;
     Cp4Beast  beast[CP4_MAX_BEASTS];
     Cp4Nest   nest[CP4_MAX_NESTS];
+    Cp4Home   home;
+
+    /* The world is unbounded: terrain is a pure function, so the only thing
+     * that has to be finite is what is resident near the player. anchor is the
+     * centre of the current resident window and travelled is how far the
+     * player has actually gone, which is what "explore" is scored on. */
+    Cp4Vec    anchor;
+    float     travelled, far_from_start;
+    int32_t   discovered;
 
     int32_t   births, deaths, pop;
     float     mean_parts, mean_legs, mean_charm, mean_gen;
@@ -184,6 +242,8 @@ typedef struct {
     float     reward;
     int32_t   status;
     int32_t   ate_plant, ate_meat, kills, hits_taken, songs, befriended;
+    int32_t   ate_kelp, ate_tuber, eggs_laid, hatchlings;
+    int32_t   medium_steps[CP4_MEDIUM_COUNT];
     float     dmg_dealt, dmg_taken;
 } Cp4World;
 
@@ -204,8 +264,10 @@ size_t  cp4_env_state_size(void);
 void    cp4_env_save(const Cp4Env *e, void *dst);
 void    cp4_env_load(Cp4Env *e, const void *src);
 const Cp4World *cp4_env_world(const Cp4Env *e);
-/* counts: births, deaths, pop, allies, enemies, befriended, kills
- * means:  gen, parts, legs, charm, dna */
+/* counts[19]: births, deaths, pop, allies, enemies, befriended, kills,
+ *             discovered, hatchlings, home, medium, steps in each of the four
+ *             media, then bush/kelp/tuber/meat eaten
+ * means[8]:   gen, parts, legs, charm, dna, travelled, furthest, nest store */
 void cp4_env_census(const Cp4Env *e, int32_t *counts, float *means);
 
 void cp4_render(const Cp4World *w, uint8_t *rgba, int width, int height);

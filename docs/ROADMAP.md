@@ -33,6 +33,15 @@ Items are struck through as they land.
   body a species evolved in stage 3 arrives as the multipliers that decide its
   doctrine.
 
+- ~~**Four media, and a world with no edges.**~~ Ground, water, air and soil,
+  each gated by a part and each with its own food. The bounded box is gone:
+  terrain was always a pure function, so what keeps the world finite is now a
+  resident window that recycles flora, animals and whole species from behind
+  the player to in front of them. Snapshot, determinism and throughput are
+  unchanged.
+- ~~**Nests the player builds.**~~ Bank food, heal, and hatch followers that
+  carry a mutated copy of your own genome.
+
 ## Next
 
 **8. Slim the HUD.** Two large filled panels eat the corners. Thin
@@ -65,12 +74,12 @@ plumbing exercise.
 
 ## Larger
 
-**12. Chunked infinite world with biomes.** The fixed 1400x620x1400 box is
-what gives `memcpy` snapshot, determinism and 80k steps/s, and infinite worlds
-want streaming — a real architectural tension. The resolution is procedural
-chunks hashed from the world seed with a fixed resident window, so the active
-region stays a POD. Biomes (temperature, current, substrate) matter as much as
-extent: an infinite uniform ocean is not worth exploring.
+**12. Biomes.** Stage 3 is unbounded now and the resident-window design held
+up — snapshot, determinism and throughput all survived it. What is still
+missing is variety across that extent: the continental field decides land from
+sea, but temperature, substrate and weather do not vary, so a thousand units
+north looks like a thousand units south. Stage 2 is still a fixed box and
+should inherit the same treatment.
 
 **13. Articulated physics and learned locomotion.** Bodies do not swim. Thrust
 is applied along a heading and the undulation is a decorative sine disconnected

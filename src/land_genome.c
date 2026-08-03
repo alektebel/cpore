@@ -29,7 +29,34 @@ static const struct { const char *name; int cost; } PARTS[CP4_PART_COUNT] = {
     { "voice",   12 },
     { "plume",   11 },
     { "wing",    16 },
+    { "fin",      9 },
+    { "gill",    11 },
+    { "digger",  12 },
 };
+
+static const char *STYLES[CP4_STYLE_COUNT] = {
+    "grazer", "predator", "charmer", "swimmer", "flyer", "burrower"
+};
+
+const char *cp4_style_name(int st)
+{
+    return (st >= 0 && st < CP4_STYLE_COUNT) ? STYLES[st] : "?";
+}
+
+const char *cp4_medium_name(int m)
+{
+    static const char *M[CP4_MEDIUM_COUNT] = { "ground", "water", "air", "under" };
+    return (m >= 0 && m < CP4_MEDIUM_COUNT) ? M[m] : "?";
+}
+
+int cp4_flora_medium(int type)
+{
+    switch (type) {
+    case CP4_FLORA_KELP:  return CP4_IN_WATER;
+    case CP4_FLORA_TUBER: return CP4_UNDER;
+    default:              return CP4_ON_GROUND;
+    }
+}
 
 const char *cp4_part_name(int t)
 {
@@ -114,6 +141,14 @@ static int mouths(const Cp4Genome *g)
 
 static int legs(const Cp4Genome *g) { return count_of(g, CP4_LEG); }
 
+/* Anything that can move the animal somewhere. Legs are no longer the only
+ * answer: a finned body lives in the water and a winged one lives in the air,
+ * and neither should have a leg pair forced on it by the normaliser. */
+static int movers(const Cp4Genome *g)
+{
+    return legs(g) + count_of(g, CP4_FIN) + count_of(g, CP4_WING);
+}
+
 void cp4_genome_starter(Cp4Genome *g)
 {
     cp4_genome_clear(g);
@@ -151,10 +186,11 @@ void cp4_genome_normalise(Cp4Genome *g, int budget)
         g->part[slot].scale = 128;
         g->part[slot].mirror = 0;
     }
-    /* A land animal with no legs cannot cross its own world, so one pair is
-     * granted the same way a mouth is. It is the terrestrial equivalent of
-     * needing something to eat with. */
-    if (!legs(g)) {
+    /* An animal with no way at all to move cannot play, so one leg pair is
+     * granted the same way a mouth is. Fins or wings count: a body that swims
+     * or flies is not obliged to walk, and forcing legs on it was quietly
+     * taxing every aquatic and aerial build for a part it never used. */
+    if (!movers(g)) {
         int slot = -1;
         for (int i = 0; i < CP4_MAX_PARTS; i++)
             if (g->part[i].type == CP4_NONE) { slot = i; break; }
@@ -174,7 +210,12 @@ void cp4_genome_normalise(Cp4Genome *g, int budget)
             if (t == CP4_NONE) continue;
             int is_mouth = (t == CP4_MOUTH_G || t == CP4_MOUTH_C || t == CP4_MOUTH_O);
             if (is_mouth && mouths(g) <= 1) continue;
-            if (t == CP4_LEG && legs(g) <= 2) continue;
+            /* never trim the last thing that moves the animal, whatever it is */
+            int is_mover = (t == CP4_LEG || t == CP4_FIN || t == CP4_WING);
+            if (is_mover && movers(g) <= 2) continue;
+            /* nor the gill that is the only reason a swimmer is not drowning */
+            if (t == CP4_GILL && count_of(g, CP4_FIN) >= 2 && count_of(g, CP4_GILL) <= 1)
+                continue;
             if (worst < 0 || cp4_part_cost(t) > cp4_part_cost(g->part[worst].type)) worst = i;
         }
         if (worst >= 0) {
@@ -352,14 +393,63 @@ void cp4_genome_autodesign(Cp4Genome *g, CpRng *r, int budget, int style)
         g->hue = 60; g->hue2 = 20; g->sat = 140; g->val = 165;
         g->pattern = CP4_PAT_MOTTLE; g->pscale = 140;
         g->prof[0] = 125; g->prof[1] = 210; g->prof[2] = 180; g->prof[3] = 75;
+        /* Eyes before feet. In a world with no edges, range is the scarcest
+         * resource a generalist has - a grazer that cannot see across the
+         * resident ring spends the run walking past its own food. */
         BUYM(CP4_MOUTH_G, 0, 0, 0, 0);
         BUYM(CP4_LEG, 0, 60, -40, 1);
+        BUYM(CP4_EYE, 0, 34, 30, 1);
         BUYM(CP4_LEG, 2, 60, -40, 1);
         BUYM(CP4_FOOT, 2, 70, -55, 1);
-        BUYM(CP4_EYE, 0, 34, 30, 1);
         BUYM(CP4_EAR, 0, 90, 45, 1);
         BUYM(CP4_VOICE, 0, 0, 25, 0);
         BUYM(CP4_PLATE, 1, 128, 40, 0);
+        break;
+
+    case CP4_STYLE_SWIMMER:
+        /* Long, smooth and finned. It buys gills before anything ornamental,
+         * because a swimmer without them is on a timer. */
+        g->hue = 130; g->hue2 = 96; g->sat = 185; g->val = 175;
+        g->pattern = CP4_PAT_COUNTER; g->pscale = 120;
+        g->prof[0] = 120; g->prof[1] = 185; g->prof[2] = 165; g->prof[3] = 70;
+        g->nseg = 4; spent += 5;
+        BUYM(CP4_MOUTH_G, 0, 0, 0, 0);
+        BUYM(CP4_FIN, 1, 64, 0, 1);
+        BUYM(CP4_GILL, 0, 96, 10, 1);
+        BUYM(CP4_FIN, 3, 64, 0, 1);
+        BUYM(CP4_EYE, 0, 34, 30, 1);
+        BUYM(CP4_LEG, 2, 60, -40, 1);
+        BUYM(CP4_VOICE, 0, 0, 25, 0);
+        break;
+
+    case CP4_STYLE_FLYER:
+        /* Light on purpose. Lift has to beat mass, so this build stays at
+         * three segments and spends nothing on plate. */
+        g->hue = 20; g->hue2 = 170; g->sat = 200; g->val = 200;
+        g->pattern = CP4_PAT_BANDS; g->pscale = 150;
+        g->prof[0] = 110; g->prof[1] = 165; g->prof[2] = 140; g->prof[3] = 60;
+        g->girth = 95;
+        BUYM(CP4_MOUTH_G, 0, 0, 0, 0);
+        BUYM(CP4_WING, 1, 64, 20, 1);
+        BUYM(CP4_LEG, 2, 60, -40, 1);
+        BUYM(CP4_EYE, 0, 34, 30, 1);
+        BUYM(CP4_WING, 2, 64, 10, 1);
+        BUYM(CP4_VOICE, 0, 0, 25, 0);
+        break;
+
+    case CP4_STYLE_BURROWER:
+        /* Squat, armoured and clawed. Slow above ground and safe below it. */
+        g->hue = 25; g->hue2 = 210; g->sat = 130; g->val = 140;
+        g->pattern = CP4_PAT_RINGS; g->pscale = 175;
+        g->prof[0] = 150; g->prof[1] = 205; g->prof[2] = 180; g->prof[3] = 95;
+        g->girth = 175;
+        BUYM(CP4_MOUTH_G, 0, 0, 0, 0);
+        BUYM(CP4_DIGGER, 0, 40, -25, 1);
+        BUYM(CP4_LEG, 0, 60, -40, 1);
+        BUYM(CP4_LEG, 2, 60, -40, 1);
+        BUYM(CP4_PLATE, 1, 128, 40, 0);
+        BUYM(CP4_EAR, 0, 90, 45, 1);
+        BUYM(CP4_VOICE, 0, 0, 25, 0);
         break;
     }
     #undef BUYM
@@ -403,6 +493,31 @@ void cp4_genome_stats(const Cp4Genome *g, Cp4Stats *o)
     o->accel = (430.0f + 150.0f * n[CP4_LEG]) / mass;
     o->turn  = (2.0f + 0.5f * n[CP4_LEG]) / (0.85f + 0.10f * (float)nseg);
     o->jump  = 120.0f + 26.0f * n[CP4_LEG] + 55.0f * n[CP4_WING];
+
+    /* ---- the media ----
+     *
+     * Each one is gated by a part rather than scaled by it. A body with no
+     * fins does not swim slowly, it does not swim: it flounders and drowns.
+     * That is what makes buying a fin a decision instead of a stat bump, and
+     * it is the same shape as the mouth gate on what an animal can eat. */
+    o->swim = n[CP4_FIN] ? (58.0f + 26.0f * n[CP4_FIN]) / mass : 0.0f;
+    /* every body floats a little; a fat one floats more */
+    o->buoy = 0.35f + 0.30f * ((float)g->girth / 255.0f) + 0.06f * n[CP4_FIN];
+    if (o->buoy > 0.95f) o->buoy = 0.95f;
+    /* Lift has to beat mass, so wings on a heavy build are a waste of budget.
+     * Two wings carry a light animal; a plated six-segment one needs four and
+     * still climbs badly. */
+    {
+        float lift = 0.95f * n[CP4_WING];
+        o->fly = lift > mass * 0.62f ? (lift - mass * 0.62f) * 150.0f : 0.0f;
+    }
+    /* Digging is a burrower's only mobility, so it has to be a real speed
+     * rather than a crawl - at 26 the archetype covered a third of what a
+     * walker did and starved politely. */
+    o->dig = n[CP4_DIGGER] ? (44.0f + 22.0f * n[CP4_DIGGER]) / (0.7f + 0.4f * mass) : 0.0f;
+    /* Gills make water home. Without them a big lung is worth a few seconds
+     * and a small body drowns almost at once. */
+    o->breath = n[CP4_GILL] ? 1.0e9f : (7.0f + 2.4f * (float)nseg + 6.0f * n[CP4_FIN]);
     o->grip  = 0.25f + 0.22f * n[CP4_FOOT] + 0.05f * n[CP4_LEG];
     if (o->grip > 1.0f) o->grip = 1.0f;
     /* How high the trunk rides.
@@ -434,8 +549,10 @@ void cp4_genome_stats(const Cp4Genome *g, Cp4Stats *o)
     o->graze_eff = 0.80f * n[CP4_MOUTH_G] + 0.50f * n[CP4_MOUTH_O];
     o->carn_eff  = 0.85f * n[CP4_MOUTH_C] + 0.50f * n[CP4_MOUTH_O];
 
-    o->sight   = 210.0f + 90.0f * n[CP4_EYE];
-    if (o->sight > 660.0f) o->sight = 660.0f;
+    /* The world stopped having edges, so the useful range of an eye went up
+     * with it: 210 units inside a 1250-unit resident ring is tunnel vision. */
+    o->sight   = 260.0f + 95.0f * n[CP4_EYE];
+    if (o->sight > 720.0f) o->sight = 720.0f;
     /* ears see through what eyes cannot: cover, and the far side of a ridge */
     o->hearing = 90.0f + 105.0f * n[CP4_EAR];
 
@@ -443,7 +560,8 @@ void cp4_genome_stats(const Cp4Genome *g, Cp4Stats *o)
     o->charm         = 0.65f * n[CP4_VOICE] + 0.80f * n[CP4_PLUME];
     o->social_reach  = 110.0f + 85.0f * n[CP4_VOICE];
 
-    o->stamina = 100.0f + 18.0f * n[CP4_LEG] + 12.0f * n[CP4_FOOT];
+    o->stamina = 100.0f + 18.0f * n[CP4_LEG] + 12.0f * n[CP4_FOOT]
+                        + 10.0f * n[CP4_FIN] + 8.0f * n[CP4_WING];
     o->upkeep  = 0.50f + 0.15f * o->n_parts + 0.16f * (float)(nseg - 2)
                        + 0.30f * ((float)g->girth / 255.0f);
 }

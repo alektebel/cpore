@@ -541,7 +541,9 @@ void cp5_world_observe(const Cp5World *w, float *o)
         for (int i = 0; i < CP5_MAX_UNITS; i++)
             if (w->unit[i].alive && w->unit[i].owner == CP5_PLAYER)
                 n[w->unit[i].type] += 1.0f;
-        for (int a = 0; a < CP5_APPROACH_COUNT; a++) o[k++] = n[a] * 0.1f;
+        /* clamped: ninety-six units in the field is 9.6, which sails straight
+         * out of the range every other entry here promises */
+        for (int a = 0; a < CP5_APPROACH_COUNT; a++) o[k++] = clampf(n[a] * 0.1f, 0.0f, 3.0f);
     }
     o[k++] = (float)w->step / (float)CP5_MAX_STEPS;
     o[k++] = (float)w->n_cities / (float)CP5_MAX_CITIES;

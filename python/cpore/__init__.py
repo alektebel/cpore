@@ -10,6 +10,8 @@ from .env import (
     LAND_PART,
     LAND_PART_NAMES,
     LAND_GEN_BUDGET,
+    LAND_STYLES,
+    MEDIA,
     CivEnv,
     APPROACH,
     APPROACH_NAMES,
@@ -32,7 +34,7 @@ from .env import (
 
 __all__ = ["CporeEnv", "AquaEnv", "aqua_genome", "LandEnv", "land_genome",
            "AQ_PART", "AQ_PART_NAMES", "AQ_GEN_BUDGET",
-           "LAND_PART", "LAND_PART_NAMES", "LAND_GEN_BUDGET",
+           "LAND_PART", "LAND_PART_NAMES", "LAND_GEN_BUDGET", "LAND_STYLES", "MEDIA",
            "CivEnv", "APPROACH", "APPROACH_NAMES", "CporeVecEnv", "make_gym_env", "genome",
            "PART", "PART_NAMES", "PART_COST", "GEN_BUDGET", "STATUS", "VIS", "VIS_STYLES", "DEFAULT_VIS",
            "FRONT", "RIGHT", "BACK", "LEFT"]
