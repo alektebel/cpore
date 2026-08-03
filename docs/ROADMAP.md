@@ -41,6 +41,9 @@ Items are struck through as they land.
   unchanged.
 - ~~**Nests the player builds.**~~ Bank food, heal, and hatch followers that
   carry a mutated copy of your own genome.
+- ~~**Species that remember you.**~~ Wariness, a learned guard against being
+  struck from behind, and fatigue at a repeated display - all inside one
+  episode, all fading, and all reported to the agent.
 - ~~**Day and night.**~~ A cycle every 2000 steps that takes sight and leaves
   hearing, so an ear finally beats an eye at midnight. Night sky, stars, and a
   sun that actually rises and sets.
@@ -59,10 +62,9 @@ fish already removes genomes from the pool, but weakly. Strengthen it and
 verify the population measurably shifts away from whatever body type the
 player hunts — the census panel already makes that legible.
 
-**10. In-session creature memory.** Per-creature statistics of player
-behaviour (approach angle, favoured depth, attack cadence) biasing their
-steering, so tactics get countered within an episode rather than only across
-generations. This is where most of the *felt* intelligence lives.
+**10. In-session memory, for stage 2.** Stage 3 has it: wariness, guard and
+display fatigue, all decaying, all in the observation. The aquatic stage still
+has none — its fish react to what you are, never to what you have done.
 
 **11. Evolving population in the cell stage.** Stage 1's NPCs are still
 scripted with fixed stats. Give them genomes, energy, breeding and mutation so

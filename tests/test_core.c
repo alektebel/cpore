@@ -703,6 +703,119 @@ int main(void)
         }
     }
 
+    /* --- WHAT A SPECIES LEARNS ---
+     * Selection across generations is slow and already works. What was missing
+     * was a species reacting inside one episode, and the claim is threefold: a
+     * lineage you keep attacking gets warier, one you keep singing at stops
+     * being impressed, and both fade so they are moods rather than grudges.
+     *
+     * The world struct is public, so the player can be parked beside a chosen
+     * species and held alive - which isolates the memory from everything else
+     * that decides an episode. */
+    {
+        Cp4World *w = (Cp4World *)malloc(sizeof(Cp4World));
+        float act[CP4_ACT_DIM];
+
+        #define HOLD() do {                                    \
+            w->player.hp = w->player.hp_max;                   \
+            w->player.energy = 150.0f;                         \
+            w->dna = 0.0f;                                     \
+            w->status = CP4_RUN;                               \
+            if (w->step > CP4_MAX_STEPS - 20) w->step = 0;     \
+        } while (0)
+        /* park the player `back` units from a live member of nest k */
+        #define PARK(K, BACK) ({                                               \
+            int found_ = -1;                                                   \
+            for (int i_ = 0; i_ < CP4_MAX_BEASTS; i_++) {                      \
+                Cp4Beast *b_ = &w->beast[i_];                                  \
+                if (!b_->alive || b_->nest != (K)) continue;                   \
+                w->player.p.x = b_->p.x - (BACK);                              \
+                w->player.p.z = b_->p.z;                                       \
+                w->player.p.y = cp4_height(w->seed, w->player.p.x,             \
+                                           w->player.p.z) - w->player.s.stand; \
+                w->player.yaw = 0.0f;                                          \
+                found_ = i_; break;                                            \
+            }                                                                  \
+            found_; })
+
+        /* --- song fatigue --- */
+        float first = 0.0f, later = 0.0f, peak_fatigue = 0.0f;
+        {
+            Cp4Genome g;
+            cp4_genome_autodesign(&g, NULL, CP4_GEN_BUDGET[0], CP4_STYLE_CHARMER);
+            cp4_world_reset(w, 5, &g);
+            /* Measure the standing the songs actually buy, not the DNA. DNA
+             * is reset every step by HOLD to stop the episode evolving out
+             * from under the probe, so a DNA delta here would only ever be one
+             * step wide - standing is the direct thing a song moves. */
+            int heard = 0;
+            for (int block = 0; block < 4; block++) {
+                float a0 = w->nest[0].standing;
+                int s0 = w->songs, guard = 0;
+                while (w->songs < s0 + 8 && guard++ < 4000) {
+                    HOLD();
+                    if (PARK(0, 30.0f) < 0) break;
+                    /* Keep the nest under the player's feet. Its members
+                     * wander, and a nest whose marker drifts out of the
+                     * resident window is replaced by a different species -
+                     * which resets the very state this is measuring. */
+                    w->nest[0].p = w->player.p;
+                    memset(act, 0, sizeof(act));
+                    act[5] = 1.0f;
+                    cp4_world_step(w, act);
+                }
+                float gained = w->nest[0].standing - a0;
+                if (block == 0) first = gained;
+                if (block == 3) later = gained;
+                if (w->nest[0].fatigue > peak_fatigue) peak_fatigue = w->nest[0].fatigue;
+                if (w->nest[0].songs_heard > heard) heard = w->nest[0].songs_heard;
+            }
+            printf("        a song is worth %+.4f standing per listener at first "
+                   "and %+.4f by the fourth round (fatigue peaked %.2f)\n",
+                   (double)first, (double)later, (double)peak_fatigue);
+            CHECK(heard > 0, "land: a species hears you sing");
+            CHECK(peak_fatigue > 0.3f, "land: repeating a display tires an audience");
+            CHECK(later < first, "land: the same song is worth less the fourth time");
+        }
+
+        /* --- learned wariness, and that it fades --- */
+        {
+            Cp4Genome g;
+            cp4_genome_autodesign(&g, NULL, CP4_GEN_BUDGET[0], CP4_STYLE_PREDATOR);
+            cp4_world_reset(w, 5, &g);
+            for (int t = 0; t < 700; t++) {
+                HOLD();
+                if (PARK(0, 26.0f) < 0) break;
+                w->nest[0].p = w->player.p;      /* as above */
+                memset(act, 0, sizeof(act));
+                act[4] = 1.0f;
+                cp4_world_step(w, act);
+            }
+            float learned = w->nest[0].wary;
+            float guarded = w->nest[0].guard;
+            /* now leave them alone and let it fade */
+            for (int t = 0; t < 3000; t++) {
+                HOLD();
+                w->player.p.x += 4000.0f;      /* well out of the way */
+                memset(act, 0, sizeof(act));
+                cp4_world_step(w, act);
+            }
+            float faded = w->nest[0].wary;
+            /* attacks_seen is not asserted on: a nest that drifts out of the
+             * resident window is replaced by a different species, and the new
+             * one has quite rightly never seen you before */
+            printf("        being attacked: wary %.2f, guard %.2f; "
+                   "left alone it fades to %.2f\n",
+                   (double)learned, (double)guarded, (double)faded);
+            CHECK(learned > 0.5f, "land: being attacked makes a species wary");
+            CHECK(guarded > 0.2f, "land: striking from behind teaches it to face you");
+            CHECK(faded < learned * 0.7f, "land: wariness fades - it is a mood, not a grudge");
+        }
+        #undef HOLD
+        #undef PARK
+        free(w);
+    }
+
     /* --- BIOMES ---
      * An unbounded world is only worth crossing if what is over there differs
      * from what is here. The claim is that the climate field produces regions

@@ -141,12 +141,25 @@ static int mouths(const Cp4Genome *g)
 
 static int legs(const Cp4Genome *g) { return count_of(g, CP4_LEG); }
 
-/* Anything that can move the animal somewhere. Legs are no longer the only
- * answer: a finned body lives in the water and a winged one lives in the air,
- * and neither should have a leg pair forced on it by the normaliser. */
-static int movers(const Cp4Genome *g)
+/* How many *slots* hold a part of this kind, as opposed to how many copies it
+ * places. The trimmer has to guard on slots: a single mirrored mouth places
+ * two copies, so a guard written against the copy count read "more than one
+ * mouth" and cheerfully deleted the only one there was. */
+static int slots_of(const Cp4Genome *g, int t)
 {
-    return legs(g) + count_of(g, CP4_FIN) + count_of(g, CP4_WING);
+    int n = 0;
+    for (int i = 0; i < CP4_MAX_PARTS; i++) if (g->part[i].type == t) n++;
+    return n;
+}
+
+static int mouth_slots(const Cp4Genome *g)
+{
+    return slots_of(g, CP4_MOUTH_G) + slots_of(g, CP4_MOUTH_C) + slots_of(g, CP4_MOUTH_O);
+}
+
+static int mover_slots(const Cp4Genome *g)
+{
+    return slots_of(g, CP4_LEG) + slots_of(g, CP4_FIN) + slots_of(g, CP4_WING);
 }
 
 void cp4_genome_starter(Cp4Genome *g)
@@ -178,53 +191,116 @@ void cp4_genome_normalise(Cp4Genome *g, int budget)
     memset(g->part, 0, sizeof(g->part));
     for (int i = 0; i < n; i++) g->part[i] = tmp[i];
 
-    if (!mouths(g)) {
-        int slot = (n < CP4_MAX_PARTS) ? n++ : CP4_MAX_PARTS - 1;
-        g->part[slot].type = CP4_MOUTH_G;
-        g->part[slot].seg = 0;
-        g->part[slot].yaw = 0;
-        g->part[slot].scale = 128;
-        g->part[slot].mirror = 0;
-    }
-    /* An animal with no way at all to move cannot play, so one leg pair is
-     * granted the same way a mouth is. Fins or wings count: a body that swims
-     * or flies is not obliged to walk, and forcing legs on it was quietly
-     * taxing every aquatic and aerial build for a part it never used. */
-    if (!movers(g)) {
-        int slot = -1;
-        for (int i = 0; i < CP4_MAX_PARTS; i++)
-            if (g->part[i].type == CP4_NONE) { slot = i; break; }
-        if (slot < 0) slot = CP4_MAX_PARTS - 1;
-        g->part[slot].type = CP4_LEG;
-        g->part[slot].seg = 0;
-        g->part[slot].yaw = 60;
-        g->part[slot].pitch = -40;
-        g->part[slot].scale = 128;
-        g->part[slot].mirror = 1;
+    /* Grant the two things an animal cannot play without: something to eat
+     * with, and something to move with.
+     *
+     * Both grants have to be able to displace an existing part, because a
+     * genome can arrive with all twelve slots full and neither. Doing that
+     * naively is how the two guarantees ended up fighting over the same slot -
+     * the mouth grant overwrote the only leg, the mover grant then overwrote
+     * the mouth back, and the genome came out with neither. Displacing the
+     * least essential part instead, and never one the other guarantee is
+     * relying on, makes the two independent. */
+    {
+        #define GRANT(WANT_TYPE, WANT_YAW, WANT_PITCH, WANT_MIRROR)               \
+        do {                                                                      \
+            int slot = -1;                                                        \
+            for (int i = 0; i < CP4_MAX_PARTS; i++)                               \
+                if (g->part[i].type == CP4_NONE) { slot = i; break; }              \
+            if (slot < 0) {                                                       \
+                /* full: displace the cheapest part that nothing depends on */    \
+                int best_cost = 1 << 20;                                          \
+                for (int i = 0; i < CP4_MAX_PARTS; i++) {                         \
+                    int t = g->part[i].type;                                      \
+                    int is_m = (t == CP4_MOUTH_G || t == CP4_MOUTH_C ||           \
+                                t == CP4_MOUTH_O);                                \
+                    int is_v = (t == CP4_LEG || t == CP4_FIN || t == CP4_WING);   \
+                    if (is_m && mouth_slots(g) <= 1) continue;                    \
+                    if (is_v && mover_slots(g) <= 1) continue;                    \
+                    if (cp4_part_cost(t) < best_cost) {                           \
+                        best_cost = cp4_part_cost(t); slot = i;                   \
+                    }                                                             \
+                }                                                                 \
+            }                                                                     \
+            if (slot >= 0) {                                                      \
+                g->part[slot].type = (uint8_t)(WANT_TYPE);                        \
+                g->part[slot].seg = 0;                                            \
+                g->part[slot].yaw = (uint8_t)(WANT_YAW);                          \
+                g->part[slot].pitch = (int8_t)(WANT_PITCH);                       \
+                g->part[slot].scale = 128;                                        \
+                g->part[slot].mirror = (uint8_t)(WANT_MIRROR);                    \
+            }                                                                     \
+        } while (0)
+
+        if (!mouth_slots(g)) GRANT(CP4_MOUTH_G, 0, 0, 0);
+        /* Fins or wings count as movers: a body that swims or flies is not
+         * obliged to walk, and forcing legs on it was quietly taxing every
+         * aquatic and aerial build for a part it never used. */
+        if (!mover_slots(g)) GRANT(CP4_LEG, 60, -40, 1);
+        #undef GRANT
     }
 
-    for (int guard = 0; guard < 96 && cp4_genome_cost(g) > budget; guard++) {
-        int worst = -1;
-        for (int i = 0; i < CP4_MAX_PARTS; i++) {
-            int t = g->part[i].type;
-            if (t == CP4_NONE) continue;
-            int is_mouth = (t == CP4_MOUTH_G || t == CP4_MOUTH_C || t == CP4_MOUTH_O);
-            if (is_mouth && mouths(g) <= 1) continue;
-            /* never trim the last thing that moves the animal, whatever it is */
-            int is_mover = (t == CP4_LEG || t == CP4_FIN || t == CP4_WING);
-            if (is_mover && movers(g) <= 2) continue;
-            /* nor the gill that is the only reason a swimmer is not drowning */
-            if (t == CP4_GILL && count_of(g, CP4_FIN) >= 2 && count_of(g, CP4_GILL) <= 1)
-                continue;
-            if (worst < 0 || cp4_part_cost(t) > cp4_part_cost(g->part[worst].type)) worst = i;
+    /* Trim to budget along a ladder, cheapest loss first.
+     *
+     * Sorting purely by price strips a build of exactly the parts that define
+     * it: a charmer authored at the top budget and normalised down to the
+     * first one came out with no voice and no plume, because those were the
+     * dearest things it owned. The ladder is
+     *
+     *   1. drop bilateral symmetry - halves a part's cost and keeps the
+     *      capability entirely, so it is always the cheapest thing to give up
+     *   2. delete a duplicate - the body still does that job, just less well
+     *   3. delete a unique part - only now does the animal lose something it
+     *      could do at all
+     *   4. shorten the spine
+     *
+     * so a genome degrades into a smaller version of itself rather than into a
+     * different animal. */
+    for (int guard = 0; guard < 160 && cp4_genome_cost(g) > budget; guard++) {
+
+        /* rung 1: symmetry */
+        {
+            int best = -1, best_cost = -1;
+            for (int i = 0; i < CP4_MAX_PARTS; i++) {
+                if (g->part[i].type == CP4_NONE || !g->part[i].mirror) continue;
+                int t = g->part[i].type;
+                /* dropping the mirror on the only leg pair would leave one leg,
+                 * which movers() still counts, so no guard is needed here */
+                int cost = cp4_part_cost(t);
+                if (cost > best_cost) { best = i; best_cost = cost; }
+            }
+            if (best >= 0) { g->part[best].mirror = 0; continue; }
         }
-        if (worst >= 0) {
-            /* dropping the mirror is half the saving for none of the loss */
-            if (g->part[worst].mirror && cp4_part_cost(g->part[worst].type) * 2 > 12)
-                g->part[worst].mirror = 0;
-            else
-                g->part[worst].type = CP4_NONE;
-        } else if (g->nseg > 2) {
+
+        /* rungs 2 and 3: duplicates before uniques, dearest first within each */
+        {
+            int worst = -1, worst_unique = 2, worst_cost = -1;
+            for (int i = 0; i < CP4_MAX_PARTS; i++) {
+                int t = g->part[i].type;
+                if (t == CP4_NONE) continue;
+                int is_mouth = (t == CP4_MOUTH_G || t == CP4_MOUTH_C || t == CP4_MOUTH_O);
+                if (is_mouth && mouth_slots(g) <= 1) continue;
+                /* never trim the last thing that moves the animal */
+                int is_mover = (t == CP4_LEG || t == CP4_FIN || t == CP4_WING);
+                if (is_mover && mover_slots(g) <= 1) continue;
+                /* nor the gill that is the only reason a swimmer is not drowning */
+                if (t == CP4_GILL && slots_of(g, CP4_FIN) >= 1 && slots_of(g, CP4_GILL) <= 1)
+                    continue;
+
+                int slots = 0;
+                for (int j = 0; j < CP4_MAX_PARTS; j++) if (g->part[j].type == t) slots++;
+                int unique = slots > 1 ? 0 : 1;
+                int cost = cp4_part_cost(t);
+                if (worst < 0 || unique < worst_unique ||
+                    (unique == worst_unique && cost > worst_cost)) {
+                    worst = i; worst_unique = unique; worst_cost = cost;
+                }
+            }
+            if (worst >= 0) { g->part[worst].type = CP4_NONE; continue; }
+        }
+
+        /* rung 4 */
+        if (g->nseg > 2) {
             g->nseg--;
             for (int i = 0; i < CP4_MAX_PARTS; i++)
                 if (g->part[i].seg >= g->nseg) g->part[i].seg = (uint8_t)(g->nseg - 1);

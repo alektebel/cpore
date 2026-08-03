@@ -498,6 +498,8 @@ static void stream_world(Cp4World *w)
         nst->standing = 0.0f;
         nst->befriended = 0;
         nst->seen = 0;
+        nst->wary = nst->fatigue = nst->guard = 0.0f;
+        nst->attacks_seen = nst->songs_heard = 0;
     }
 }
 
@@ -771,6 +773,36 @@ static void beast_think(Cp4World *w, Cp4Beast *b, int idx)
         if (d2 > see2 || d2 >= best) continue;
         best = d2; b->des = f->p; b->has_target = 1;
         b->want_med = (uint8_t)med;
+    }
+
+    /* What this species has learned about the player. A wary lineage breaks
+     * off and runs while a naive one is still grazing, which is the whole
+     * point of the memory: the same approach stops working the third time. */
+    {
+        const Cp4Nest *nst = &w->nest[b->nest % CP4_MAX_NESTS];
+        const Cp4Beast *pl = &w->player;
+        /* A wary species should make hunting harder, not impossible. At a
+         * flee radius of 320 units the predator archetype could not close on
+         * anything for the rest of the episode and went from seven wins in
+         * twelve to one. Half that range still means the third approach fails
+         * where the first worked. */
+        if (nst->wary > 0.18f && pl->alive) {
+            float flee_r = 70.0f + 130.0f * nst->wary;
+            float d2 = flat2(pl->p, b->p);
+            if (d2 < flee_r * flee_r) {
+                float dx = b->p.x - pl->p.x, dz = b->p.z - pl->p.z;
+                float l = sqrtf(dx * dx + dz * dz);
+                if (l > 1e-3f) {
+                    /* Guarded species back away facing you rather than turning
+                     * their flank, which is exactly the arc a claw wants. */
+                    float run = nst->guard > 0.35f ? 120.0f : 260.0f;
+                    b->des = v4(b->p.x + dx / l * run, 0.0f, b->p.z + dz / l * run);
+                    b->has_target = 1;
+                    b->want_med = b->medium;
+                    return;
+                }
+            }
+        }
     }
 
     /* Predators hunt, and a hostile nest hunts the player specifically. The
@@ -1077,9 +1109,17 @@ void cp4_world_step(Cp4World *w, const float act[CP4_ACT_DIM])
             if (d2 > reach * reach) continue;
             Cp4Nest *nst = &w->nest[b->nest % CP4_MAX_NESTS];
             float before = nst->standing;
-            /* charm is resisted by the audience's own display: impressing a
-             * showy species is harder than impressing a drab one */
-            float gain = 0.055f * p->s.charm / (1.0f + b->s.charm * 0.55f);
+            /* Charm is resisted by the audience's own display: impressing a
+             * showy species is harder than impressing a drab one. It is also
+             * resisted by having heard it before - standing in one place
+             * singing the same song at one nest should stop working, which is
+             * what turns the social path into a tour rather than a loop. */
+            float gain = 0.055f * p->s.charm / (1.0f + b->s.charm * 0.55f)
+                                             / (1.0f + nst->fatigue * 2.6f);
+            /* and a wary species is harder to charm at all */
+            gain *= 1.0f - 0.45f * nst->wary;
+            nst->fatigue = clampf(nst->fatigue + 0.055f, 0.0f, 1.0f);
+            nst->songs_heard++;
             nst->standing = clampf(nst->standing + gain, -1.0f, 1.0f);
             if (before < 0.65f && nst->standing >= 0.65f) {
                 nst->befriended = 1;
@@ -1099,6 +1139,14 @@ void cp4_world_step(Cp4World *w, const float act[CP4_ACT_DIM])
         float rr = p->s.radius + b->s.radius + 14.0f;
         float d2 = flat2(b->p, p->p);
         if (d2 > rr * rr) continue;
+        /* Reach is three-dimensional. flat2 ignores height, so an animal a
+         * hundred units up was still being bitten by something standing on the
+         * ground underneath it - which made wings protect nothing and left the
+         * flyer the archetype that died most. */
+        {
+            float dy = fabsf(b->p.y - p->p.y);
+            if (dy > rr + p->s.stand + b->s.stand) continue;
+        }
         float dist = sqrtf(d2);
         if (dist < 0.001f) continue;
         float dir = atan2f(b->p.z - p->p.z, b->p.x - p->p.x);
@@ -1115,9 +1163,20 @@ void cp4_world_step(Cp4World *w, const float act[CP4_ACT_DIM])
                 float applied = dmg * (1.0f - b->s.armor);
                 b->hp -= applied;
                 w->dmg_dealt += applied;
-                /* violence has a diplomatic cost - the nest remembers */
+                /* Violence has a diplomatic cost, and it also teaches. The
+                 * nest remembers both that you did it and how you did it: a
+                 * species repeatedly struck from behind learns to turn and
+                 * face, which is the one counter that costs the player their
+                 * rear-arc damage bonus. */
                 Cp4Nest *nst = &w->nest[b->nest % CP4_MAX_NESTS];
                 nst->standing = clampf(nst->standing - 0.16f, -1.0f, 1.0f);
+                nst->attacks_seen++;
+                nst->wary = clampf(nst->wary + 0.09f, 0.0f, 1.0f);
+                {
+                    /* how far round its flank the blow landed */
+                    float rel = fabsf(ang_wrap(dir + PI - b->yaw));
+                    if (rel > PI * 0.55f) nst->guard = clampf(nst->guard + 0.16f, 0.0f, 1.0f);
+                }
                 if (b->hp <= 0.0f) {
                     nst->eaten++;
                     kill_beast(w, b);
@@ -1217,6 +1276,18 @@ void cp4_world_step(Cp4World *w, const float act[CP4_ACT_DIM])
         w->discovered++;
         w->dna += 4.5f;
         reward += 1.2f;
+    }
+
+    /* Memory fades. Without decay a single early scuffle would sour a species
+     * for the whole episode, which is a grudge rather than a reaction - and it
+     * would also mean the agent could never recover a relationship it had
+     * damaged. */
+    for (int k = 0; k < CP4_MAX_NESTS; k++) {
+        Cp4Nest *nst = &w->nest[k];
+        if (!nst->alive) continue;
+        nst->wary    = clampf(nst->wary    - 0.035f * dt, 0.0f, 1.0f);
+        nst->fatigue = clampf(nst->fatigue - 0.045f * dt, 0.0f, 1.0f);
+        nst->guard   = clampf(nst->guard   - 0.015f * dt, 0.0f, 1.0f);
     }
 
     /* regrow the world, inside the resident ring rather than inside a box */
@@ -1428,7 +1499,10 @@ void cp4_world_observe(const Cp4World *w, float *o)
         topk(cd, ci, CP4_OBS_BEAST_K, d2, i);
     }
     for (int i = 0; i < CP4_OBS_BEAST_K; i++) {
-        if (ci[i] < 0) { for (int z = 0; z < 8; z++) o[k++] = 0.0f; continue; }
+        if (ci[i] < 0) {
+            for (int z = 0; z < CP4_OBS_BEAST; z++) o[k++] = 0.0f;
+            continue;
+        }
         const Cp4Beast *b = &w->beast[ci[i]];
         float dx = b->p.x - p->p.x, dz = b->p.z - p->p.z;
         o[k++] = clampf((dx * fx + dz * fz) / 400.0f, -2.5f, 2.5f);
@@ -1439,6 +1513,13 @@ void cp4_world_observe(const Cp4World *w, float *o)
         o[k++] = clampf(b->s.charm / 3.0f, 0.0f, 2.5f);
         o[k++] = w->nest[b->nest % CP4_MAX_NESTS].standing;
         o[k++] = clampf(b->hp / b->hp_max, 0.0f, 1.0f);
+        /* what this species has learned about you - a hidden state the agent
+         * cannot respond to is not a mechanic, it is just noise in the world */
+        {
+            const Cp4Nest *nst = &w->nest[b->nest % CP4_MAX_NESTS];
+            o[k++] = b->nest == CP4_OWN_NEST ? 0.0f
+                   : clampf(nst->wary * 0.6f + nst->fatigue * 0.4f, 0.0f, 1.0f);
+        }
     }
 
     for (int t = 1; t < CP4_PART_COUNT; t++) o[k++] = s->n[t] * 0.25f;

@@ -208,6 +208,24 @@ back to it, it heals you, and once the larder is full it hatches a follower
 carrying a mutated copy of your own genome. Followers are a lineage rather than
 a summon: they travel with you, they eat, and they can be killed.
 
+**Species remember you inside an episode.** Selection across generations was
+already there and is slow; what was missing was a lineage reacting to what you
+did to it ten seconds ago. Three memories, all decaying, all visible in the
+observation so an agent can respond to them:
+
+| you did | they learn | so |
+|---|---|---|
+| attacked them | wariness | they break off and run while a naive herd is still grazing |
+| attacked from behind | guard | they back away facing you, denying the arc a claw wants |
+| sang the same song | fatigue | a display is worth 41% less by the fourth round |
+
+Measured, not asserted: a song buys `+0.2275` standing per listener at first
+and `+0.1343` by the fourth round. Wariness reaches 0.99 after a few dozen
+blows and fades to 0 if you leave them alone — a mood, not a grudge. That
+fatigue is also what turns the social path into a tour rather than a loop:
+standing in one place singing at one nest stops working, and the world has no
+edges to stop you walking to the next one.
+
 Rival nests still breed, mutate and are selected by whether their occupants can
 feed themselves — and they now know about media too, siting an aquatic lineage
 in water and letting a clawed one dig for its own roots. Over five worlds with

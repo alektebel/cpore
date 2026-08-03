@@ -188,12 +188,25 @@ typedef struct {
     uint8_t pad[3];
 } Cp4Flora;
 
-/* a rival species: a nest, a lineage, and how it feels about the player */
+/* A rival species: a nest, a lineage, how it feels about the player, and what
+ * it has learned about them.
+ *
+ * The memory is the point. Selection across generations is slow and already
+ * works; what was missing was a species reacting inside a single episode. A
+ * lineage you keep attacking gets warier and starts running sooner. One you
+ * keep attacking from behind starts facing you. One you keep singing the same
+ * song at stops being impressed. All three decay, so it is a mood rather than
+ * a permanent state, and all three are visible in the observation so an agent
+ * can actually respond to them. */
 typedef struct {
     Cp4Vec    p;
     Cp4Genome g;
     float     standing;      /* -1 hostile .. +1 allied */
+    float     wary;          /* 0..1 learned fear of the player          */
+    float     fatigue;       /* 0..1 how tired they are of your display  */
+    float     guard;         /* 0..1 how much they turn to face you      */
     int32_t   members, befriended, eaten;
+    int32_t   attacks_seen, songs_heard;
     uint8_t   alive, style, seen, pad;
 } Cp4Nest;
 
@@ -232,8 +245,10 @@ typedef struct {
  * for the climate and the hour, neighbours, own parts, own stats. Miscounting
  * overflows the caller's observation buffer, which is what the exact-count
  * test exists to catch. */
+#define CP4_OBS_BEAST   9     /* ...and the last is what its species has learned */
 #define CP4_OBS_DIM   (18 + 14 + 3 + CP4_OBS_FLORA_K * CP4_OBS_FLORA \
-                          + CP4_OBS_BEAST_K * 8 + (CP4_PART_COUNT - 1) + 7)
+                          + CP4_OBS_BEAST_K * CP4_OBS_BEAST \
+                          + (CP4_PART_COUNT - 1) + 7)
 /* turn, pitch, move, ascend/jump, attack, sing, dig, nest */
 #define CP4_ACT_CTRL   8
 #define CP4_ACT_DIM   (CP4_ACT_CTRL + CP4_MAX_PARTS * 4 + 2)
