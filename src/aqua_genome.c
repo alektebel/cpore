@@ -43,6 +43,7 @@ void cp3_genome_clear(Cp3Genome *g)
     g->prof[0] = 110; g->prof[1] = 190; g->prof[2] = 150; g->prof[3] = 70;
     g->hue = 130; g->hue2 = 30; g->sat = 150; g->val = 190;
     g->pattern = CP3_PAT_PLAIN; g->pscale = 120;
+    memset(g->lump, 0, sizeof(g->lump));
 }
 
 /* Catmull-Rom-ish blend across the four profile stations. Smooth, so a
@@ -78,7 +79,9 @@ static void hsv2rgb(float h, float s, float v, float *out)
 void cp3_genome_colour(const Cp3Genome *g, float *rgb, float *rgb2)
 {
     float s = 0.25f + 0.65f * ((float)g->sat / 255.0f);
-    float v = 0.45f + 0.52f * ((float)g->val / 255.0f);
+    /* capped below 1.0: the renderer tonemaps, so an albedo near white
+     * plus three light terms rolls off to a flat pale blob */
+    float v = 0.30f + 0.46f * ((float)g->val / 255.0f);
     if (rgb)  hsv2rgb((float)g->hue / 255.0f, s, v, rgb);
     /* the pattern colour is deliberately pushed apart in value as well as hue,
      * or the markings vanish the moment the palette quantises */
@@ -199,6 +202,8 @@ void cp3_genome_random(Cp3Genome *g, CpRng *r, int budget)
     g->val   = (uint8_t)(70 + cp_rng_int(r, 186));
     g->pattern = (uint8_t)cp_rng_int(r, CP3_PAT_COUNT);
     g->pscale  = (uint8_t)(40 + cp_rng_int(r, 216));
+    for (int i = 0; i < CP3_MAX_SEG; i++)
+        g->lump[i] = (int8_t)(cp_rng_int(r, 97) - 48);
     cp3_genome_normalise(g, budget);
 }
 
@@ -228,6 +233,9 @@ void cp3_genome_mutate(Cp3Genome *g, CpRng *r, int budget, float rate)
     if (cp_rng_f(r) < rate * 0.6f) g->val  = (uint8_t)(g->val + cp_rng_int(r, 41) - 20);
     if (cp_rng_f(r) < rate * 0.3f) g->pattern = (uint8_t)cp_rng_int(r, CP3_PAT_COUNT);
     if (cp_rng_f(r) < rate * 0.5f) g->pscale = (uint8_t)(g->pscale + cp_rng_int(r, 61) - 30);
+    for (int i = 0; i < CP3_MAX_SEG; i++)
+        if (cp_rng_f(r) < rate * 0.7f)
+            g->lump[i] = (int8_t)(g->lump[i] + cp_rng_int(r, 41) - 20);
 
     for (int i = 0; i < CP3_MAX_PARTS; i++) {
         if (cp_rng_f(r) >= rate) continue;

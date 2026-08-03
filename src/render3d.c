@@ -406,7 +406,11 @@ static int build_prims(const Cp3Fish *f, int is_player, Prim *out,
         segpos[i] = add(add(add(cv(f->p), mul(fwd, along)),
                             mul(right, wig + sweep * bend)),
                         mul(up, arch * bend));
-        segrad[i] = R * cp3_profile(&f->g, t);
+        /* profile sets the overall taper; lump genes dent and bulge it */
+        int li = i < CP3_MAX_SEG ? i : CP3_MAX_SEG - 1;
+        segrad[i] = R * cp3_profile(&f->g, t)
+                      * (1.0f + (float)f->g.lump[li] / 127.0f * 0.45f);
+        if (segrad[i] < R * 0.15f) segrad[i] = R * 0.15f;
     }
 
     int n = 0;
@@ -569,6 +573,22 @@ static V3 apply_pattern(const Skin *sk, V3 q, V3 albedo, float bodyw)
     case CP3_PAT_COUNTER:
         /* dark back, pale belly - the near-universal fish pattern */
         m = clampf(0.5f + vert * 0.16f, 0.0f, 1.0f);
+        break;
+    case CP3_PAT_STRIPES:            /* along the body, not across it */
+        m = sinf(atan2f(vert, side) * 4.0f + along * sk->freq * 0.9f) > 0.1f ? 1.0f : 0.0f;
+        break;
+    case CP3_PAT_MOTTLE: {           /* three out-of-phase waves reads as noise */
+        float a = sinf(along * sk->freq * 3.1f) + sinf(side * sk->freq * 4.7f)
+                + sinf(vert * sk->freq * 2.3f) + sinf((along + side) * sk->freq * 6.1f);
+        m = a > 0.55f ? 1.0f : 0.0f;
+        break;
+    }
+    case CP3_PAT_GRADIENT:           /* nose to tail */
+        m = clampf(0.5f - along * sk->freq * 0.55f, 0.0f, 1.0f);
+        m = m > 0.5f ? (m - 0.5f) * 2.0f : 0.0f;
+        break;
+    case CP3_PAT_RINGS:              /* concentric bands around the girth */
+        m = sinf(sqrtf(side * side + vert * vert) * sk->freq * 7.0f) > 0.2f ? 1.0f : 0.0f;
         break;
     default: break;
     }

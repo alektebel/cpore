@@ -72,6 +72,7 @@ typedef struct {
 /* Pattern genome. Colour carries as much perceived variety as shape does, and
  * it is far cheaper, so it gets its own genes and its own inheritance. */
 enum { CP3_PAT_PLAIN = 0, CP3_PAT_BANDS, CP3_PAT_SPOTS, CP3_PAT_COUNTER,
+       CP3_PAT_STRIPES, CP3_PAT_MOTTLE, CP3_PAT_GRADIENT, CP3_PAT_RINGS,
        CP3_PAT_COUNT };
 
 typedef struct {
@@ -90,6 +91,9 @@ typedef struct {
     uint8_t sat, val;   /* saturation and lightness */
     uint8_t pattern;    /* CP3_PAT_*  */
     uint8_t pscale;     /* pattern frequency */
+    /* Per-segment lumps. Without these every body is a smooth spindle;
+     * with them you get humps, waists, knobbly spines and pot bellies. */
+    int8_t  lump[CP3_MAX_SEG];
 } Cp3Genome;
 
 /* profile multiplier at t in [0,1] along the body, from the four stations */
