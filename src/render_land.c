@@ -39,6 +39,8 @@ typedef struct {
     float    hazek;      /* 1 in the world, 0 for a studio portrait */
     uint32_t seed;
     float    time;
+    V3       sun;        /* where the light comes from this frame */
+    float    day;        /* 0 at midnight, 1 at noon */
     /* Where the camera itself is. The stage has four media and three of them
      * look nothing like standing on a hill, so the background, the fog colour
      * and the fog distance all switch on these. */
@@ -46,8 +48,18 @@ typedef struct {
 } Ctx;
 
 /* Direction the light travels. y is down, so a sun in the sky sends light
- * along +y - the same convention the aquatic stage settled on. */
-static const V3 SUN = { 0.38f, 0.72f, -0.26f };
+ * along +y - the same convention the aquatic stage settled on.
+ *
+ * It is no longer a constant: the sun rises, crosses and sets. Keeping the
+ * vector convention means every shading term below took the change without
+ * being rewritten. */
+static V3 sun_dir(int32_t step)
+{
+    float a = cp4_sun_angle(step);
+    float el = -cosf(a);                 /* -1 at midnight, +1 at noon */
+    V3 d = v3(0.42f * sinf(a), 0.35f + 0.75f * el, -0.30f * cosf(a));
+    return norm(d);
+}
 
 static inline void put(Ctx *c, int x, int y, V3 col)
 {
@@ -91,6 +103,7 @@ static float fbm2(uint32_t s, float x, float z)
  * one is the same pale grey, which is exactly what the first build did. */
 static V3 horizon_col(void) { return v3(0.52f, 0.76f, 0.85f); }
 
+
 static V3 sky_col(const Ctx *c, V3 ray)
 {
     float up = clampf(-ray.y, 0.0f, 1.0f);          /* y is down */
@@ -104,8 +117,6 @@ static V3 sky_col(const Ctx *c, V3 ray)
         float t = powf(up, 1.4f);
         return v3(mixf(deep.x, surf.x, t), mixf(deep.y, surf.y, t), mixf(deep.z, surf.z, t));
     }
-    /* Saturated on purpose. A realistic pale sky is only a few percent from
-     * neutral, and a 32-colour quantiser rounds that straight to grey. */
     /* Cyan-leaning rather than a true sky blue. The abyss palette has a cyan
      * ramp and a violet ramp and nothing between them, so a physically
      * plausible blue quantises to purple - the first land sky came out
@@ -116,8 +127,37 @@ static V3 sky_col(const Ctx *c, V3 ray)
     float t = powf(up, 0.55f);
     V3 col = v3(mixf(hor.x, zen.x, t), mixf(hor.y, zen.y, t), mixf(hor.z, zen.z, t));
 
+    /* Night. The palette has no true black to spare, so the night sky is a
+     * deep violet-blue rather than nothing - which is also what a real one
+     * looks like once your eyes have adjusted. */
+    {
+        V3 nzen = v3(0.030f, 0.035f, 0.115f);
+        V3 nhor = v3(0.070f, 0.085f, 0.150f);
+        V3 ncol = v3(mixf(nhor.x, nzen.x, t), mixf(nhor.y, nzen.y, t),
+                     mixf(nhor.z, nzen.z, t));
+        /* the last of the light piles up low in the sky */
+        float dusk = clampf(1.0f - fabsf(c->day - 0.32f) / 0.32f, 0.0f, 1.0f);
+        float lowband = powf(clampf(1.0f - up * 3.2f, 0.0f, 1.0f), 2.0f);
+        ncol = add(ncol, mul(v3(0.62f, 0.28f, 0.20f), dusk * lowband * 0.55f));
+        col = v3(mixf(ncol.x, col.x, c->day), mixf(ncol.y, col.y, c->day),
+                 mixf(ncol.z, col.z, c->day));
+
+        /* Stars, fixed to the sky rather than the screen. Hashing the ray
+         * direction is what keeps them still while the camera turns. */
+        if (c->day < 0.55f && up > 0.02f) {
+            float sx = ray.x / (up + 0.35f), sz = ray.z / (up + 0.35f);
+            float h = rhash(c->seed ^ 0x5741u, (int)floorf(sx * 190.0f),
+                            (int)floorf(sz * 190.0f));
+            if (h > 0.9955f) {
+                float tw = 0.6f + 0.4f * sinf(c->time * 2.3f + h * 400.0f);
+                float k = (1.0f - c->day / 0.55f) * tw;
+                col = add(col, v3(0.75f * k, 0.80f * k, 0.95f * k));
+            }
+        }
+    }
+
     /* sun disc and its glow */
-    V3 tosun = mul(norm(SUN), -1.0f);
+    V3 tosun = mul(c->sun, -1.0f);
     float d = clampf(dot(ray, tosun), 0.0f, 1.0f);
     col = add(col, mul(v3(1.00f, 0.92f, 0.72f), powf(d, 620.0f) * 5.0f));
     col = add(col, mul(v3(0.90f, 0.76f, 0.52f), powf(d, 6.0f) * 0.30f));
@@ -152,7 +192,11 @@ static V3 medium_fog(const Ctx *c, float *dist_out, float *cap)
     if (c->buried)    { *dist_out = 26.0f;   *cap = 1.00f; return v3(0.045f, 0.030f, 0.020f); }
     if (c->submerged) { *dist_out = 300.0f;  *cap = 0.95f; return v3(0.055f, 0.185f, 0.235f); }
     *dist_out = 3000.0f; *cap = 0.80f;
-    return horizon_col();
+    {
+        V3 d = horizon_col(), n = v3(0.075f, 0.090f, 0.160f);
+        return v3(mixf(n.x, d.x, c->day), mixf(n.y, d.y, c->day),
+                  mixf(n.z, d.z, c->day));
+    }
 }
 
 static V3 hazed(const Ctx *c, V3 col, float dist)
@@ -237,7 +281,7 @@ static int terrain_exit(const Ctx *c, V3 ro, V3 rd, float tmax, float *tout)
  * shadows is worth far more to readability than the shadows being exact. */
 static float terrain_shadow(const Ctx *c, V3 q)
 {
-    V3 l = mul(norm(SUN), -1.0f);
+    V3 l = mul(c->sun, -1.0f);
     float t = 6.0f, dt = 7.0f;
     for (int i = 0; i < 16; i++) {
         V3 s = add(q, mul(l, t));
@@ -349,7 +393,7 @@ static void draw_world(Ctx *c, const Cp4World *w)
 {
     Blot blot[28];
     int nblot = gather_blots(w, blot, 28);
-    V3 sun = norm(SUN);
+    V3 sun = c->sun;
     V3 tosun = mul(sun, -1.0f);
 
     for (int y = 0; y < c->H; y++) {
@@ -460,9 +504,13 @@ static void draw_world(Ctx *c, const Cp4World *w)
                 /* sky light lands on what faces up; a warm bounce comes back
                  * off everything else */
                 float skyamt = clampf(slope, 0.0f, 1.0f);
-                V3 lightv = add(add(mul(v3(1.00f, 0.94f, 0.80f), 1.00f * lam * sh),
-                                    mul(v3(0.30f, 0.40f, 0.60f), 0.26f * skyamt)),
-                                mul(v3(0.26f, 0.22f, 0.15f), 0.13f));
+                float night = 1.0f - c->day;
+                V3 lightv = add(add(mul(v3(1.00f, 0.94f, 0.80f),
+                                        1.00f * lam * sh * (0.10f + 0.90f * c->day)),
+                                    mul(v3(0.30f, 0.40f, 0.60f),
+                                        (0.26f * c->day + 0.10f * night) * skyamt)),
+                                mul(v3(0.26f, 0.22f, 0.15f),
+                                    0.13f * c->day + 0.05f * night));
                 col = v3(alb.x * lightv.x, alb.y * lightv.y, alb.z * lightv.z);
                 dist = tg;
             } else {
@@ -797,7 +845,7 @@ static V3 apply_pattern(const Skin *sk, V3 q, V3 albedo, float bodyw)
 static void shade_hit(Ctx *c, int x, int y, V3 nrm, V3 albedo, float em, float vz,
                       float ao, float shadow)
 {
-    V3 sun = norm(SUN);
+    V3 sun = c->sun;
     float lam = clampf(-dot(nrm, sun), 0.0f, 1.0f);
     float ndotv = clampf(-dot(nrm, c->fwd), 0.0f, 1.0f);
     float rim = powf(1.0f - ndotv, 2.6f);
@@ -812,10 +860,14 @@ static void shade_hit(Ctx *c, int x, int y, V3 nrm, V3 albedo, float em, float v
      * daylight. A real overcast contribution never drops to zero, hence the
      * floor - and once it is there the whole scene stops needing the key light
      * to be legible. */
-    float key   = 1.15f * lam * shadow;
-    float sky   = 0.46f * (0.35f + 0.65f * up_amt);
-    float grnd  = 0.28f * (1.0f - up_amt);
-    float fill  = 0.26f * ndotv;
+    /* Everything the sun does fades with it, and what is left at night is the
+     * sky dome plus a little moonlight - never zero, or the frame goes black
+     * and a 32-colour palette has nothing to say about it. */
+    float night = 1.0f - c->day;
+    float key   = 1.15f * lam * shadow * (0.12f + 0.88f * c->day);
+    float sky   = (0.46f * c->day + 0.13f * night) * (0.35f + 0.65f * up_amt);
+    float grnd  = (0.28f * c->day + 0.06f * night) * (1.0f - up_amt);
+    float fill  = (0.26f * c->day + 0.10f * night) * ndotv;
 
     /* Underground and deep underwater the sun is not a factor, so the body is
      * lit from the camera with a distance falloff instead. Without it an
@@ -840,7 +892,7 @@ static void shade_hit(Ctx *c, int x, int y, V3 nrm, V3 albedo, float em, float v
     }
 
     V3 sunc = v3(1.00f, 0.95f, 0.82f);
-    V3 skyc = v3(0.66f, 0.80f, 1.00f);
+    V3 skyc = c->day > 0.4f ? v3(0.66f, 0.80f, 1.00f) : v3(0.46f, 0.56f, 0.96f);
     V3 bncc = v3(0.78f, 0.70f, 0.46f);
     V3 col = add(add(mul(v3(albedo.x * sunc.x, albedo.y * sunc.y, albedo.z * sunc.z), key),
                      mul(v3(albedo.x * skyc.x, albedo.y * skyc.y, albedo.z * skyc.z),
@@ -906,7 +958,7 @@ static void march_creature(Ctx *c, const Prim *pr, int n, V3 centre, float bound
             albedo = apply_pattern(sk, q, albedo, bw);
             V3 nrm = sdf_normal(pr, n, q);
             float ao = sdf_ao(pr, n, q, nrm);
-            float sh = sdf_shadow(pr, n, q, mul(norm(SUN), -1.0f));
+            float sh = sdf_shadow(pr, n, q, mul(c->sun, -1.0f));
             shade_hit(c, x, y, nrm, albedo, em, hz, ao, sh);
         }
     }
@@ -935,7 +987,7 @@ static void sphere(Ctx *c, V3 wp, float rad, V3 albedo, float emissive)
     if (x1 >= c->W) x1 = c->W - 1;
     if (y1 >= c->H) y1 = c->H - 1;
 
-    V3 sun = norm(SUN);
+    V3 sun = c->sun;
     float inv = 1.0f / pr;
 
     for (int y = y0; y <= y1; y++) {
@@ -1273,6 +1325,8 @@ void cp4_render_styled(const Cp4World *w, uint8_t *rgba, int OW, int OH, int sty
     c.hazek = 1.0f;
     c.seed = w->seed;
     c.time = (float)w->step * CP4_DT;
+    c.sun = sun_dir(w->step);
+    c.day = w->daylight;
 
     /* Chase camera: behind and above, looking slightly down. The player grows
      * across four generations, so the camera backs off with it.
@@ -1382,6 +1436,8 @@ void cp4_render_portrait(const Cp4Genome *g, uint8_t *fb, int lw, int lh,
     c.seed = seed;
     c.time = 0.0f;
     c.submerged = c.buried = 0;
+    c.sun = norm(v3(0.38f, 0.72f, -0.26f));   /* a portrait is always noon */
+    c.day = 1.0f;
     /* Three-quarter view, but only barely raised. Straight side-on hides
      * everything mounted fore and aft; look down more than about ten degrees
      * and the body hides the legs, which on a land animal is most of what

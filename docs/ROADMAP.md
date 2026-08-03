@@ -41,6 +41,9 @@ Items are struck through as they land.
   unchanged.
 - ~~**Nests the player builds.**~~ Bank food, heal, and hatch followers that
   carry a mutated copy of your own genome.
+- ~~**Day and night.**~~ A cycle every 2000 steps that takes sight and leaves
+  hearing, so an ear finally beats an eye at midnight. Night sky, stars, and a
+  sun that actually rises and sets.
 - ~~**Biomes.**~~ Temperature and moisture as two more pure functions of
   position, eight biomes off the pair, and fertility varying fivefold across
   them so a biome is a mechanic rather than a paint job. The same field colours
@@ -78,12 +81,12 @@ plumbing exercise.
 
 ## Larger
 
-**12. Weather, and biomes for stage 2.** Stage 3 has eight biomes off a
-temperature/moisture pair, and fertility varies fivefold across them, so
-crossing a desert costs and a jungle pays. What is still missing is time:
-nothing changes over an episode — no seasons, no storms, no day and night.
-Stage 2 is also still a fixed box and should inherit both the resident-window
-treatment and a substrate/current equivalent of biomes.
+**12. Weather, and stage 2's turn.** Stage 3 now varies in space (eight
+biomes) and in time (a day/night cycle that takes sight and leaves hearing).
+What is still missing is weather — rain that cuts visibility, wind that pushes
+a flier, seasons that move the biome boundaries over an episode. Stage 2 is
+also still a fixed box and should inherit both the resident-window treatment
+and a substrate/current equivalent of biomes.
 
 **13. Articulated physics and learned locomotion.** Bodies do not swim. Thrust
 is applied along a heading and the undulation is a decorative sine disconnected

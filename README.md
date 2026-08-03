@@ -174,6 +174,22 @@ seed 42                  seed 7                   seed 21
 Seeds have character: 42 is cold and forested, 7 is hot with savanna and
 jungle, 21 is one big temperate wood.
 
+**Day and night** make the world vary in time as well as space — a full cycle
+every 2000 steps, so an episode covers four and a half of them. It is a
+mechanic rather than a filter: darkness takes sight away and leaves hearing
+alone, so the crossover is real and measured.
+
+| | daylight | midnight |
+|---|---|---|
+| two eyes | sees 640 | 269 |
+| two ears | 260 | **510** |
+
+An ear stops being the part you buy with spare budget. The flyer noticed
+first — once night cut sight on the ground, it went from 12% of its life
+airborne to 22%, because altitude is the one thing that still helps.
+
+![night](docs/land_night.png)
+
 Six archetypes, each run from its own starting build by the scripted baseline
 over twelve seeds — the point of the table is that the specialists actually
 live in their medium and eat from it:

@@ -138,6 +138,15 @@ void  cp4_genome_colour(const Cp4Genome *g, float *rgb, float *rgb2);
 #define CP4_STYLE_COUNT     6
 const char *cp4_style_name(int style);
 
+/* ---- time of day ----
+ * A full cycle every CP4_DAY steps, so an episode covers four and a half of
+ * them. Night is not decoration: sight falls away and hearing does not, which
+ * is what finally makes an ear worth its DNA against an eye. */
+#define CP4_DAY 2000
+
+float cp4_daylight(int32_t step);      /* 0 at midnight, 1 at noon */
+float cp4_sun_angle(int32_t step);     /* where the sun is, in radians */
+
 /* ---- climate ----
  * Two more pure functions of position, on top of the height field. An
  * unbounded world is only worth walking across if what is over there differs
@@ -219,11 +228,11 @@ typedef struct {
 #define CP4_OBS_BEAST_K 6
 #define CP4_OBS_FLORA   7     /* dx, dz, dy, and one flag per food type */
 /* 18 body/world, then 14 for medium and home: four one-hot media, three
- * capability gates, breath, height over ground, and four for the nest. Then 2
- * for the climate here, neighbours, own parts, own stats. Miscounting this
+ * capability gates, breath, height over ground, and four for the nest. Then 3
+ * for the climate and the hour, neighbours, own parts, own stats. Miscounting
  * overflows the caller's observation buffer, which is what the exact-count
  * test exists to catch. */
-#define CP4_OBS_DIM   (18 + 14 + 2 + CP4_OBS_FLORA_K * CP4_OBS_FLORA \
+#define CP4_OBS_DIM   (18 + 14 + 3 + CP4_OBS_FLORA_K * CP4_OBS_FLORA \
                           + CP4_OBS_BEAST_K * 8 + (CP4_PART_COUNT - 1) + 7)
 /* turn, pitch, move, ascend/jump, attack, sing, dig, nest */
 #define CP4_ACT_CTRL   8
@@ -254,6 +263,8 @@ typedef struct {
     Cp4Vec    anchor;
     float     travelled, far_from_start;
     int32_t   discovered;
+    float     daylight;              /* cached from step, for renderer and obs */
+    int32_t   night_steps;
 
     int32_t   births, deaths, pop;
     float     mean_parts, mean_legs, mean_charm, mean_gen;

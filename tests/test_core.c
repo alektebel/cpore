@@ -646,6 +646,63 @@ int main(void)
         free(w);
     }
 
+    /* --- DAY AND NIGHT ---
+     * The cycle is only a mechanic if it changes what a body is worth. Sight
+     * falls away after dark and hearing does not, so an eared build should
+     * out-perceive an eyed one of the same cost at midnight and lose to it at
+     * noon. If that crossover does not happen, the cycle is a filter over the
+     * picture and nothing more. */
+    {
+        float lo = 1.0f, hi = 0.0f;
+        int rises = 1;
+        float prev = -1.0f;
+        /* the curve itself: smooth, and it really does reach both ends */
+        for (int t = 0; t <= CP4_DAY; t += 25) {
+            float d = cp4_daylight(t);
+            if (d < lo) lo = d;
+            if (d > hi) hi = d;
+            if (prev >= 0.0f && fabsf(d - prev) > 0.25f) rises = 0;
+            prev = d;
+        }
+        CHECK(lo < 0.02f && hi > 0.98f, "land: the day reaches both midnight and noon");
+        CHECK(rises, "land: the light changes smoothly, not in steps");
+
+        /* and the crossover */
+        Cp4Genome eyed, eared;
+        cp4_genome_clear(&eyed);
+        eyed.part[0].type = CP4_MOUTH_G;
+        eyed.part[1].type = CP4_LEG;  eyed.part[1].mirror = 1;
+        eyed.part[2].type = CP4_EYE;  eyed.part[2].mirror = 1;
+        eyed.part[3].type = CP4_EYE;  eyed.part[3].mirror = 1;
+        eared = eyed;
+        eared.part[2].type = CP4_EAR;
+        eared.part[3].type = CP4_EAR;
+        cp4_genome_normalise(&eyed, CP4_GEN_BUDGET[2]);
+        cp4_genome_normalise(&eared, CP4_GEN_BUDGET[2]);
+
+        float noon_eye, noon_ear, mid_eye, mid_ear;
+        /* Compare the stat directly. Running two episodes and counting what
+         * each build noticed would depend on whether a bush happened to be in
+         * range; the perception numbers are the claim being made. */
+        {
+            Cp4Stats se, sr;
+            cp4_genome_stats(&eyed, &se);
+            cp4_genome_stats(&eared, &sr);
+            float night = 0.42f;   /* the floor perceive_at applies at midnight */
+            mid_eye = se.sight * night;
+            if (mid_eye < se.hearing) mid_eye = se.hearing;
+            mid_ear = sr.sight * night;
+            if (mid_ear < sr.hearing) mid_ear = sr.hearing;
+            noon_eye = se.sight;
+            noon_ear = sr.sight;
+            printf("        eyes see %.0f by day and %.0f at night; "
+                   "ears %.0f and %.0f\n", (double)noon_eye, (double)mid_eye,
+                   (double)noon_ear, (double)mid_ear);
+            CHECK(noon_eye > noon_ear, "land: eyes beat ears in daylight");
+            CHECK(mid_ear > mid_eye, "land: ears beat eyes after dark");
+        }
+    }
+
     /* --- BIOMES ---
      * An unbounded world is only worth crossing if what is over there differs
      * from what is here. The claim is that the climate field produces regions

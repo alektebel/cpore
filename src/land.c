@@ -100,6 +100,28 @@ void cp4_normal(uint32_t seed, float x, float z, float *nx, float *ny, float *nz
     *nx = ax / l; *ny = ay / l; *nz = az / l;
 }
 
+/* ---------------- time of day ----------------
+ *
+ * The world varies in space; this is what makes it vary in time. Night is a
+ * real mechanic rather than a filter: it takes sight away and leaves hearing
+ * alone, so an ear stops being the part you buy when you have spare budget.
+ * Dawn and dusk are deliberately long - a hard cut between day and night reads
+ * as a bug, and the interesting minutes are the ones where the light is
+ * going. */
+float cp4_daylight(int32_t step)
+{
+    float t = (float)(step % CP4_DAY) / (float)CP4_DAY;   /* 0..1 through the day */
+    /* a raised cosine, biased so night is a little shorter than day */
+    float c = 0.5f - 0.5f * cosf(t * 2.0f * PI);
+    c = clampf((c - 0.18f) / 0.70f, 0.0f, 1.0f);
+    return c * c * (3.0f - 2.0f * c);
+}
+
+float cp4_sun_angle(int32_t step)
+{
+    return (float)(step % CP4_DAY) / (float)CP4_DAY * 2.0f * PI;
+}
+
 /* ---------------- climate ----------------
  *
  * Temperature and moisture, both pure functions of position like the height
@@ -374,6 +396,7 @@ void cp4_world_reset(Cp4World *w, uint32_t seed, const Cp4Genome *genome)
 
     w->anchor = p->p;
     w->home.alive = 0;
+    w->daylight = cp4_daylight(0);
 
     for (int i = 0; i < CP4_MAX_FLORA; i++) w->flora[i].type = CP4_FLORA_NONE;
     {
@@ -699,10 +722,21 @@ static float perceive_at(const Cp4World *w, const Cp4Beast *b)
      * every source of DNA except the roots in front of its face. */
     if (b->medium == CP4_UNDER)
         return b->s.hearing > 60.0f ? b->s.hearing : 60.0f;
-    if (b->medium != CP4_IN_AIR) return b->s.sight;
-    float g = cp4_height(w->seed, b->p.x, b->p.z);
-    float alt = clampf((g - b->p.y) / 180.0f, 0.0f, 1.6f);
-    return b->s.sight * (1.0f + alt);
+
+    float see = b->s.sight;
+    if (b->medium == CP4_IN_AIR) {
+        float g = cp4_height(w->seed, b->p.x, b->p.z);
+        float alt = clampf((g - b->p.y) / 180.0f, 0.0f, 1.6f);
+        see *= 1.0f + alt;
+    }
+    /* Darkness takes sight and leaves hearing. That asymmetry is the whole
+     * reason the day/night cycle is a mechanic: at midnight an eared animal
+     * still knows where everything is and an eyed one is nearly blind. */
+    /* 0.28 was too dark: rival populations could not find enough to eat
+     * between dusk and dawn and one seed in five starved out. Night has to
+     * cost sight without being a nightly famine. */
+    see *= 0.42f + 0.58f * w->daylight;
+    return see > b->s.hearing ? see : b->s.hearing;
 }
 
 /* ---------------- npcs ---------------- */
@@ -870,6 +904,9 @@ void cp4_world_step(Cp4World *w, const float act[CP4_ACT_DIM])
     Cp4Beast *p = &w->player;
     float reward = -0.0015f;
     float dna_before = w->dna;
+
+    w->daylight = cp4_daylight(w->step);
+    if (w->daylight < 0.35f) w->night_steps++;
 
     w->attack_cd -= dt;
     w->sing_cd -= dt;
@@ -1298,11 +1335,13 @@ void cp4_world_observe(const Cp4World *w, float *o)
     o[k++] = w->sing_cd <= 0.0f ? 1.0f : 0.0f;
     o[k++] = clampf(-ground / 200.0f, -1.0f, 2.0f);          /* elevation */
     o[k++] = clampf((CP4_SEA - ground) / 60.0f, -2.0f, 2.0f); /* height over water */
-    {   /* the climate here, so "somewhere else" is a thing the agent can see */
+    {   /* the climate here, so "somewhere else" is a thing the agent can see,
+         * and the hour, because how far it can see depends on it */
         float tt, mm;
         cp4_climate(w->seed, p->p.x, p->p.z, &tt, &mm);
         o[k++] = tt;
         o[k++] = mm;
+        o[k++] = w->daylight;
     }
     {   /* slope ahead: the terrain's own gradient, in the body frame */
         float nx, ny, nz;
