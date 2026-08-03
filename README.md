@@ -123,6 +123,77 @@ Surface and seabed are analytic ray-plane intersections. Creatures smaller than
 than splatting spheres and at that size nobody can tell. A 320x180 frame costs
 roughly 40 ms. Output goes through the same palette pipeline as stage 1.
 
+## Stage 3: creature, on land
+
+![creature stage](docs/land.png)
+
+Out of the water and onto a heightfield. `cp4_height()` is a pure function of
+seed and position, so the world stores no terrain at all — the simulation asks
+for the ground under an animal's feet, the renderer asks for it wherever a ray
+happens to land, and a snapshot is still a `memcpy` of one POD struct. The same
+seed always grows the same hills.
+
+The subject of the stage is other species. Seven rival nests each hold a
+lineage that breeds, mutates and is selected by whether its occupants can feed
+themselves, and every encounter is the fork Spore built its creature stage
+around — **impress it or eat it**. Both fill the DNA meter, and they are bought
+out of the same budget, so charm and violence genuinely compete for parts:
+
+| build | how it fills the meter | 6 seeds |
+|---|---|---|
+| grazer | plants for food, songs for DNA | reaches half the meter 6/6 |
+| predator | kills, 4–11 per run, no songs at all | 6/6 |
+| charmer | songs, 3–4 whole species won over | 6/6 |
+
+Legs are a two-bone chain that reaches the actual ground plane and swings on
+the gait phase, because on land the contact between animal and terrain is the
+first thing the eye checks.
+
+![land gallery](docs/land_gallery.png)
+
+```
+./build/cpore_land --list-parts
+./build/cpore_land --style charmer --seed 21 --steps 2000 --out land.png
+./build/cpore_land --gallery 3 --seed 11 --out gallery.png
+```
+
+## Stage 4: civilisation
+
+![civilisation stage](docs/civ.png)
+
+The scale changes but the planet does not — stage 4 lays its cities on the same
+`cp4_height()` field stage 3 walked over, from the same seed. This is the one
+stage that is a map rather than a camera: the readable state is who owns what,
+and a perspective view hides exactly that.
+
+Three ways to take a city, and they are three mechanics rather than one wearing
+three hats. Over six seeds each, forced to a single approach:
+
+| approach | spends | takes | mean population held |
+|---|---|---|---|
+| force | the target's walls | 74 cities | 53 — conquest costs the city half its people |
+| trade | money, and pays itself back | 112 | 100 — cities arrive intact and keep growing |
+| faith | time, and a garrison interrupts it | 43 | 40 |
+
+What a species evolved in stage 3 arrives as three multipliers, so the body
+decides the doctrine:
+
+```python
+land = LandEnv(seed=7)          # ... play the creature stage ...
+civ  = CivEnv(seed=7, legacy=land.legacy())
+```
+
+```
+predator  legacy M1.46 E1.00 R0.80  ->  4 cities taken, all by force
+charmer   legacy M0.80 E1.00 R1.59  ->  4 cities taken, all by conversion
+```
+
+```
+./build/cpore_civ --seed 9 --out civ.png
+./build/cpore_civ --legacy 0.85,0.85,1.55 --every 600 --out frames.png
+./build/cpore_civ --table          # every doctrine against twelve seeds
+```
+
 ## Natural selection
 
 The other animals are not props. Every fish carries a genome, burns energy to
@@ -252,12 +323,20 @@ src/env.c               RL wrapper: reset/step/observe/save/load
 src/aqua_genome.c       3D body plans: parts, costs, mutation
 src/aqua.c              the aquatic simulation, including the breeding population
 src/aqua_env.c          stage-2 RL wrapper
+src/land_genome.c       land body plans: parts, budgets, styles
+src/land.c              the creature simulation: terrain, nests, impress-or-eat
+src/land_env.c          stage-3 RL wrapper
+src/civ.c               the civilisation simulation: cities, units, doctrines
+src/civ_env.c           stage-4 RL wrapper, and the bridge from stage 3
 src/render.c            pixel-art rasteriser, five styles, palette-quantised
+src/sdfbody.h           the shared SDF body: round cones under a smooth minimum
 src/render3d.c          sphere-impostor z-buffer renderer for stage 2
+src/render_land.c       ray-marched heightfield, sky and creatures for stage 3
+src/render_civ.c        orthographic map, territory and borders for stage 4
 src/png.c               PNG + DEFLATE encoder
 python/cpore/           ctypes binding, works without numpy
-apps/                   cpore_shot, cpore_bench
-tests/test_core.c       determinism, snapshot, budgets, placement mechanics
+apps/                   cpore_shot, cpore_aqua, cpore_land, cpore_civ, cpore_bench
+tests/test_core.c       determinism, snapshot, budgets, and every stage's balance
 ```
 
 The sim never includes the renderer, so a training build can drop

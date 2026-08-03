@@ -23,6 +23,16 @@ Items are struck through as they land.
   objects do not outline themselves into mush.
 - ~~**Marine snow.**~~ Drifting, depth-faded, and streaked along its own motion.
 
+- ~~**Stage 3: the creature stage on land.**~~ A ray-marched heightfield that
+  is a pure function of seed and position, seven rival lineages that breed and
+  are selected, and the impress-or-eat fork bought out of one DNA budget. All
+  three starting builds are viable and each wins by its own mechanic.
+- ~~**Stage 4: the civilisation stage.**~~ The same planet from above. Force,
+  trade and faith as three genuinely different mechanics — they cost different
+  things and leave the captured city in measurably different states — and the
+  body a species evolved in stage 3 arrives as the multipliers that decide its
+  doctrine.
+
 ## Next
 
 **8. Slim the HUD.** Two large filled panels eat the corners. Thin
@@ -40,7 +50,18 @@ generations. This is where most of the *felt* intelligence lives.
 
 **11. Evolving population in the cell stage.** Stage 1's NPCs are still
 scripted with fixed stats. Give them genomes, energy, breeding and mutation so
-both stages share one selection machinery.
+every stage shares one selection machinery.
+
+**11b. Stage 5: space.** The last stage Spore had, and the only one still
+missing. It wants a different shape again — a galaxy of star systems rather
+than one planet — so it is worth doing only once the four that exist are
+properly balanced rather than merely working.
+
+**11c. A real campaign wrapper.** All four stages chain today, but only by hand
+in Python: play one, read what it hands forward, seed the next. A single
+`Campaign` environment that runs the whole arc as one episode would make the
+cross-stage credit assignment an actual research question rather than a
+plumbing exercise.
 
 ## Larger
 

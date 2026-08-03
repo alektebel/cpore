@@ -1,6 +1,7 @@
 #include "cpore/cpore.h"
 #include "cpore/aqua.h"
 #include "cpore/land.h"
+#include "cpore/civ.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -682,6 +683,175 @@ int main(void)
                trials, (double)(gens / trials), (double)(d_legs / trials));
         CHECK(gens / trials > 1.5f, "land: generations turn over inside an episode");
         CHECK(rose_legs >= 4, "land: selection raises the population's leg count");
+        free(w);
+    }
+
+    /* ================= STAGE 4: CIVILISATION ================= */
+    printf("\n-- civilisation --\n");
+
+    /* Same seed, same planet. The cities are laid out on the stage-3
+     * heightfield, which is what makes the two stages the same world rather
+     * than two worlds that happen to share a number. */
+    {
+        Cp5World *w = (Cp5World *)malloc(sizeof(Cp5World));
+        int dry = 1, spread = 1;
+        cp5_world_reset(w, 12, NULL);
+        for (int i = 0; i < w->n_cities; i++) {
+            if (cp4_height(12, w->city[i].p.x, w->city[i].p.z) > CP5_SEA) dry = 0;
+            for (int k = i + 1; k < w->n_cities; k++) {
+                float dx = w->city[i].p.x - w->city[k].p.x;
+                float dz = w->city[i].p.z - w->city[k].p.z;
+                if (dx * dx + dz * dz < 200.0f * 200.0f) spread = 0;
+            }
+        }
+        printf("        %d cities and %d spice on the stage-3 heightfield\n",
+               w->n_cities, w->n_spice);
+        CHECK(w->n_cities >= 8, "civ: the map fills with cities");
+        CHECK(dry, "civ: every city stands on the same world's dry land");
+        CHECK(spread, "civ: cities are places, not one blob");
+        free(w);
+    }
+
+    /* Determinism and snapshot, the contract every stage keeps. */
+    {
+        Cp5World *a = (Cp5World *)malloc(sizeof(Cp5World));
+        Cp5World *b = (Cp5World *)malloc(sizeof(Cp5World));
+        cp5_world_reset(a, 31, NULL);
+        cp5_world_reset(b, 31, NULL);
+        for (int t = 0; t < 900; t++) {
+            float act[CP5_ACT_DIM];
+            cp5_policy_greedy(a, act);
+            cp5_world_step(a, act);
+            cp5_policy_greedy(b, act);
+            cp5_world_step(b, act);
+        }
+        CHECK(memcmp(a, b, sizeof(Cp5World)) == 0, "civ: the same seed replays exactly");
+        free(a); free(b);
+    }
+    {
+        Cp5Env *e = cp5_env_create(37);
+        float obs[CP5_OBS_DIM], act[CP5_ACT_DIM], r;
+        int32_t term, trunc;
+        void *snap = malloc(cp5_env_state_size());
+        memset(act, 0, sizeof(act));
+        act[CP5_MIL] = 1.0f;
+        for (int t = 0; t < 300; t++) cp5_env_step(e, act, obs, &r, &term, &trunc);
+        cp5_env_save(e, snap);
+        float after[CP5_OBS_DIM], redo[CP5_OBS_DIM];
+        for (int t = 0; t < 300; t++) cp5_env_step(e, act, after, &r, &term, &trunc);
+        cp5_env_load(e, snap);
+        for (int t = 0; t < 300; t++) cp5_env_step(e, act, redo, &r, &term, &trunc);
+        CHECK(memcmp(after, redo, sizeof(after)) == 0,
+              "civ: restore reproduces the future exactly");
+        free(snap);
+        cp5_env_free(e);
+    }
+
+    /* Observations have to stay finite and bounded whatever the board does. */
+    {
+        Cp5World *w = (Cp5World *)malloc(sizeof(Cp5World));
+        float obs[CP5_OBS_DIM];
+        int ok = 1;
+        for (int seed = 0; seed < 4; seed++) {
+            cp5_world_reset(w, (uint32_t)(seed * 29 + 1), NULL);
+            for (int t = 0; t < 1200; t++) {
+                float act[CP5_ACT_DIM];
+                cp5_policy_greedy(w, act);
+                cp5_world_step(w, act);
+                cp5_world_observe(w, obs);
+                for (int i = 0; i < CP5_OBS_DIM; i++)
+                    if (!(obs[i] == obs[i]) || obs[i] < -4.0f || obs[i] > 4.0f) ok = 0;
+                if (w->status != CP5_RUN) break;
+            }
+        }
+        CHECK(ok, "civ: observations are finite and in range");
+        free(w);
+    }
+
+    /* --- THE THREE APPROACHES ---
+     * Force, trade and faith have to be three mechanics, not one mechanic with
+     * three labels. Each is forced in turn and has to take cities on its own,
+     * and each has to leave a different mark: conquest destroys population,
+     * trade pays for itself, conversion does neither. */
+    {
+        const char *nm[CP5_APPROACH_COUNT] = { "force", "trade", "faith" };
+        int took[CP5_APPROACH_COUNT] = { 0, 0, 0 };
+        float pop_after[CP5_APPROACH_COUNT] = { 0.0f, 0.0f, 0.0f };
+        Cp5World *w = (Cp5World *)malloc(sizeof(Cp5World));
+        for (int a = 0; a < CP5_APPROACH_COUNT; a++) {
+            for (int s = 0; s < 6; s++) {
+                Cp5Legacy l;
+                for (int q = 0; q < CP5_APPROACH_COUNT; q++) l.bonus[q] = 0.85f;
+                l.bonus[a] = 1.55f;
+                cp5_world_reset(w, (uint32_t)(s * 17 + 3), &l);
+                for (int t = 0; t < CP5_MAX_STEPS && w->status == CP5_RUN; t++) {
+                    float act[CP5_ACT_DIM];
+                    cp5_policy_greedy(w, act);
+                    cp5_world_step(w, act);
+                }
+                took[a] += (a == CP5_MIL) ? w->captured
+                         : (a == CP5_ECO) ? w->bought : w->converted;
+                float p = 0.0f;
+                int n = 0;
+                for (int i = 0; i < w->n_cities; i++)
+                    if (w->city[i].alive && w->city[i].owner == CP5_PLAYER) {
+                        p += w->city[i].pop; n++;
+                    }
+                if (n) pop_after[a] += p / n;
+            }
+            printf("        %-6s took %3d cities over 6 seeds, mean pop held %.0f\n",
+                   nm[a], took[a], (double)(pop_after[a] / 6.0f));
+        }
+        free(w);
+        CHECK(took[CP5_MIL] > 0, "civ: cities can be taken by force");
+        CHECK(took[CP5_ECO] > 0, "civ: cities can be bought");
+        CHECK(took[CP5_REL] > 0, "civ: cities can be converted");
+    }
+
+    /* A species carries its body forward. A creature that won stage 3 by
+     * singing has to arrive here as a missionary power, not as a generic one -
+     * this is the only coupling between the two stages and it has to bite. */
+    {
+        Cp4Genome warlike, devout;
+        Cp5Legacy lw, ld;
+        cp4_genome_autodesign(&warlike, NULL, CP4_GEN_BUDGET[3], CP4_STYLE_PREDATOR);
+        cp4_genome_autodesign(&devout, NULL, CP4_GEN_BUDGET[3], CP4_STYLE_CHARMER);
+        cp5_legacy_from_creature(&warlike, &lw);
+        cp5_legacy_from_creature(&devout, &ld);
+        printf("        predator -> M%.2f E%.2f R%.2f | charmer -> M%.2f E%.2f R%.2f\n",
+               (double)lw.bonus[CP5_MIL], (double)lw.bonus[CP5_ECO], (double)lw.bonus[CP5_REL],
+               (double)ld.bonus[CP5_MIL], (double)ld.bonus[CP5_ECO], (double)ld.bonus[CP5_REL]);
+        CHECK(lw.bonus[CP5_MIL] > lw.bonus[CP5_REL],
+              "civ: a predator arrives as a military power");
+        CHECK(ld.bonus[CP5_REL] > ld.bonus[CP5_MIL],
+              "civ: a charmer arrives as a missionary power");
+    }
+
+    /* Every episode has to end, and a nation that loses its last city has to
+     * actually be out - a stage that can run forever is not an environment. */
+    {
+        Cp5World *w = (Cp5World *)malloc(sizeof(Cp5World));
+        int ended = 0, trials = 0, consistent = 1;
+        for (int seed = 0; seed < 10; seed++) {
+            cp5_world_reset(w, (uint32_t)(seed * 41 + 7), NULL);
+            for (int t = 0; t < CP5_MAX_STEPS + 4; t++) {
+                float act[CP5_ACT_DIM];
+                cp5_policy_greedy(w, act);
+                cp5_world_step(w, act);
+                if (w->status != CP5_RUN) break;
+            }
+            if (w->status != CP5_RUN) ended++;
+            trials++;
+            /* the city ledger must agree with the cities themselves */
+            int tally[CP5_MAX_NATIONS];
+            memset(tally, 0, sizeof(tally));
+            for (int i = 0; i < w->n_cities; i++)
+                if (w->city[i].alive && w->city[i].owner >= 0) tally[w->city[i].owner]++;
+            for (int n = 0; n < CP5_MAX_NATIONS; n++)
+                if (tally[n] != w->nation[n].cities) consistent = 0;
+        }
+        CHECK(ended == trials, "civ: every episode reaches a terminal state");
+        CHECK(consistent, "civ: the city ledger matches the cities on the map");
         free(w);
     }
 

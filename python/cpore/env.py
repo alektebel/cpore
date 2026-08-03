@@ -548,6 +548,7 @@ def _bind_land(lib):
     lib.cp4_env_census.argtypes = [c_void_p, POINTER(c_int32), POINTER(c_float)]
     lib.cp4_height.argtypes = [c_uint32, c_float, c_float]
     lib.cp4_height.restype = c_float
+    lib.cp5_legacy_from_world.argtypes = [c_void_p, POINTER(c_float)]
     return lib
 
 
@@ -636,6 +637,21 @@ class LandEnv:
         return float(self._lib.cp4_height(c_uint32(self._seed & 0xFFFFFFFF),
                                           c_float(x), c_float(y)))
 
+    def legacy(self):
+        """What this creature hands forward to the civilisation stage.
+
+        Three multipliers - military, economic, religious - derived from the
+        body that finished the run. Feed the result straight to CivEnv:
+
+            land = LandEnv(seed=7)   # ... play the creature stage ...
+            civ  = CivEnv(seed=7, legacy=land.legacy())
+
+        Same seed means the same planet, so the cities go up on the hills the
+        creature walked over."""
+        buf = (c_float * 3)()
+        self._lib.cp5_legacy_from_world(self._lib.cp4_env_world(self._h), buf)
+        return {"military": buf[0], "economic": buf[1], "religious": buf[2]}
+
     def census(self):
         """Live population and diplomacy, read through a C accessor rather than
         by picking the struct apart from python."""
@@ -663,6 +679,154 @@ class LandEnv:
         if isinstance(v, str):
             v = VIS[v]
         self._lib.cp4_render_styled(self._lib.cp4_env_world(self._h), self._fb, w, h, v)
+        return w, h
+
+    def render(self, vis=None):
+        w, h = self._draw(vis)
+        if _np is not None:
+            return _np.frombuffer(self._fb, dtype=_np.uint8).reshape(h, w, 4).copy()
+        return self._fb.raw
+
+    def save_png(self, path: str, vis=None):
+        w, h = self._draw(vis)
+        if self._lib.cp_png_write(path.encode(), self._fb, w, h) != 0:
+            raise IOError(f"failed to write {path}")
+        return path
+
+
+# ---------------------------------------------------------------------------
+# Stage 4: civilisation
+# ---------------------------------------------------------------------------
+
+APPROACH_NAMES = ("military", "economic", "religious")
+APPROACH = {n: i for i, n in enumerate(APPROACH_NAMES)}
+CIV_MAX_CITIES = 12
+
+
+def _bind_civ(lib):
+    lib.cp5_env_create.argtypes = [c_uint32]
+    lib.cp5_env_create.restype = c_void_p
+    lib.cp5_env_free.argtypes = [c_void_p]
+    lib.cp5_env_reset.argtypes = [c_void_p, c_uint32, POINTER(c_float), POINTER(c_float)]
+    lib.cp5_env_step.argtypes = [c_void_p, POINTER(c_float), POINTER(c_float),
+                                 POINTER(c_float), POINTER(c_int32), POINTER(c_int32)]
+    lib.cp5_env_obs_dim.restype = c_int32
+    lib.cp5_env_act_dim.restype = c_int32
+    lib.cp5_env_state_size.restype = c_size_t
+    lib.cp5_env_save.argtypes = [c_void_p, c_void_p]
+    lib.cp5_env_load.argtypes = [c_void_p, c_void_p]
+    lib.cp5_env_world.argtypes = [c_void_p]
+    lib.cp5_env_world.restype = c_void_p
+    lib.cp5_policy_greedy.argtypes = [c_void_p, POINTER(c_float)]
+    lib.cp5_render_styled.argtypes = [c_void_p, c_void_p, c_int32, c_int32, c_int32]
+    lib.cp5_env_census.argtypes = [c_void_p, POINTER(c_int32), POINTER(c_float)]
+    lib.cp5_approach_name.argtypes = [c_int32]
+    lib.cp5_approach_name.restype = c_char_p
+    return lib
+
+
+class CivEnv:
+    """Stage 4. One nation on the same planet stage 3 was played on.
+
+    `legacy` is the three multipliers a finished creature hands forward -
+    military, economic, religious - or None for a civilisation that inherited
+    nothing. LandEnv does not produce it automatically on purpose: chaining the
+    stages is the caller's decision, not a hidden coupling in the library."""
+
+    metadata = {"render_modes": ["rgb_array"]}
+
+    def __init__(self, seed: int = 0, legacy=None, render_size=(1280, 720),
+                 vis=DEFAULT_VIS):
+        self._lib = _bind_civ(lib())
+        self.obs_dim = int(self._lib.cp5_env_obs_dim())
+        self.act_dim = int(self._lib.cp5_env_act_dim())
+        self._h = self._lib.cp5_env_create(c_uint32(seed & 0xFFFFFFFF))
+        if not self._h:
+            raise MemoryError("cp5_env_create failed")
+        self._obs = (c_float * self.obs_dim)()
+        self._act = (c_float * self.act_dim)()
+        self._rew = c_float()
+        self._term = c_int32()
+        self._trunc = c_int32()
+        self._state_size = int(self._lib.cp5_env_state_size())
+        self._cnt = (c_int32 * 8)()
+        self._val = (c_float * 5)()
+        self.default_legacy = legacy
+        self.render_size = render_size
+        self.vis = vis
+        self._fb = None
+        self._seed = seed
+
+    def close(self):
+        if getattr(self, "_h", None):
+            self._lib.cp5_env_free(self._h)
+            self._h = None
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    def reset(self, seed=None, legacy=None):
+        if seed is None:
+            seed = self._seed
+        self._seed = seed
+        legacy = legacy if legacy is not None else self.default_legacy
+        if legacy is None:
+            lp = None
+        else:
+            if isinstance(legacy, dict):
+                legacy = [legacy.get(n, 1.0) for n in APPROACH_NAMES]
+            lp = (c_float * 3)(*[float(v) for v in legacy])
+        self._lib.cp5_env_reset(self._h, c_uint32(seed & 0xFFFFFFFF), lp, self._obs)
+        return self._out()
+
+    def step(self, action):
+        for i in range(self.act_dim):
+            self._act[i] = float(action[i])
+        self._lib.cp5_env_step(self._h, self._act, self._obs,
+                               ctypes.byref(self._rew),
+                               ctypes.byref(self._term), ctypes.byref(self._trunc))
+        return (self._out(), float(self._rew.value),
+                bool(self._term.value), bool(self._trunc.value), {})
+
+    def _out(self):
+        if _np is not None:
+            return _np.frombuffer(self._obs, dtype=_np.float32).copy()
+        return list(self._obs)
+
+    def greedy_action(self):
+        self._lib.cp5_policy_greedy(self._lib.cp5_env_world(self._h), self._act)
+        return list(self._act)
+
+    def census(self):
+        self._lib.cp5_env_census(self._h, self._cnt, self._val)
+        return {"cities": self._cnt[0], "captured": self._cnt[1],
+                "converted": self._cnt[2], "bought": self._cnt[3],
+                "lost": self._cnt[4],
+                "units": {"military": self._cnt[5], "economic": self._cnt[6],
+                          "religious": self._cnt[7]},
+                "money": self._val[0], "income": self._val[1],
+                "bonus": {"military": self._val[2], "economic": self._val[3],
+                          "religious": self._val[4]}}
+
+    def save_state(self) -> bytes:
+        buf = ctypes.create_string_buffer(self._state_size)
+        self._lib.cp5_env_save(self._h, buf)
+        return buf.raw
+
+    def load_state(self, blob: bytes):
+        self._lib.cp5_env_load(self._h, ctypes.create_string_buffer(blob, len(blob)))
+
+    def _draw(self, vis=None):
+        w, h = self.render_size
+        if self._fb is None:
+            self._fb = ctypes.create_string_buffer(w * h * 4)
+        v = vis if vis is not None else self.vis
+        if isinstance(v, str):
+            v = VIS[v]
+        self._lib.cp5_render_styled(self._lib.cp5_env_world(self._h), self._fb, w, h, v)
         return w, h
 
     def render(self, vis=None):
