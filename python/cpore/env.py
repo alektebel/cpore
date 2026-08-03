@@ -496,3 +496,183 @@ class AquaEnv:
         return path
 
 
+# ---------------------------------------------------------------------------
+# Stage 3: creature (land)
+# ---------------------------------------------------------------------------
+
+LAND_PART_NAMES = ("none", "graze", "jaw", "beak", "leg", "foot", "claw",
+                   "horn", "plate", "eye", "ear", "voice", "plume", "wing")
+LAND_PART = {n: i for i, n in enumerate(LAND_PART_NAMES)}
+LAND_PART_COST = (0, 6, 14, 18, 9, 7, 12, 13, 13, 7, 8, 12, 11, 16)
+LAND_GEN_BUDGET = (64, 105, 150, 205)
+LAND_MAX_PARTS = 12
+
+
+def land_genome(parts, nseg=3, girth=130):
+    """Build a land body plan from (name, segment, yaw, pitch, scale, mirror).
+
+        land_genome([("graze", 0, 0, 0), ("leg", 0, 60, -40, 128, 1)])
+
+    Trailing fields may be omitted: scale defaults to 128 and mirror to 0.
+    Mirrored parts are placed on both flanks and cost twice, which is the
+    trade the whole bilateral-symmetry gene exists to express."""
+    out = []
+    for p in parts:
+        p = tuple(p) + (128, 0)[len(p) - 4:] if len(p) < 6 else tuple(p)
+        t, seg, yaw, pitch, scale, mirror = p
+        if isinstance(t, str):
+            t = LAND_PART[t]
+        out.append((int(t), int(seg), int(yaw) & 0xFF, int(pitch),
+                    int(scale), 1 if mirror else 0))
+    return {"parts": out, "nseg": int(nseg), "girth": int(girth)}
+
+
+def _bind_land(lib):
+    lib.cp4_env_create.argtypes = [c_uint32]
+    lib.cp4_env_create.restype = c_void_p
+    lib.cp4_env_free.argtypes = [c_void_p]
+    lib.cp4_env_reset.argtypes = [c_void_p, c_uint32, POINTER(c_int32), POINTER(c_float)]
+    lib.cp4_env_step.argtypes = [c_void_p, POINTER(c_float), POINTER(c_float),
+                                 POINTER(c_float), POINTER(c_int32), POINTER(c_int32)]
+    lib.cp4_env_obs_dim.restype = c_int32
+    lib.cp4_env_act_dim.restype = c_int32
+    lib.cp4_env_state_size.restype = c_size_t
+    lib.cp4_env_save.argtypes = [c_void_p, c_void_p]
+    lib.cp4_env_load.argtypes = [c_void_p, c_void_p]
+    lib.cp4_env_world.argtypes = [c_void_p]
+    lib.cp4_env_world.restype = c_void_p
+    lib.cp4_policy_greedy.argtypes = [c_void_p, POINTER(c_float)]
+    lib.cp4_render_styled.argtypes = [c_void_p, c_void_p, c_int32, c_int32, c_int32]
+    lib.cp4_part_name.argtypes = [c_int32]
+    lib.cp4_part_name.restype = c_char_p
+    lib.cp4_env_census.argtypes = [c_void_p, POINTER(c_int32), POINTER(c_float)]
+    lib.cp4_height.argtypes = [c_uint32, c_float, c_float]
+    lib.cp4_height.restype = c_float
+    return lib
+
+
+class LandEnv:
+    """Stage 3. Terrain, rival species, and one budget to buy charm or violence."""
+
+    metadata = {"render_modes": ["rgb_array"]}
+
+    def __init__(self, seed: int = 0, genome=None, render_size=(1280, 720),
+                 vis=DEFAULT_VIS):
+        self._lib = _bind_land(lib())
+        self.obs_dim = int(self._lib.cp4_env_obs_dim())
+        self.act_dim = int(self._lib.cp4_env_act_dim())
+        self._h = self._lib.cp4_env_create(c_uint32(seed & 0xFFFFFFFF))
+        if not self._h:
+            raise MemoryError("cp4_env_create failed")
+        self._obs = (c_float * self.obs_dim)()
+        self._act = (c_float * self.act_dim)()
+        self._rew = c_float()
+        self._term = c_int32()
+        self._trunc = c_int32()
+        self._state_size = int(self._lib.cp4_env_state_size())
+        self._cnt = (c_int32 * 7)()
+        self._mean = (c_float * 5)()
+        self.default_genome = genome
+        self.render_size = render_size
+        self.vis = vis
+        self._fb = None
+        self._seed = seed
+
+    def close(self):
+        if getattr(self, "_h", None):
+            self._lib.cp4_env_free(self._h)
+            self._h = None
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    def reset(self, seed=None, genome=None):
+        if seed is None:
+            seed = self._seed
+        self._seed = seed
+        genome = genome if genome is not None else self.default_genome
+        if genome is None:
+            pp = None
+        else:
+            flat = []
+            for p in genome["parts"][:LAND_MAX_PARTS]:
+                t, sg, yw, pt, sc, mr = p
+                if isinstance(t, str):
+                    t = LAND_PART[t]
+                flat += [int(t), int(sg), int(yw) & 0xFF, int(pt), int(sc), int(mr)]
+            flat += [0, 0, 0, 0, 0, 0] * (LAND_MAX_PARTS - len(flat) // 6)
+            flat += [genome.get("nseg", 3), genome.get("girth", 130)]
+            pp = (c_int32 * len(flat))(*flat)
+        self._lib.cp4_env_reset(self._h, c_uint32(seed & 0xFFFFFFFF), pp, self._obs)
+        return self._out()
+
+    def step(self, action):
+        for i in range(self.act_dim):
+            self._act[i] = float(action[i])
+        self._lib.cp4_env_step(self._h, self._act, self._obs,
+                               ctypes.byref(self._rew),
+                               ctypes.byref(self._term), ctypes.byref(self._trunc))
+        return (self._out(), float(self._rew.value),
+                bool(self._term.value), bool(self._trunc.value), {})
+
+    def _out(self):
+        if _np is not None:
+            return _np.frombuffer(self._obs, dtype=_np.float32).copy()
+        return list(self._obs)
+
+    def greedy_action(self):
+        self._lib.cp4_policy_greedy(self._lib.cp4_env_world(self._h), self._act)
+        return list(self._act)
+
+    def height(self, x, y=None):
+        """Ground height at a world position. y grows downward, so a smaller
+        number is higher ground - the same axis the aquatic stage used for
+        depth, kept pointing the same way on purpose."""
+        if y is None:
+            x, y = x
+        return float(self._lib.cp4_height(c_uint32(self._seed & 0xFFFFFFFF),
+                                          c_float(x), c_float(y)))
+
+    def census(self):
+        """Live population and diplomacy, read through a C accessor rather than
+        by picking the struct apart from python."""
+        self._lib.cp4_env_census(self._h, self._cnt, self._mean)
+        return {"births": self._cnt[0], "deaths": self._cnt[1], "pop": self._cnt[2],
+                "allies": self._cnt[3], "enemies": self._cnt[4],
+                "befriended": self._cnt[5], "kills": self._cnt[6],
+                "mean_gen": self._mean[0], "mean_parts": self._mean[1],
+                "mean_legs": self._mean[2], "mean_charm": self._mean[3],
+                "dna": self._mean[4]}
+
+    def save_state(self) -> bytes:
+        buf = ctypes.create_string_buffer(self._state_size)
+        self._lib.cp4_env_save(self._h, buf)
+        return buf.raw
+
+    def load_state(self, blob: bytes):
+        self._lib.cp4_env_load(self._h, ctypes.create_string_buffer(blob, len(blob)))
+
+    def _draw(self, vis=None):
+        w, h = self.render_size
+        if self._fb is None:
+            self._fb = ctypes.create_string_buffer(w * h * 4)
+        v = vis if vis is not None else self.vis
+        if isinstance(v, str):
+            v = VIS[v]
+        self._lib.cp4_render_styled(self._lib.cp4_env_world(self._h), self._fb, w, h, v)
+        return w, h
+
+    def render(self, vis=None):
+        w, h = self._draw(vis)
+        if _np is not None:
+            return _np.frombuffer(self._fb, dtype=_np.uint8).reshape(h, w, 4).copy()
+        return self._fb.raw
+
+    def save_png(self, path: str, vis=None):
+        w, h = self._draw(vis)
+        if self._lib.cp_png_write(path.encode(), self._fb, w, h) != 0:
+            raise IOError(f"failed to write {path}")
+        return path

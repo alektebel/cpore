@@ -1,5 +1,6 @@
 #include "cpore/cpore.h"
 #include "cpore/aqua.h"
+#include "cpore/land.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -478,6 +479,209 @@ int main(void)
         CHECK(gens / trials > 3.0f, "aquatic: several generations turn over per episode");
         CHECK(rose_mouth >= 4, "aquatic: selection raises the population's mouth count");
         CHECK(rose_tail >= 4, "aquatic: selection raises the population's tail count");
+        free(w);
+    }
+
+    /* ================= STAGE 3: CREATURE ================= */
+    printf("\n-- land --\n");
+
+    /* Terrain is a pure function of seed and position. That is the property
+     * that lets the world carry no heightmap, lets the renderer evaluate the
+     * ground wherever a ray happens to land, and keeps snapshots small. */
+    {
+        int stable = 1, varied = 0, differs = 0;
+        float lo = 1e9f, hi = -1e9f;
+        for (int i = 0; i < 400; i++) {
+            float x = (float)(i * 37 % 2100) + 30.0f;
+            float z = (float)(i * 91 % 2100) + 30.0f;
+            float a = cp4_height(7, x, z), b = cp4_height(7, x, z);
+            if (a != b) stable = 0;
+            if (cp4_height(8, x, z) != a) differs++;
+            if (a < lo) lo = a;
+            if (a > hi) hi = a;
+        }
+        if (hi - lo > 80.0f) varied = 1;
+        printf("        terrain y range %.0f .. %.0f over 400 probes, %d/400 differ by seed\n",
+               (double)lo, (double)hi, differs);
+        CHECK(stable, "land: terrain is a pure function of position");
+        CHECK(differs > 380, "land: a different seed grows a different world");
+        CHECK(varied, "land: the world has real relief, not a plain");
+    }
+
+    /* The normal has to point at the sky. It got this backwards once, which
+     * silently inverted every slope penalty in the movement code. */
+    {
+        int skyward = 1;
+        for (int i = 0; i < 200; i++) {
+            float x = (float)(i * 53 % 2100) + 30.0f;
+            float z = (float)(i * 71 % 2100) + 30.0f;
+            float nx, ny, nz;
+            cp4_normal(11, x, z, &nx, &ny, &nz);
+            if (ny > -0.15f) skyward = 0;    /* y is down, so up is negative */
+            float l = nx * nx + ny * ny + nz * nz;
+            if (l < 0.98f || l > 1.02f) skyward = 0;
+        }
+        CHECK(skyward, "land: terrain normals are unit length and point at the sky");
+    }
+
+    /* Same contract as the earlier stages: identical seed, identical episode. */
+    {
+        Cp4World *a = (Cp4World *)malloc(sizeof(Cp4World));
+        Cp4World *b = (Cp4World *)malloc(sizeof(Cp4World));
+        cp4_world_reset(a, 19, NULL);
+        cp4_world_reset(b, 19, NULL);
+        int same = 1;
+        for (int t = 0; t < 1500; t++) {
+            float act[CP4_ACT_DIM];
+            cp4_policy_greedy(a, act);
+            cp4_world_step(a, act);
+            cp4_policy_greedy(b, act);
+            cp4_world_step(b, act);
+        }
+        if (memcmp(a, b, sizeof(Cp4World)) != 0) same = 0;
+        CHECK(same, "land: the same seed replays exactly");
+        free(a); free(b);
+    }
+
+    /* Snapshot and restore, which is what the whole POD-world discipline buys. */
+    {
+        Cp4Env *e = cp4_env_create(23);
+        float obs[CP4_OBS_DIM], act[CP4_ACT_DIM], r;
+        int32_t term, trunc;
+        void *snap = malloc(cp4_env_state_size());
+        memset(act, 0, sizeof(act));
+        act[0] = 0.3f; act[2] = 0.8f;
+        for (int t = 0; t < 400; t++) cp4_env_step(e, act, obs, &r, &term, &trunc);
+        cp4_env_save(e, snap);
+        float after[CP4_OBS_DIM];
+        for (int t = 0; t < 200; t++) cp4_env_step(e, act, after, &r, &term, &trunc);
+        cp4_env_load(e, snap);
+        float redo[CP4_OBS_DIM];
+        for (int t = 0; t < 200; t++) cp4_env_step(e, act, redo, &r, &term, &trunc);
+        CHECK(memcmp(after, redo, sizeof(after)) == 0,
+              "land: restore reproduces the future exactly");
+        free(snap);
+        cp4_env_free(e);
+    }
+
+    /* A body plan must clear its own belly. When stand was computed from the
+     * nominal radius rather than the widest segment, fat builds were buried to
+     * the waist and their legs rendered underground. */
+    {
+        CpRng rng;
+        cp_rng_seed(&rng, 5);
+        int clears = 0, trials = 200;
+        for (int i = 0; i < trials; i++) {
+            Cp4Genome g;
+            Cp4Stats st;
+            cp4_genome_random(&g, &rng, CP4_GEN_BUDGET[3]);
+            cp4_genome_normalise(&g, CP4_GEN_BUDGET[3]);
+            cp4_genome_stats(&g, &st);
+            float widest = 0.0f;
+            int nseg = g.nseg < 2 ? 2 : g.nseg;
+            for (int k = 0; k < nseg; k++) {
+                float t = nseg > 1 ? (float)k / (float)(nseg - 1) : 0.0f;
+                int li = k < CP4_MAX_SEG ? k : CP4_MAX_SEG - 1;
+                float rr = cp4_profile(&g, t) * (1.0f + (float)g.lump[li] / 127.0f * 0.40f);
+                if (rr > widest) widest = rr;
+            }
+            if (st.stand > st.radius * widest) clears++;
+        }
+        printf("        %d/%d random builds stand clear of their own widest segment\n",
+               clears, trials);
+        CHECK(clears == trials, "land: every body plan stands clear of the ground");
+    }
+
+    /* Budgets, a guaranteed mouth and a guaranteed leg pair. A land animal
+     * with nothing to eat with or nothing to walk on cannot play the stage. */
+    {
+        CpRng rng;
+        cp_rng_seed(&rng, 77);
+        int ok_budget = 1, ok_mouth = 1, ok_legs = 1;
+        for (int gen = 0; gen < CP4_GENERATIONS; gen++) {
+            for (int i = 0; i < 300; i++) {
+                Cp4Genome g;
+                Cp4Stats st;
+                cp4_genome_random(&g, &rng, CP4_GEN_BUDGET[gen]);
+                cp4_genome_normalise(&g, CP4_GEN_BUDGET[gen]);
+                cp4_genome_stats(&g, &st);
+                if (cp4_genome_cost(&g) > CP4_GEN_BUDGET[gen]) ok_budget = 0;
+                if (st.n[CP4_MOUTH_G] + st.n[CP4_MOUTH_C] + st.n[CP4_MOUTH_O] < 1) ok_mouth = 0;
+                if (st.n[CP4_LEG] < 1) ok_legs = 0;
+            }
+        }
+        CHECK(ok_budget, "land: normalise never exceeds the generation budget");
+        CHECK(ok_mouth, "land: every normalised genome keeps a mouth");
+        CHECK(ok_legs, "land: every normalised genome keeps a leg");
+    }
+
+    /* --- THE FORK ---
+     * The stage is meant to have two answers, not one. Charm and violence are
+     * bought out of the same budget, so if only one of them can finish an
+     * episode the design space has collapsed to a single strategy. This runs
+     * the scripted baseline from each starting build and checks that each one
+     * makes progress by its own mechanic. */
+    {
+        const char *names[CP4_STYLE_COUNT] = { "grazer", "predator", "charmer" };
+        int reached[CP4_STYLE_COUNT] = { 0, 0, 0 };
+        int songs[CP4_STYLE_COUNT] = { 0, 0, 0 };
+        int kills[CP4_STYLE_COUNT] = { 0, 0, 0 };
+        Cp4World *w = (Cp4World *)malloc(sizeof(Cp4World));
+        for (int st = 0; st < CP4_STYLE_COUNT; st++) {
+            for (int s = 0; s < 6; s++) {
+                Cp4Genome g;
+                cp4_genome_autodesign(&g, NULL, CP4_GEN_BUDGET[0], st);
+                cp4_world_reset(w, (uint32_t)(s * 13 + 3), &g);
+                for (int t = 0; t < CP4_MAX_STEPS && w->status == CP4_RUN; t++) {
+                    float act[CP4_ACT_DIM];
+                    cp4_policy_greedy(w, act);
+                    cp4_world_step(w, act);
+                }
+                if (w->dna >= CP4_DNA_GOAL * 0.5f) reached[st]++;
+                songs[st] += w->songs;
+                kills[st] += w->kills;
+            }
+            printf("        %-8s reached half the meter %d/6, songs %3d, kills %2d\n",
+                   names[st], reached[st], songs[st], kills[st]);
+        }
+        free(w);
+        CHECK(reached[CP4_STYLE_GRAZER] >= 3, "land: the grazing build is viable");
+        CHECK(reached[CP4_STYLE_PREDATOR] >= 2, "land: the predator build is viable");
+        CHECK(reached[CP4_STYLE_CHARMER] >= 3, "land: the charmer build is viable");
+        CHECK(songs[CP4_STYLE_CHARMER] > 0 && kills[CP4_STYLE_CHARMER] == 0,
+              "land: the charmer wins by impressing, not by eating");
+        CHECK(kills[CP4_STYLE_PREDATOR] > 0 && songs[CP4_STYLE_PREDATOR] == 0,
+              "land: the predator wins by eating, not by impressing");
+    }
+
+    /* --- NATURAL SELECTION, ON LAND ---
+     * Same claim as the ocean: founders are random, nothing prefers a working
+     * body, and the ones that can feed themselves simply breed more. */
+    {
+        int rose_legs = 0, trials = 0;
+        float d_legs = 0.0f, gens = 0.0f;
+        Cp4World *w = (Cp4World *)malloc(sizeof(Cp4World));
+        for (int seed = 0; seed < 5; seed++) {
+            cp4_world_reset(w, (uint32_t)(seed * 71 + 5), NULL);
+            float l0 = 0.0f;
+            for (int i = 0; i < CP4_MAX_BEASTS; i++) l0 += w->beast[i].s.n[CP4_LEG];
+            l0 /= CP4_MAX_BEASTS;
+
+            float a[CP4_ACT_DIM];
+            memset(a, 0, sizeof(a));
+            for (int t = 0; t < CP4_MAX_STEPS; t++) {
+                w->player.hp = w->player.hp_max;   /* keep the episode alive */
+                cp4_world_step(w, a);
+            }
+            d_legs += w->mean_legs - l0;
+            gens += w->mean_gen;
+            if (w->mean_legs > l0) rose_legs++;
+            trials++;
+        }
+        printf("        over %d worlds: mean generation %.1f, legs %+.2f\n",
+               trials, (double)(gens / trials), (double)(d_legs / trials));
+        CHECK(gens / trials > 1.5f, "land: generations turn over inside an episode");
+        CHECK(rose_legs >= 4, "land: selection raises the population's leg count");
         free(w);
     }
 
