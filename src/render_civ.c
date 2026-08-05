@@ -189,7 +189,7 @@ static void draw_terrain(Map *m, const Cp5World *w)
                 /* elevation still shows through, and snow caps the peaks */
                 g = c3(g.r * (0.82f + 0.36f * band), g.g * (0.82f + 0.36f * band),
                        g.b * (0.82f + 0.36f * band));
-                float high = clampf((elev - 112.0f) / 40.0f, 0.0f, 1.0f);
+                float high = clampf((elev - CP4_SNOWLINE) / 42.0f, 0.0f, 1.0f);
                 g = c3(mixf(g.r, 0.78f, high), mixf(g.g, 0.81f, high), mixf(g.b, 0.85f, high));
                 float k = 0.45f + 0.85f * lam;
                 col = c3(g.r * k, g.g * k, g.b * k);

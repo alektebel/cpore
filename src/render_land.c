@@ -292,7 +292,7 @@ static int terrain_march(const Ctx *c, V3 ro, V3 rd, float tmax, float *tout)
     for (int i = 0; i < 190 && t < tmax; i++) {
         V3 q = add(ro, mul(rd, t));
         if (q.y < -PEAK && rd.y <= 0.0f) return 0;      /* climbing into sky */
-        float h = q.y - cp4_height(c->seed, q.x, q.z);  /* > 0 means underground */
+        float h = q.y - cp4_surface(c->seed, q.x, q.z); /* > 0 means below the surface */
         if (h > 0.0f) {
             /* One linear guess is not enough: by 2km the step is tens of units
              * wide and the error shows up as horizontal terraces across every
@@ -302,7 +302,7 @@ static int terrain_march(const Ctx *c, V3 ro, V3 rd, float tmax, float *tout)
             for (int k = 0; k < 4; k++) {
                 float mid = 0.5f * (lo + hi);
                 V3 m = add(ro, mul(rd, mid));
-                if (m.y - cp4_height(c->seed, m.x, m.z) > 0.0f) hi = mid;
+                if (m.y - cp4_surface(c->seed, m.x, m.z) > 0.0f) hi = mid;
                 else lo = mid;
             }
             *tout = 0.5f * (lo + hi);
@@ -482,7 +482,7 @@ static V3 ground_albedo(const Ctx *c, V3 q, float slope, float dist)
 
     /* snow caps everything high enough, whatever biome it stands in */
     V3 snow = v3(0.74f, 0.78f, 0.82f);
-    float high = clampf((elev - 112.0f) / 40.0f, 0.0f, 1.0f);
+    float high = clampf((elev - CP4_SNOWLINE) / 42.0f, 0.0f, 1.0f);
     col = v3(mixf(col.x, snow.x, high), mixf(col.y, snow.y, high),
              mixf(col.z, snow.z, high));
 
@@ -712,16 +712,18 @@ static void draw_world(Ctx *c, const Cp4World *w)
             float tg = 0.0f;
             int hit = terrain_march(c, c->eye, ray, FARCLIP, &tg);
 
-            /* the lake: a plane, but only where the ground beneath it is
-             * actually below the waterline */
-            float tw = 1e30f;
+            /* Water is no longer a plane laid over the world. The marcher
+             * stops at whichever surface is uppermost - waterline or ground -
+             * and the two come out of one evaluation, so a lake, a coast and a
+             * river bend are the same case and there is no plane to intersect
+             * separately. The sea used to be a plane and rivers simply could
+             * not exist under that model. */
+            float tw = tg, wdepth = 0.0f;
             int water = 0;
-            if (ray.y > 0.0015f) {
-                float t = (CP4_SEA - c->eye.y) / ray.y;
-                if (t > 0.0f && (!hit || t < tg)) {
-                    V3 h = add(c->eye, mul(ray, t));
-                    if (cp4_height(c->seed, h.x, h.z) > CP4_SEA) { tw = t; water = 1; }
-                }
+            if (hit) {
+                V3 h = add(c->eye, mul(ray, tg));
+                float wl, gr = cp4_height_water(c->seed, h.x, h.z, &wl);
+                if (gr - wl > 0.30f) { water = 1; wdepth = gr - wl; }
             }
 
             V3 col;
@@ -743,7 +745,7 @@ static void draw_world(Ctx *c, const Cp4World *w)
                 V3 sky = sky_col(c, norm(refl));
 
                 /* depth of water at this point tints what shows through */
-                float depth = clampf(cp4_height(c->seed, q.x, q.z) - CP4_SEA, 0.0f, 90.0f);
+                float depth = clampf(wdepth, 0.0f, 90.0f);
                 V3 deep = v3(0.06f + 0.10f * (1.0f - depth / 90.0f),
                              0.20f + 0.22f * (1.0f - depth / 90.0f),
                              0.26f + 0.20f * (1.0f - depth / 90.0f));

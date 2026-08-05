@@ -108,17 +108,40 @@ static float vnoise_d(uint32_t seed, float x, float z, float *ddx, float *ddz)
  *
  * The first octaves are ridged and the last are plain, because real ground is
  * sharp at the scale of a mountain range and rounded at the scale of a hill. */
-static float terrain_fbm(uint32_t seed, float x, float z)
+/* Two coordinate systems, and which octave uses which.
+ *
+ * The first three octaves are sampled in a stretched frame so that ranges run
+ * in lines with foothills off their flanks; the last three are sampled square,
+ * because they are texture and texture has no grain. Stretching all six looked
+ * exactly like what it was - the whole world combed in one direction, brushed
+ * metal rather than mountains. Structure is elongated; detail is not. */
+#define FBM_ANISO 3
+
+static float terrain_fbm(uint32_t seed, float ax, float az, float bx, float bz,
+                         float rough, float *da_x, float *da_z,
+                         float *db_x, float *db_z)
 {
     float sum = 0.0f, amp = 1.0f, freq = 1.0f, norm = 0.0f;
-    float gx = 0.0f, gz = 0.0f;
+    float gx = 0.0f, gz = 0.0f;          /* undamped: the feedback term       */
+    float sax = 0.0f, saz = 0.0f;        /* damped gradient, stretched frame  */
+    float sbx = 0.0f, sbz = 0.0f;        /* damped gradient, square frame     */
+
+    /* Ruggedness. One low-frequency field decides how much detail an octave
+     * keeps and how creased it is, so the world has provinces: worn-down
+     * plains where it is low, badlands and arêtes where it is high. Without it
+     * every square kilometre is hilly in exactly the same way, which is the
+     * single thing that most makes a procedural world read as procedural. */
+    float pers = 0.49f + 0.15f * rough;
+    float crease = 0.55f + 0.75f * rough;
 
     for (int i = 0; i < 6; i++) {
         float dx, dz;
-        float n = vnoise_d(seed ^ ((uint32_t)i * 0x9E3779B1u), x * freq, z * freq, &dx, &dz);
+        int aniso = i < FBM_ANISO;
+        float px = aniso ? ax : bx, pz = aniso ? az : bz;
+        float n = vnoise_d(seed ^ ((uint32_t)i * 0x9E3779B1u), px * freq, pz * freq, &dx, &dz);
 
-        /* ridged early, plain late */
-        float ridge = 1.0f - (float)i / 5.0f;
+        /* ridged early, plain late, and more so in rugged country */
+        float ridge = clampf((1.0f - (float)i / 5.0f) * crease, 0.0f, 1.0f);
         float t = 2.0f * n - 1.0f;
         float r = 1.0f - fabsf(t);
         float dsign = t < 0.0f ? 2.0f : -2.0f;
@@ -126,60 +149,335 @@ static float terrain_fbm(uint32_t seed, float x, float z)
         float vdx = dx + (dsign * dx - dx) * ridge;
         float vdz = dz + (dsign * dz - dz) * ridge;
 
-        float damp = 1.0f / (1.0f + 5.5f * (gx * gx + gz * gz));
+        /* 5.5 flattened a mountain into a smooth cone: once the low octaves
+         * have built a steep face, everything after them is switched off and
+         * what is left is the bare shape with no rock on it. The point of the
+         * term is to stop detail piling up on cliffs, not to erase it. */
+        float damp = 1.0f / (1.0f + 2.4f * (gx * gx + gz * gz));
         sum  += amp * val * damp;
         norm += amp;
         gx += vdx * freq * amp;
         gz += vdz * freq * amp;
+        /* The returned gradient has to carry the damping the value carries;
+         * gx/gz deliberately do not, because that pair is the feedback the
+         * damping is computed from and damping it would close the loop on
+         * itself. Treating damp as locally constant is the usual
+         * approximation and is well inside what a surface normal needs. */
+        if (aniso) { sax += amp * damp * vdx * freq; saz += amp * damp * vdz * freq; }
+        else       { sbx += amp * damp * vdx * freq; sbz += amp * damp * vdz * freq; }
 
-        amp *= 0.52f;
+        amp *= pers;
         freq *= 2.03f;      /* not exactly 2, so octaves never line up */
+    }
+    if (da_x) {
+        *da_x = sax / norm; *da_z = saz / norm;
+        *db_x = sbx / norm; *db_z = sbz / norm;
     }
     return sum / norm - 0.42f;
 }
 
-/* Returns the ground's y coordinate, and y grows *downward* exactly as it did
- * in stage 2 where it meant depth. Keeping the axis pointing the same way in
- * both stages is what lets the stage-2 camera basis, lighting and sphere
- * impostors be reused unchanged; the cost is that "higher ground" reads as a
- * smaller number, which every comparison below has to respect. */
-float cp4_height(uint32_t seed, float x, float z)
+/* ---- rivers ----
+ *
+ * The one thing missing from the landscape that no amount of shading could
+ * put back. Real terrain is beautiful mostly because water has been through
+ * it: valleys connect, channels braid, and everything drains somewhere. A
+ * heightfield made of noise has none of that - it has dips where the noise
+ * happens to dip, and a flat plane laid over them.
+ *
+ * Proper hydrology needs flow accumulation, which needs the whole map at
+ * once, which this world does not have and will not have: the height field
+ * has to stay a pure function of position or the unbounded world stops being
+ * free. So the channels are drawn rather than eroded.
+ *
+ * The trick is the zero set. |2n-1| is near zero along a *curve* through the
+ * field - not a blob, a curve, and one that meanders and forks where the
+ * field saddles. Two of them at different frequencies give a trunk and its
+ * tributaries. Sampled in the same warped coordinates the mountains use, the
+ * curve lands in the same valleys the fBm already carved, which is what makes
+ * it look like the water chose the valley rather than the other way round. */
+static float river_mask(uint32_t seed, float across, float along, float width)
+{
+    float m = 0.0f;
+    /* trunk */
+    {
+        float n = vnoise(seed ^ 0x4A11u, across, along);
+        float d = fabsf(2.0f * n - 1.0f);
+        m = clampf(1.0f - d / width, 0.0f, 1.0f);
+    }
+    /* tributaries: finer, narrower, and only where the trunk is not */
+    {
+        float n = vnoise(seed ^ 0x1D77u, across * 2.7f, along * 2.7f);
+        float d = fabsf(2.0f * n - 1.0f);
+        float t = clampf(1.0f - d / (width * 0.55f), 0.0f, 1.0f) * 0.62f;
+        if (t > m) m = t;
+    }
+    return m * m * (3.0f - 2.0f * m);     /* soften the banks */
+}
+
+/* One evaluation, optionally with the slope.
+ *
+ * The slope is not a luxury. Stage 3 spends essentially all of its simulation
+ * time in this function - 470-odd calls a step, and near enough all of the
+ * step's cost - and 220 of those calls existed only because cp4_normal took
+ * four central differences to work out a gradient the fBm computes internally
+ * on its way past. Returning it costs a handful of multiplies on hashes that
+ * have already been paid for, which is where the budget for everything else
+ * in here came from. */
+static float height_core(uint32_t seed, float x, float z,
+                         float *dhdx, float *dhdz, float *water_y)
 {
     /* Continental scale, and the reason the world has coastlines rather than a
      * puddle. One very low-frequency field decides land from sea; the
      * mountains ride on top of it. Roughly a third of the world ends up
      * flooded, in bodies thousands of units across, which is what makes fins a
      * way to live somewhere rather than a way to cross a pond. */
-    float cont = vnoise(seed ^ 0xC0DEu, x * 0.00042f, z * 0.00042f);
+    /* Two octaves, the second rotated and at an incommensurate frequency.
+     *
+     * One octave of value noise is one lattice, and a lattice is exactly what
+     * it looks like from orbit: the first maps of this world had their seas
+     * arranged on a visible grid, one bay per cell, because the field that
+     * decides land from sea had a grid and nothing on top of it to disagree.
+     * A second octave at 1.73x on a turned axis has no shared period with the
+     * first, so the cells never line up and the coastline stops being able to
+     * tell you where the lattice is. */
+    const float FC = 0.00042f;
+    float cgx, cgz;
+    float cont;
+    {
+        float ax, az, bx, bz;
+        float a = vnoise_d(seed ^ 0xC0DEu, x * FC, z * FC, &ax, &az);
+        const float CS = 0.7648f, SN = 0.6443f;      /* an arbitrary turn */
+        float rx = (x * CS - z * SN) * FC * 1.73f;
+        float rz = (x * SN + z * CS) * FC * 1.73f;
+        float b = vnoise_d(seed ^ 0x7B2Du, rx, rz, &bx, &bz);
+        /* Averaging two fields narrows the spread - two thirds and a third of
+         * two independent noises has about three quarters the deviation of one
+         * - and elevation spread is what decides how much of the world is sea.
+         * Left alone the second octave cost the map a third of its water.
+         * Expanding about the midpoint puts the range back without touching
+         * the shape. */
+        const float EX = 1.35f;
+        cont = 0.5f + (a * 0.66f + b * 0.34f - 0.5f) * EX;
+        float bgx = (bx * CS + bz * SN) * 1.73f;
+        float bgz = (-bx * SN + bz * CS) * 1.73f;
+        cgx = (ax * 0.66f + bgx * 0.34f) * FC * EX;
+        cgz = (az * 0.66f + bgz * 0.34f) * FC * EX;
+    }
     float e = (cont - 0.42f) * 300.0f;    /* elevation, up-positive */
+    float dex = cgx * 300.0f, dez = cgz * 300.0f;
+
+    /* Ruggedness province: which kind of country this is, independent of how
+     * high it stands. Sampled at its own frequency so a rugged province and a
+     * highland are different things that sometimes coincide. */
+    float rough = clampf((vnoise(seed ^ 0x6B17u, x * 0.00031f, z * 0.00031f)
+                          - 0.34f) * 2.4f, 0.0f, 1.0f);
 
     /* Domain warp. Sampling the mountains at a position that has been pushed
      * around by another noise field is the cheapest way to stop a landscape
-     * looking like it was assembled out of one shape at three sizes. */
-    float wx, wz;
+     * looking like it was assembled out of one shape at three sizes.
+     *
+     * The warp is anisotropic on purpose: it is stretched along a direction
+     * field so that ridges run in lines with foothills off their flanks
+     * instead of being isotropic lumps. Direction comes from the gradient of a
+     * slow field, which is free once that field has been sampled and varies
+     * smoothly, so ranges bend rather than snapping between headings. */
+    const float FW = 0.00075f, AW = 420.0f;
+    float wx, wz, jxx, jxz, jzx, jzz;
     {
-        float sx = x * 0.00075f, sz = z * 0.00075f;
-        wx = x + (vnoise(seed ^ 0x51A7u, sx, sz) - 0.5f) * 420.0f;
-        wz = z + (vnoise(seed ^ 0x2C39u, sx, sz) - 0.5f) * 420.0f;
+        float sx = x * FW, sz = z * FW;
+        float ax, az, bx, bz;
+        float na = vnoise_d(seed ^ 0x51A7u, sx, sz, &ax, &az);
+        float nb = vnoise_d(seed ^ 0x2C39u, sx, sz, &bx, &bz);
+        wx = x + (na - 0.5f) * AW;
+        wz = z + (nb - 0.5f) * AW;
+        jxx = 1.0f + ax * FW * AW;  jxz = az * FW * AW;
+        jzx = bx * FW * AW;         jzz = 1.0f + bz * FW * AW;
+    }
+
+    /* The stretch direction.
+     *
+     * The obvious source is the continental gradient, and it is wrong: a
+     * gradient field passes through zero at every peak, pit and saddle of the
+     * field it came from, and a direction taken from a vector that vanishes
+     * spins through a full turn around each of those points. Rendered from
+     * overhead the world came out as a lattice of starbursts - one at every
+     * cell of the continental noise. An angle read straight out of a scalar
+     * field has no such points; it just turns, slowly, everywhere. */
+    float ux, uz;
+    {
+        float a = vnoise(seed ^ 0x8D3Fu, x * 0.00019f, z * 0.00019f) * 6.2832f;
+        ux = cosf(a); uz = sinf(a);
+    }
+    const float FF = 0.0021f;
+    /* How folded this province is. Applied at one strength everywhere the
+     * whole world came out as parallel ridges, which is a real landform and a
+     * boring one to have all of. Tying it to ruggedness means the folded belts
+     * are the rugged country and the gentle country is gentle in shape as well
+     * as in scale. */
+    const float SQ = 0.62f + 0.33f * (1.0f - rough);
+    float fx, fz;
+    {
+        float a =  wx * ux + wz * uz;     /* along the direction field */
+        float b = -wx * uz + wz * ux;     /* across it                 */
+        a *= SQ;
+        fx = (a * ux - b * uz) * FF;
+        fz = (a * uz + b * ux) * FF;
     }
 
     /* Amplitude follows the continent: an ocean floor is flatter than a
      * mountain range, and a coastal plain flatter than an interior. */
     float relief = 0.35f + 0.85f * clampf((cont - 0.30f) * 2.2f, 0.0f, 1.0f);
-    e += terrain_fbm(seed, wx * 0.0021f, wz * 0.0021f) * 235.0f * relief;
+    float mgx = 0.0f, mgz = 0.0f, mhx = 0.0f, mhz = 0.0f;
+    float m = terrain_fbm(seed, fx, fz, wx * FF, wz * FF, rough,
+                          dhdx ? &mgx : NULL, &mgz, &mhx, &mhz);
+    e += m * 235.0f * relief;
+
+    if (dhdx) {
+        /* chain rule out through the stretch, the warp and the relief scale */
+        float s_aa = SQ * ux * ux + uz * uz, s_az = (SQ - 1.0f) * ux * uz;
+        float s_zz = SQ * uz * uz + ux * ux;
+        float gwx = mgx * s_aa + mgz * s_az + mhx;   /* d(fbm)/d(wx) */
+        float gwz = mgx * s_az + mgz * s_zz + mhz;   /* d(fbm)/d(wz) */
+        gwx *= FF; gwz *= FF;
+        float gx = gwx * jxx + gwz * jzx;
+        float gz = gwx * jxz + gwz * jzz;
+        float dr = (cont > 0.30f && cont < 0.30f + 1.0f / 2.2f) ? 0.85f * 2.2f : 0.0f;
+        dex += (gx * relief + m * dr * cgx) * 235.0f;
+        dez += (gz * relief + m * dr * cgz) * 235.0f;
+    }
+
+    /* Coastline detail. The continental field is smooth, so without this every
+     * shore is a long clean curve; real coasts are ragged at every scale, and
+     * the ragged bit is where the headlands, inlets and offshore rocks come
+     * from. Confined to a band around sea level so it costs the interior
+     * nothing. */
+    {
+        float band = clampf(1.0f - fabsf(e + CP4_SEA) / 55.0f, 0.0f, 1.0f);
+        if (band > 0.0f) {
+            float cgx2, cgz2;
+            float n = vnoise_d(seed ^ 0x2F6Bu, x * 0.0047f, z * 0.0047f, &cgx2, &cgz2);
+            e += (n - 0.5f) * 46.0f * band;
+            if (dhdx) {
+                dex += cgx2 * 0.0047f * 46.0f * band;
+                dez += cgz2 * 0.0047f * 46.0f * band;
+            }
+        }
+    }
+
+    /* Rivers, cut last so nothing fills them back in. The channel deepens
+     * downstream, which here means with falling continental elevation - a
+     * headwater is a notch and a lowland river is a proper valley. Nothing is
+     * cut into the sea floor: an underwater trench is not a river, it is a
+     * seam in the seabed.
+     *
+     * The water that fills it is worked out here too, because here is the only
+     * place that knows how deep the cut was. A carved channel with nothing in
+     * it is a ditch, and a ditch is not prettier than no river at all. */
+    float fill = 0.0f;
+    {
+        float above = e - CP4_SEA;
+        if (above > -6.0f) {
+            /* Sampled in the frame the water would actually run in.
+             *
+             * A level set taken in world axes is a contour: it wanders across
+             * the slope, climbs ridges and closes on itself, and from overhead
+             * it read as a canal system laid over the hills rather than as
+             * drainage. Stretching the noise four to one along the local
+             * downhill direction turns those contours to run *with* the
+             * gradient instead of across it, and the same rotation that puts
+             * them there also makes them converge where the ground converges,
+             * which is where tributaries are supposed to meet.
+             *
+             * Narrow, too. The first cut was a tenth of the continental
+             * wavelength wide, which is a canal; what a river looks like from
+             * the ground is a line of water in the bottom of a valley. */
+            float rax, raz;
+            {
+                /* Perturbed, and never normalised.
+                 *
+                 * A gradient vanishes at every peak and every basin, and a
+                 * direction taken from a vanishing vector spins: the first cut
+                 * put a perfect starburst of rivers around every summit in the
+                 * world. Dividing by (length + a typical length) instead
+                 * leaves the frame unit-ish where the slope is real and
+                 * collapses it to nothing where the slope is not, so near a
+                 * summit the channel noise simply goes isotropic and no
+                 * direction is preferred. The perturbation stops the fans that
+                 * remain from being drawn with a ruler. */
+                float px2 = cgx + (vnoise(seed ^ 0x77E5u, x * 0.0009f, z * 0.0009f)
+                                   - 0.5f) * 0.00035f;
+                float pz2 = cgz + (vnoise(seed ^ 0x3C81u, x * 0.0009f, z * 0.0009f)
+                                   - 0.5f) * 0.00035f;
+                float l = sqrtf(px2 * px2 + pz2 * pz2);
+                float k = 1.0f / (l + 0.00040f);
+                rax = px2 * k; raz = pz2 * k;
+            }
+            const float FR = 0.00058f;
+            float along  = ( wx * rax + wz * raz) * FR * 0.26f;
+            float across = (-wx * raz + wz * rax) * FR;
+            float m2 = river_mask(seed, across, along, 0.030f);
+            /* and only in country low enough to have collected any */
+            /* Headwaters have to end. Faded out over too long a range every
+             * hillside in the world carried a dry groove across it, which
+             * reads as a crack in the ground rather than as a stream. */
+            m2 *= clampf(1.0f - (e - CP4_SEA - 20.0f) / 78.0f, 0.0f, 1.0f);
+            /* Below a threshold, nothing at all. The tail of the mask cut a
+             * hairline groove across every hillside it touched, and a hundred
+             * of those read as crazing in the ground rather than as streams. */
+            m2 = m2 < 0.16f ? 0.0f : (m2 - 0.16f) / 0.84f;
+            if (m2 > 0.0f) {
+                float grade = clampf(1.0f - (cont - 0.42f) * 2.6f, 0.25f, 1.0f);
+                float cut = m2 * (14.0f + 44.0f * grade);
+                if (cut > above + 5.0f) cut = above + 5.0f;   /* bed, not chasm */
+                e -= cut;
+                /* Part full, not brim full: a river that fills its own valley
+                 * to the top is a canal. The banks the carve left over are
+                 * most of what makes it read as a river from a distance. */
+                fill = cut * 0.42f;
+                /* the banks are part of the shape, so the slope has to know */
+                if (dhdx) { dex *= 1.0f - 0.5f * m2; dez *= 1.0f - 0.5f * m2; }
+            }
+        }
+    }
+
+    if (dhdx) { *dhdx = -dex; *dhdz = -dez; }   /* y grows downward */
+    if (water_y) {
+        float wy = -(e + fill);
+        /* the sea floods anything that lies below it, river or not */
+        if (wy > CP4_SEA) wy = CP4_SEA;
+        *water_y = wy;
+    }
     return -e;
 }
 
-/* The skyward normal, so ny is negative on flat ground. */
+/* Returns the ground's y coordinate, and y grows *downward* exactly as it did
+ * in stage 2 where it meant depth. */
+float cp4_height(uint32_t seed, float x, float z)
+{
+    return height_core(seed, x, z, NULL, NULL, NULL);
+}
+
+float cp4_height_water(uint32_t seed, float x, float z, float *water_y)
+{
+    return height_core(seed, x, z, NULL, NULL, water_y);
+}
+
+float cp4_surface(uint32_t seed, float x, float z)
+{
+    float wy;
+    float g = height_core(seed, x, z, NULL, NULL, &wy);
+    return wy < g ? wy : g;
+}
+
+/* The skyward normal, so ny is negative on flat ground. Analytic: the four
+ * central differences this used to take were four full evaluations of a
+ * function that already knew its own gradient. */
 void cp4_normal(uint32_t seed, float x, float z, float *nx, float *ny, float *nz)
 {
-    const float e = 3.0f;
-    float hl = cp4_height(seed, x - e, z), hr = cp4_height(seed, x + e, z);
-    float hd = cp4_height(seed, x, z - e), hu = cp4_height(seed, x, z + e);
-    float ax = (hr - hl), ay = -2.0f * e, az = (hu - hd);
-    float l = sqrtf(ax * ax + ay * ay + az * az);
-    if (l < 1e-5f) l = 1.0f;
-    *nx = ax / l; *ny = ay / l; *nz = az / l;
+    float dx, dz;
+    height_core(seed, x, z, &dx, &dz, NULL);
+    float l = sqrtf(dx * dx + 1.0f + dz * dz);
+    *nx = dx / l; *ny = -1.0f / l; *nz = dz / l;
 }
 
 /* ---------------- time of day ----------------
@@ -689,7 +987,7 @@ static void stream_world(Cp4World *w)
  * everything else is the ground it is standing on. Nothing here consults the
  * genome - a body without fins can still be in the water, it simply cannot do
  * anything useful there, which is exactly the point. */
-static int medium_at(const Cp4World *w, const Cp4Beast *b, float ground)
+static int medium_at(const Cp4World *w, const Cp4Beast *b, float ground, float water_y)
 {
     /* Only a body that can dig is ever underground. Without this guard any
      * animal that ends up inside terrain - through a bad spawn, or by falling
@@ -697,7 +995,10 @@ static int medium_at(const Cp4World *w, const Cp4Beast *b, float ground)
      * burrow floor, with no way out. Making the medium depend on the genome
      * rather than on geometry alone removes that whole class of failure. */
     if (b->s.dig > 0.0f && b->p.y > ground + 2.0f) return CP4_UNDER;
-    if (ground > CP4_SEA && b->p.y > CP4_SEA + 1.0f) return CP4_IN_WATER;
+    /* Against the local waterline rather than one global sea level: the world
+     * has rivers now, and a river you can only look at is scenery. A channel
+     * deep enough to swim in is water in every sense the simulation has. */
+    if (ground > water_y + 4.0f && b->p.y > water_y + 1.0f) return CP4_IN_WATER;
     if (b->p.y < ground - b->s.stand - 8.0f) return CP4_IN_AIR;
     return CP4_ON_GROUND;
     (void)w;
@@ -720,11 +1021,12 @@ static void locomote(Cp4World *w, Cp4Beast *b, float turn, float move, float cli
     climb = clampf(climb, -1.0f, 1.0f);
 
     float fx = cosf(b->yaw), fz = sinf(b->yaw);
-    float ground = cp4_height(w->seed, b->p.x, b->p.z);
+    float wl0;
+    float ground = cp4_height_water(w->seed, b->p.x, b->p.z, &wl0);
     float drive = clampf(move, 0.0f, 1.0f);
     if (b->stam <= 0.0f) drive *= 0.35f;
 
-    int med = medium_at(w, b, ground);
+    int med = medium_at(w, b, ground, wl0);
 
     /* Entering and leaving the soil is a decision, not a side effect: hold the
      * burrow control to dive under, release it to come back up. */
@@ -843,7 +1145,8 @@ static void locomote(Cp4World *w, Cp4Beast *b, float turn, float move, float cli
     b->p.z += b->v.z * dt;
     b->p.y += b->v.y * dt;
 
-    ground = cp4_height(w->seed, b->p.x, b->p.z);
+    float water_y;
+    ground = cp4_height_water(w->seed, b->p.x, b->p.z, &water_y);
 
     if (med == CP4_UNDER) {
         /* stay inside the soil: a ceiling just under the surface and a floor
@@ -870,7 +1173,10 @@ static void locomote(Cp4World *w, Cp4Beast *b, float turn, float move, float cli
         if (b->p.y < -CP4_SKY) { b->p.y = -CP4_SKY; if (b->v.y < 0.0f) b->v.y = 0.0f; }
     }
 
-    b->medium = (uint8_t)medium_at(w, b, cp4_height(w->seed, b->p.x, b->p.z));
+    /* the same ground the grounding test above just computed - nothing has
+     * moved horizontally since, and this was the single most expensive
+     * duplicated call in the step */
+    b->medium = (uint8_t)medium_at(w, b, ground, water_y);
 
     /* Breath. Gills set this to effectively infinite, so the meter simply
      * never moves for an animal built for the water. */

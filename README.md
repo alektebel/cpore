@@ -196,24 +196,30 @@ live in their medium and eat from it:
 
 | build | evolved | ground / water / air / under | eats |
 |---|---|---|---|
-| predator | 19/30 | 97% / 1% / 0% / 0% | 272 carrion |
-| charmer | 18/30 | 97% / 1% / 0% / 0% | 670 bushes, 880 songs |
-| swimmer | 15/30 | 12% / 86% / 0% / 0% | 1124 kelp |
-| flyer | 7/30 | 77% / 2% / 20% / 0% | 630 bushes, 122 species found |
-| grazer | 6/30 | 97% / 1% / 0% / 0% | 904 bushes, 797 songs |
-| burrower | 6/30 | 26% / 0% / 0% / 72% | 498 tubers, 30 hatchlings |
+| predator | 18/30 | 96% / 2% / 0% / 0% | 294 carrion |
+| swimmer | 16/30 | 10% / 88% / 0% / 0% | 1147 kelp |
+| charmer | 14/30 | 97% / 1% / 0% / 0% | 832 bushes, 746 songs |
+| grazer | 7/30 | 94% / 4% / 0% / 0% | 797 bushes, 680 songs |
+| burrower | 7/30 | 30% / 0% / 0% / 68% | 384 tubers, 30 hatchlings |
+| flyer | 6/30 | 72% / 1% / 25% / 0% | 603 bushes, 123 species found |
 
 Twelve seeds turned out to be too few to tune against — a change that only
 shuffles the RNG stream re-rolls every outcome, and I spent a while chasing
 swings that were noise. `--seeds 30` is the honest read.
 
-The last terrain rewrite moved these. Domain warping and derivative-damped
-octaves put real relief in the ground, and relief costs a grazer more than it
-costs anyone else: the grazer fell from 11/30 to 6/30 while the predator went
-23 to 19 and the charmer 15 to 18. All six archetypes still reach the goal and
-all four media still carry a population, so the spread is wider rather than
-broken — but it is a real shift, not seed noise, and the food economy has not
-been retuned for it.
+Terrain moved these once and then stopped moving them. Domain warping and
+derivative-damped octaves put real relief in the ground, and relief costs a
+grazer more than it costs anyone else: the grazer fell from 11/30 to 6 while
+the predator went 23 to 19. The rivers-and-provinces rewrite that followed
+left the table where it was (18/16/14/7/7/6 against 19/18/15/7/6/6), which is
+inside the seed noise — so the shift belongs to relief, not to everything that
+came after it. All six archetypes still reach the goal and all four media
+still carry a population; the food economy has not been retuned for the wider
+spread.
+
+How much of a world is sea varies a lot by seed — 6% to 48% across the four
+seeds spot-checked — which is character rather than a fault, but it does mean
+the swimmer's result is partly a question of where it woke up.
 
 You can also **build a nest**. It costs energy, it banks the food you carry
 back to it, it heals you, and once the larder is full it hatches a follower
@@ -252,21 +258,90 @@ rises on its own.
 ./build/cpore_land --style burrower --seed 16 --out under.png
 ./build/cpore_land --table --seeds 30    # every archetype, every medium
 ./build/cpore_land --climate --seed 42   # what this world is made of
+./build/cpore_land --map --seed 21 --span 26000 --out map.png
+./build/cpore_land --map --seed 21 --span 5000    # the same world, close up
 ./build/cpore_land --gallery 3 --seed 11 --out gallery.png
 ```
+
+### Generating the terrain
+
+![map](docs/land_map.png)
+
+The whole world from overhead, from `--map`. This view is the one that made
+every terrain bug obvious, because a first-person shot can only tell you
+whether a hillside looks right — it cannot tell you whether the world has
+geography. Ranges that run, rivers that join and reach the sea, a coast with
+something to say: those are visible in one glance from above and nowhere else.
+`--map --span 5000` zooms in.
+
+![close map](docs/land_map_close.png)
+
+**The budget came first.** Stage 3 spends essentially all of its simulation
+time inside `cp4_height` — 470-odd calls a step, and near enough all of the
+step's cost — so anything that makes the terrain prettier makes the
+environment slower, one for one. Two of those calls a step were free to
+recover: 220 of them existed only because `cp4_normal` took four central
+differences to work out a gradient the fBm already computes on its way past,
+and one per animal per step was the same position evaluated twice in a row.
+Returning the analytic slope costs a handful of multiplies on hashes that have
+already been paid for. Stage 3 came out **39% faster with much more terrain in
+it** — 8.7k → 11.9k steps/s under the scripted baseline.
+
+**Ruggedness provinces.** One low-frequency field decides how much detail each
+octave keeps and how creased it is, so the world has *kinds of country*: worn
+plains where it is low, badlands and arêtes where it is high. Without it every
+square kilometre is hilly in the same way, which is the single thing that most
+makes a procedural world read as procedural.
+
+**Folded ranges.** The first three octaves are sampled in a frame stretched
+along a slowly turning direction field, so ridges run in lines with foothills
+off their flanks. The last three are sampled square, because they are texture
+and texture has no grain — stretching all six looked exactly like what it was,
+the whole world combed in one direction. How strongly a province is folded is
+tied to its ruggedness, so the folded belts are the rugged country.
+
+**Rivers**, which is the one thing no amount of shading could put back. Real
+terrain is beautiful mostly because water has been through it. Proper
+hydrology needs flow accumulation, which needs the whole map at once, which
+this world will never have — so the channels are drawn rather than eroded, and
+the trick is *where* they are drawn. `|2n-1|` is near zero along a curve, and
+sampled in a frame stretched four to one along the local downhill direction
+those curves run *with* the gradient instead of across it, converging where
+the ground converges. Water is worked out in the same pass that cuts the bed,
+because that is the only place that knows how deep the cut was, and the pair
+comes back from `cp4_height_water()`. A river is water in every sense the
+simulation has: `medium_at` compares against the local waterline rather than
+one global sea level, so a channel deep enough to swim in is one you can swim
+in.
+
+**A ragged coast.** The continental field is smooth, so without help every
+shore is a long clean curve. A band of higher-frequency noise around sea level
+— and nowhere else, so the interior pays nothing — gives headlands, inlets and
+offshore rocks.
+
+**Two continental octaves.** One octave of value noise is one lattice, and
+from orbit that is exactly what it looked like: seas arranged on a grid, one
+bay per cell. A second octave at 1.73× on a turned axis shares no period with
+the first, so the coastline stops being able to tell you where the lattice is.
+
+Four failures worth keeping, because each one was invisible from the ground
+and unmissable from above:
+
+| what it looked like | what it was |
+|---|---|
+| a lattice of starbursts, one per continental cell | the stretch direction taken from a gradient, which spins through a full turn around every point where the gradient vanishes |
+| the whole world combed like brushed metal | anisotropy applied to all six octaves instead of the three that carry structure |
+| a canal system laid over the hills, in closed loops | river channels as level sets in world axes — a level set is a contour, and contours close |
+| hairline cracks crazing every hillside | the tail of the river mask cutting a groove wherever it was faintly non-zero |
 
 ### Making the landscape worth looking at
 
 A heightfield, a sun and a fog colour will get you a picture of terrain. It
 will not get you a place. Six things, in the order they mattered:
 
-**The ground itself.** Plain fBm makes hills; it does not make *landscape*.
-`cp4_height()` warps its own domain before sampling, fades from ridged noise in
-the low octaves to plain noise in the high ones, and damps each octave by the
-accumulated gradient of the ones below it — so detail collects on flanks and
-thins out on flats, which is what erosion does without anything being eroded.
-Continental relief scales the whole thing, so an ocean basin is flat and a
-highland is not.
+**The ground itself**, which is the section above — domain warping, ridged
+octaves fading to plain, derivative damping, provinces, folded ranges and
+rivers. Everything below is shading, and shading cannot rescue a shape.
 
 **Aerial perspective, per channel.** Distance used to be a lerp toward one
 horizon colour, which is why every ridge past a kilometre came out the same

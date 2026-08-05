@@ -174,6 +174,27 @@ float cp4_fertility(int biome);
 float cp4_height(uint32_t seed, float x, float z);
 void  cp4_normal(uint32_t seed, float x, float z, float *nx, float *ny, float *nz);
 
+/* Where the snow starts. Shared rather than repeated, because the renderer,
+ * the map and the biome colours all have to agree about it or a peak is white
+ * from one direction and green from another. */
+#define CP4_SNOWLINE 150.0f
+
+/* Ground, and the surface of whatever water is standing on it.
+ *
+ * The world has rivers as well as a sea, so "is this water" stopped being a
+ * comparison against one global sea level. Both come out of the same
+ * evaluation - the channel is cut by the height field itself, so the water
+ * that fills it is known at the same moment the bed is - and the pair is what
+ * every other test is written against: there is water here exactly when the
+ * ground lies below the waterline, and the difference is how deep it is.
+ *
+ * y grows downward, so the waterline is never greater than the ground. */
+float cp4_height_water(uint32_t seed, float x, float z, float *water_y);
+
+/* The surface a ray actually meets: the waterline where there is water and
+ * the ground where there is not. This is what the renderer marches. */
+float cp4_surface(uint32_t seed, float x, float z);
+
 typedef struct { float x, y, z; } Cp4Vec;
 
 /* One food per medium, so a medium is somewhere worth going rather than

@@ -2,6 +2,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
+
+static float clampf(float v, float a, float b) { return v < a ? a : (v > b ? b : v); }
 
 /* Run the creature stage under the scripted baseline and write PNG stills.
  *
@@ -15,7 +18,8 @@ int main(int argc, char **argv)
 {
     uint32_t seed = 5;
     int steps = 3000, W = 1280, H = 720, every = 0, vis = CP_VIS_TERRA, gallery = 0, table = 0,
-        climate = 0, nseeds = 12;
+        climate = 0, nseeds = 12, map = 0;
+    float span = 24000.0f;
     const char *out = "land.png";
     Cp4Genome g;
     cp4_genome_starter(&g);
@@ -30,6 +34,8 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--table"))                 table = 1;
         else if (!strcmp(argv[i], "--seeds") && i + 1 < argc) nseeds = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--climate"))               climate = 1;
+        else if (!strcmp(argv[i], "--map"))                   map = 1;
+        else if (!strcmp(argv[i], "--span") && i + 1 < argc)  span = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--size") && i + 1 < argc)  sscanf(argv[++i], "%dx%d", &W, &H);
         else if (!strcmp(argv[i], "--vis") && i + 1 < argc) {
             const char *nm = argv[++i];
@@ -49,6 +55,7 @@ int main(int argc, char **argv)
             printf("usage: cpore_land [--seed N] [--steps N] [--out F] [--size WxH]\n"
                    "                  [--every N] [--style NAME] [--gallery GEN]\n"
                    "                  [--vis NAME] [--list-parts] [--table] [--seeds N]\n"
+                   "                  [--climate] [--map [--span UNITS]]\n"
                    "  styles: grazer predator charmer swimmer flyer burrower\n");
             return 1;
         }
@@ -80,6 +87,81 @@ int main(int argc, char **argv)
         for (int b = 0; b < CP4_BIOME_COUNT; b++)
             printf("  %-8s %4.1f%%  fertility %.2f\n", cp4_biome_name(b),
                    100.0 * (double)hist[b] / (double)total, (double)cp4_fertility(b));
+        return 0;
+    }
+
+    /* --map: shaded relief from straight overhead.
+     *
+     * A first-person shot tells you whether a hillside looks right; it cannot
+     * tell you whether the world has *geography* - whether ranges run, whether
+     * rivers join and reach the sea, whether the coast has anything to say. A
+     * map does that in one glance, and it is the only view where a mistake in
+     * the height field has nowhere to hide. */
+    if (map) {
+        uint8_t *fb = (uint8_t *)malloc((size_t)W * H * 4);
+        if (!fb) { fprintf(stderr, "oom\n"); return 1; }
+        const float step = span / (float)W;
+        const float cx = CP4_W * 0.5f, cz = CP4_D * 0.5f;
+        /* light from the north-west, the convention that stops relief from
+         * inverting in the reader's head */
+        const float lx = -0.55f, lz = -0.55f, ly = 0.63f;
+        for (int y = 0; y < H; y++) {
+            for (int x = 0; x < W; x++) {
+                float wx = cx + ((float)x - W * 0.5f) * step;
+                float wz = cz + ((float)y - H * 0.5f) * step;
+                float wl, g = cp4_height_water(seed, wx, wz, &wl);
+                /* Relief shading over one pixel, not the analytic slope. At
+                 * twenty units to the pixel the true normal is sampling
+                 * terrain features several times smaller than the pixel, and
+                 * what comes out is aliasing that looks exactly like combed
+                 * hair - which is not a fault in the terrain, only in the way
+                 * it was being looked at. */
+                float hl = cp4_height(seed, wx - step, wz);
+                float hr = cp4_height(seed, wx + step, wz);
+                float hd = cp4_height(seed, wx, wz - step);
+                float hu = cp4_height(seed, wx, wz + step);
+                float ax = hr - hl, ay = -2.0f * step, az = hu - hd;
+                float il = 1.0f / sqrtf(ax * ax + ay * ay + az * az);
+                float nx = ax * il, ny = ay * il, nz = az * il;
+                float lam = clampf(nx * lx + (-ny) * ly + nz * lz, 0.0f, 1.0f);
+                float shade = 0.30f + 0.85f * lam;
+                float r, gr, b;
+                float depth = g - wl;
+                if (depth > 0.30f) {
+                    /* one ramp for all standing water, so a river and a bay
+                     * are visibly the same substance */
+                    float d = clampf(depth / 70.0f, 0.0f, 1.0f);
+                    r = 0.10f + 0.30f * (1.0f - d);
+                    gr = 0.34f + 0.42f * (1.0f - d);
+                    b = 0.50f + 0.35f * (1.0f - d);
+                    shade = 0.85f + 0.15f * lam;
+                } else {
+                    float elev = -g;
+                    int bi = cp4_biome(seed, wx, wz);
+                    switch (bi) {
+                    case CP4_BIOME_DESERT:  r=0.78f; gr=0.66f; b=0.40f; break;
+                    case CP4_BIOME_SAVANNA: r=0.68f; gr=0.62f; b=0.30f; break;
+                    case CP4_BIOME_GRASS:   r=0.42f; gr=0.62f; b=0.26f; break;
+                    case CP4_BIOME_FOREST:  r=0.22f; gr=0.46f; b=0.20f; break;
+                    case CP4_BIOME_JUNGLE:  r=0.14f; gr=0.44f; b=0.18f; break;
+                    case CP4_BIOME_TAIGA:   r=0.22f; gr=0.38f; b=0.28f; break;
+                    case CP4_BIOME_TUNDRA:  r=0.48f; gr=0.50f; b=0.44f; break;
+                    default:                r=0.82f; gr=0.86f; b=0.90f; break;
+                    }
+                    float snow = clampf((elev - CP4_SNOWLINE) / 42.0f, 0.0f, 1.0f);
+                    r += (0.90f - r) * snow; gr += (0.93f - gr) * snow; b += (0.96f - b) * snow;
+                }
+                uint8_t *p = fb + 4 * ((size_t)y * W + x);
+                float v0 = r * shade, v1 = gr * shade, v2 = b * shade;
+                p[0] = (uint8_t)(255.0f * (v0 > 1.0f ? 1.0f : v0));
+                p[1] = (uint8_t)(255.0f * (v1 > 1.0f ? 1.0f : v1));
+                p[2] = (uint8_t)(255.0f * (v2 > 1.0f ? 1.0f : v2));
+                p[3] = 255;
+            }
+        }
+        if (cp_png_write(out, fb, W, H) != 0) { fprintf(stderr, "png failed\n"); return 1; }
+        printf("map seed %u, %.0f units across -> %s\n", seed, (double)span, out);
+        free(fb);
         return 0;
     }
 
