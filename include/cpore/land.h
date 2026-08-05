@@ -33,7 +33,7 @@ extern "C" {
 #define CP4_MAX_BEASTS   64
 #define CP4_MAX_FLORA   560   /* must exceed TARGET_FLORA, plus carcasses */
 #define CP4_MAX_NESTS      7
-#define CP4_MAX_PARTS     12
+#define CP4_MAX_PARTS     16
 #define CP4_MAX_SEG        6
 #define CP4_FCELL      150.0f   /* flora hash cell, a little over a sight step */
 #define CP4_FGRID      2048     /* buckets; must be a power of two */
@@ -60,6 +60,8 @@ enum {
     CP4_FIN,        /* fin/paddle     - thrust in water                  */
     CP4_GILL,       /* gill           - breathe water instead of drowning*/
     CP4_DIGGER,     /* digging claw   - burrow, and reach what is buried */
+    CP4_ARM,        /* grasping arm   - reach, browse height, and provisioning*/
+    CP4_TAIL,       /* tail           - a counterweight, and something to wave*/
     CP4_PART_COUNT
 };
 
@@ -75,6 +77,14 @@ extern const int CP4_GEN_BUDGET[CP4_GENERATIONS];
 const char *cp4_part_name(int type);
 int         cp4_part_cost(int type);
 
+/* Where a part sits and what shape it is.
+ *
+ * type/seg/yaw/pitch/scale/mirror is where to stick it. `len` and `bend` are
+ * what it is: a limb with a reach and a joint. Without them every leg on every
+ * animal in the world was the same leg at a different scale, which is the
+ * difference between a parts bin and a creature editor - in Spore the thing
+ * you spend the most time on is dragging a limb out to the length you want and
+ * setting how it folds. */
 typedef struct {
     uint8_t type;
     uint8_t seg;
@@ -82,6 +92,8 @@ typedef struct {
     int8_t  pitch;
     uint8_t scale;
     uint8_t mirror;
+    uint8_t len;     /* reach of a jointed limb, or elongation of a spike  */
+    int8_t  bend;    /* how far the joint folds, and which way             */
 } Cp4Part;
 
 enum { CP4_PAT_PLAIN = 0, CP4_PAT_BANDS, CP4_PAT_SPOTS, CP4_PAT_COUNTER,
@@ -93,9 +105,17 @@ typedef struct {
     uint8_t nseg, girth;
     uint8_t prof[4];
     int8_t  lump[CP4_MAX_SEG];
+    /* Per-segment height, so the spine can rise and dip along its length
+     * rather than only arching as one curve. A hump, a dropped neck and a
+     * raised tail root are all the same three bytes. */
+    int8_t  rise[CP4_MAX_SEG];
     int8_t  arch, sweep;
-    uint8_t hue, hue2, sat, val;
+    /* Three coats, as in Spore: a base, a marking and a detail over the top,
+     * each with its own pattern. Two colours and one pattern gave a space
+     * where every animal was a body and one stripe. */
+    uint8_t hue, hue2, hue3, sat, val;
     uint8_t pattern, pscale;
+    uint8_t pattern2, pscale2;
 } Cp4Genome;
 
 typedef struct {
@@ -104,7 +124,12 @@ typedef struct {
     float graze_eff, carn_eff;
     float sight, hearing;
     float charm, social_reach;     /* the other half of the stage */
+    /* What arms and tails buy. reach lengthens every contact the animal makes,
+     * armed or social; carry is how fast it can provision a nest, which is the
+     * only thing that turns food into descendants. */
+    float reach, carry;
     float stamina, upkeep;
+    float upkeep_leg;              /* what standing tall costs, kept separate */
     float radius, length, stand;   /* stand: how high the body rides */
     /* ---- the media ----
      * swim/fly/dig are zero for a body that cannot use that medium at all,
@@ -127,7 +152,7 @@ void  cp4_genome_stats(const Cp4Genome *g, Cp4Stats *out);
 void  cp4_genome_from_action(Cp4Genome *g, const float *design, int budget);
 void  cp4_genome_autodesign(Cp4Genome *g, CpRng *r, int budget, int style);
 float cp4_profile(const Cp4Genome *g, float t);
-void  cp4_genome_colour(const Cp4Genome *g, float *rgb, float *rgb2);
+void  cp4_genome_colour(const Cp4Genome *g, float *rgb, float *rgb2, float *rgb3);
 /* Six archetypes, not three. The first three decide how you fill the DNA
  * meter; the last three decide which medium you live in. They are orthogonal
  * on purpose - a burrowing charmer is a legal and quite good animal. */
@@ -274,7 +299,11 @@ typedef struct {
                           + (CP4_PART_COUNT - 1) + 7)
 /* turn, pitch, move, ascend/jump, attack, sing, dig, nest */
 #define CP4_ACT_CTRL   8
-#define CP4_ACT_DIM   (CP4_ACT_CTRL + CP4_MAX_PARTS * 4 + 2)
+/* Six numbers a part: what, where on the spine, which way round, how far
+ * over, how big, how long. The design head is only read at a generation
+ * boundary, so its width costs the policy nothing per step. */
+#define CP4_ACT_PART   6
+#define CP4_ACT_DIM   (CP4_ACT_CTRL + CP4_MAX_PARTS * CP4_ACT_PART + 2)
 
 enum { CP4_RUN = 0, CP4_DEAD = 1, CP4_EVOLVED = 2, CP4_TIMEOUT = 3 };
 
@@ -353,6 +382,12 @@ void cp4_render_styled(const Cp4World *w, uint8_t *rgba, int width, int height,
                        int style);
 void cp4_render_portrait(const Cp4Genome *g, uint8_t *fb, int lw, int lh,
                          int style, uint32_t seed);
+/* The same, from a chosen angle. azimuth turns around the animal, elev raises
+ * the camera; both in radians. A creature editor that can only show you one
+ * angle is not showing you the creature - the whole reason a part carries a
+ * yaw gene is that it looks different from the front than from the side. */
+void cp4_render_pose(const Cp4Genome *g, uint8_t *fb, int lw, int lh,
+                     int style, uint32_t seed, float azimuth, float elev);
 
 #ifdef __cplusplus
 }

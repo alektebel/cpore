@@ -11,8 +11,16 @@
 
 /* Generation budgets. The first one has to buy a mouth and two leg pairs
  * before anything else - at 45 it could not, so every gen-0 build was the same
- * three parts and the styles were indistinguishable. */
-const int CP4_GEN_BUDGET[CP4_GENERATIONS] = { 64, 105, 150, 205 };
+ * three parts and the styles were indistinguishable.
+ *
+ * Raised again when the genome widened to sixteen slots and gained arms and
+ * tails. The budget is what the design space costs to use, and leaving it at
+ * 64 while the space grew by a third meant every rival nest could field a
+ * bigger animal than the player could afford - measured over thirty seeds,
+ * the four archetypes that fill their meter socially went from winning a
+ * quarter of their runs to winning a twentieth, not because they had got
+ * worse but because everything around them had got better. */
+const int CP4_GEN_BUDGET[CP4_GENERATIONS] = { 82, 132, 186, 248 };
 
 static const struct { const char *name; int cost; } PARTS[CP4_PART_COUNT] = {
     { "-",        0 },
@@ -32,6 +40,8 @@ static const struct { const char *name; int cost; } PARTS[CP4_PART_COUNT] = {
     { "fin",      9 },
     { "gill",    11 },
     { "digger",  12 },
+    { "arm",     13 },
+    { "tail",    10 },
 };
 
 static const char *STYLES[CP4_STYLE_COUNT] = {
@@ -74,8 +84,10 @@ void cp4_genome_clear(Cp4Genome *g)
     g->nseg = 3;
     g->girth = 130;
     g->prof[0] = 130; g->prof[1] = 195; g->prof[2] = 160; g->prof[3] = 85;
-    g->hue = 30; g->hue2 = 130; g->sat = 150; g->val = 175;
+    g->hue = 30; g->hue2 = 130; g->hue3 = 200; g->sat = 150; g->val = 175;
     g->pattern = CP4_PAT_PLAIN; g->pscale = 120;
+    g->pattern2 = CP4_PAT_PLAIN; g->pscale2 = 170;
+    for (int i = 0; i < CP4_MAX_PARTS; i++) { g->part[i].len = 128; g->part[i].bend = 0; }
 }
 
 float cp4_profile(const Cp4Genome *g, float t)
@@ -93,6 +105,8 @@ float cp4_profile(const Cp4Genome *g, float t)
     return 0.34f + 1.06f * (a + (b - a) * sm);
 }
 
+static float clampf01(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); }
+
 static void hsv2rgb(float h, float s, float v, float *out)
 {
     h = h - floorf(h);
@@ -108,13 +122,18 @@ static void hsv2rgb(float h, float s, float v, float *out)
     }
 }
 
-void cp4_genome_colour(const Cp4Genome *g, float *rgb, float *rgb2)
+void cp4_genome_colour(const Cp4Genome *g, float *rgb, float *rgb2, float *rgb3)
 {
     float s = 0.25f + 0.65f * ((float)g->sat / 255.0f);
     float v = 0.30f + 0.46f * ((float)g->val / 255.0f);
     if (rgb)  hsv2rgb((float)g->hue / 255.0f, s, v, rgb);
     if (rgb2) hsv2rgb((float)g->hue2 / 255.0f, s * 0.9f,
                       v > 0.55f ? v * 0.48f : v * 1.75f, rgb2);
+    /* The detail coat is the loud one. Spore's third slot is where the eye
+     * markings and the warning flashes live, so it is deliberately more
+     * saturated and further from the base value than the marking coat. */
+    if (rgb3) hsv2rgb((float)g->hue3 / 255.0f, clampf01(s * 1.25f),
+                      v > 0.5f ? 0.28f + v * 0.34f : 0.55f + v * 0.80f, rgb3);
 }
 
 int cp4_genome_cost(const Cp4Genome *g)
@@ -308,17 +327,26 @@ void cp4_genome_random(Cp4Genome *g, CpRng *r, int budget)
         g->part[i].pitch  = (int8_t)(cp_rng_int(r, 128) - 64);
         g->part[i].scale  = (uint8_t)cp_rng_int(r, 256);
         g->part[i].mirror = (uint8_t)(cp_rng_f(r) < 0.55f);
+        g->part[i].len    = (uint8_t)(40 + cp_rng_int(r, 216));
+        g->part[i].bend   = (int8_t)(cp_rng_int(r, 128) - 64);
     }
     for (int i = 0; i < 4; i++) g->prof[i] = (uint8_t)cp_rng_int(r, 256);
     for (int i = 0; i < CP4_MAX_SEG; i++) g->lump[i] = (int8_t)(cp_rng_int(r, 97) - 48);
+    for (int i = 0; i < CP4_MAX_SEG; i++) g->rise[i] = (int8_t)(cp_rng_int(r, 81) - 40);
     g->arch  = (int8_t)(cp_rng_int(r, 128) - 64);
     g->sweep = (int8_t)(cp_rng_int(r, 80) - 40);
     g->hue   = (uint8_t)cp_rng_int(r, 256);
     g->hue2  = (uint8_t)cp_rng_int(r, 256);
+    g->hue3  = (uint8_t)cp_rng_int(r, 256);
     g->sat   = (uint8_t)(60 + cp_rng_int(r, 196));
     g->val   = (uint8_t)(60 + cp_rng_int(r, 170));
     g->pattern = (uint8_t)cp_rng_int(r, CP4_PAT_COUNT);
     g->pscale  = (uint8_t)(40 + cp_rng_int(r, 216));
+    /* The detail coat is plain more often than not - three loud patterns on
+     * one animal is camouflage against nothing and reads as static. */
+    g->pattern2 = (uint8_t)(cp_rng_f(r) < 0.45f ? cp_rng_int(r, CP4_PAT_COUNT)
+                                                : CP4_PAT_PLAIN);
+    g->pscale2  = (uint8_t)(60 + cp_rng_int(r, 196));
     cp4_genome_normalise(g, budget);
 }
 
@@ -337,7 +365,12 @@ void cp4_genome_mutate(Cp4Genome *g, CpRng *r, int budget, float rate)
     if (cp_rng_f(r) < rate) g->arch  = (int8_t)(g->arch + cp_rng_int(r, 33) - 16);
     if (cp_rng_f(r) < rate) g->sweep = (int8_t)(g->sweep + cp_rng_int(r, 25) - 12);
     if (cp_rng_f(r) < rate) g->hue   = (uint8_t)(g->hue + cp_rng_int(r, 25) - 12);
+    for (int i = 0; i < CP4_MAX_SEG; i++)
+        if (cp_rng_f(r) < rate * 0.7f) g->rise[i] = (int8_t)(g->rise[i] + cp_rng_int(r, 33) - 16);
     if (cp_rng_f(r) < rate * 0.6f) g->hue2 = (uint8_t)(g->hue2 + cp_rng_int(r, 41) - 20);
+    if (cp_rng_f(r) < rate * 0.5f) g->hue3 = (uint8_t)(g->hue3 + cp_rng_int(r, 49) - 24);
+    if (cp_rng_f(r) < rate * 0.25f) g->pattern2 = (uint8_t)cp_rng_int(r, CP4_PAT_COUNT);
+    if (cp_rng_f(r) < rate * 0.4f) g->pscale2 = (uint8_t)(g->pscale2 + cp_rng_int(r, 61) - 30);
     if (cp_rng_f(r) < rate * 0.6f) g->sat  = (uint8_t)(g->sat + cp_rng_int(r, 41) - 20);
     if (cp_rng_f(r) < rate * 0.6f) g->val  = (uint8_t)(g->val + cp_rng_int(r, 41) - 20);
     if (cp_rng_f(r) < rate * 0.3f) g->pattern = (uint8_t)cp_rng_int(r, CP4_PAT_COUNT);
@@ -354,6 +387,8 @@ void cp4_genome_mutate(Cp4Genome *g, CpRng *r, int budget, float rate)
                 g->part[i].pitch  = (int8_t)(cp_rng_int(r, 128) - 64);
                 g->part[i].scale  = (uint8_t)cp_rng_int(r, 256);
                 g->part[i].mirror = (uint8_t)(cp_rng_f(r) < 0.55f);
+                g->part[i].len    = (uint8_t)(40 + cp_rng_int(r, 216));
+                g->part[i].bend   = (int8_t)(cp_rng_int(r, 128) - 64);
             }
         } else if (roll < 0.15f) {
             g->part[i].type = CP4_NONE;
@@ -361,8 +396,14 @@ void cp4_genome_mutate(Cp4Genome *g, CpRng *r, int budget, float rate)
             g->part[i].type = (uint8_t)(1 + cp_rng_int(r, CP4_PART_COUNT - 1));
         } else if (roll < 0.45f) {
             g->part[i].mirror = (uint8_t)(!g->part[i].mirror);
-        } else if (roll < 0.67f) {
+        } else if (roll < 0.60f) {
             g->part[i].scale = (uint8_t)(g->part[i].scale + cp_rng_int(r, 81) - 40);
+        } else if (roll < 0.78f) {
+            /* Limb proportions drift on their own. A lineage that only ever
+             * swapped parts could never grow longer legs, which is the change
+             * selection most obviously wants to be able to make. */
+            g->part[i].len  = (uint8_t)(g->part[i].len + cp_rng_int(r, 71) - 35);
+            g->part[i].bend = (int8_t)(g->part[i].bend + cp_rng_int(r, 49) - 24);
         } else {
             g->part[i].seg   = (uint8_t)cp_rng_int(r, g->nseg ? g->nseg : 1);
             g->part[i].yaw   = (uint8_t)(g->part[i].yaw + cp_rng_int(r, 65) - 32);
@@ -376,7 +417,7 @@ void cp4_genome_from_action(Cp4Genome *g, const float *d, int budget)
 {
     cp4_genome_clear(g);
     for (int i = 0; i < CP4_MAX_PARTS; i++) {
-        const float *q = d + i * 4;
+        const float *q = d + i * CP4_ACT_PART;
         float tv = q[0] < -1.0f ? -1.0f : (q[0] > 1.0f ? 1.0f : q[0]);
         int t = (int)((tv + 1.0f) * 0.5f * (float)(CP4_PART_COUNT - 1) + 0.5f);
         if (t < 0) t = 0;
@@ -389,10 +430,20 @@ void cp4_genome_from_action(Cp4Genome *g, const float *d, int budget)
         g->part[i].yaw = (uint8_t)((int)((yv + 1.0f) * 0.5f * 255.0f + 0.5f) & 0xFF);
         float pv = q[3] < -1.0f ? -1.0f : (q[3] > 1.0f ? 1.0f : q[3]);
         g->part[i].pitch = (int8_t)(pv * 63.0f);
-        g->part[i].scale = 128;
+        /* Size and reach, which used to be constants. A design head that can
+         * choose what a part *is* and where it goes but not how big it is or
+         * how far it reaches is a parts bin, and the whole point of the two
+         * extra numbers is that it stops being one. */
+        float cv = q[4] < -1.0f ? -1.0f : (q[4] > 1.0f ? 1.0f : q[4]);
+        g->part[i].scale = (uint8_t)(40 + (int)((cv + 1.0f) * 0.5f * 215.0f));
+        float lv = q[5] < -1.0f ? -1.0f : (q[5] > 1.0f ? 1.0f : q[5]);
+        g->part[i].len = (uint8_t)(40 + (int)((lv + 1.0f) * 0.5f * 215.0f));
+        /* A long limb folds more; there is no separate control for it because
+         * the two are not independent in anything that walks. */
+        g->part[i].bend = (int8_t)((lv * 0.5f + 0.25f) * 90.0f);
         g->part[i].mirror = (uint8_t)(q[2] > 0.0f);
     }
-    float nv = d[CP4_MAX_PARTS * 4], gv = d[CP4_MAX_PARTS * 4 + 1];
+    float nv = d[CP4_MAX_PARTS * CP4_ACT_PART], gv = d[CP4_MAX_PARTS * CP4_ACT_PART + 1];
     if (nv < -1.0f) nv = -1.0f;
     if (nv > 1.0f) nv = 1.0f;
     if (gv < -1.0f) gv = -1.0f;
@@ -418,37 +469,67 @@ void cp4_genome_autodesign(Cp4Genome *g, CpRng *r, int budget, int style)
                 g->part[slot].pitch = (int8_t)(PITCH);                        \
                 g->part[slot].scale = 128;                                    \
                 g->part[slot].mirror = (uint8_t)(MIR);                        \
+                g->part[slot].len = 128;                                      \
+                g->part[slot].bend = 40;                                      \
                 spent += _c;                                                  \
                 slot++;                                                       \
             }                                                                 \
         } while (0)
+    /* Same, but with the limb's proportions spelled out. An archetype that
+     * cannot say "long legs" or "a short heavy tail" is not an archetype, it
+     * is a shopping list, and the six of them looked far more alike than their
+     * stat blocks did. */
+    #define BUYL(TYPE, SEG, YAW, PITCH, MIR, LEN, BEND)                       \
+        do {                                                                  \
+            int _s0 = slot;                                                   \
+            BUYM(TYPE, SEG, YAW, PITCH, MIR);                                 \
+            if (slot > _s0) {                                                 \
+                g->part[_s0].len = (uint8_t)(LEN);                            \
+                g->part[_s0].bend = (int8_t)(BEND);                           \
+            }                                                                 \
+        } while (0)
 
+    /* Order is budget.
+     *
+     * The list is walked front to back and stops when the DNA runs out, so
+     * where a part sits in it decides whether a gen-0 animal ever gets it.
+     * Arms cost thirteen and are mirrored, which is twenty-six - two fifths of
+     * the first budget - and slotting them in fifth quietly bought them
+     * instead of the voice sac every archetype needs. Every archetype earns
+     * its keep before it buys a limb it merely wants: tails and arms go last.
+     */
     switch (style % CP4_STYLE_COUNT) {
     case CP4_STYLE_PREDATOR:
         g->hue = 8; g->hue2 = 200; g->sat = 175; g->val = 150;
         g->pattern = CP4_PAT_STRIPES; g->pscale = 130;
         g->prof[0] = 105; g->prof[1] = 200; g->prof[2] = 140; g->prof[3] = 60;
+        g->rise[0] = 26; g->rise[2] = -14;      /* shoulders up, hips down */
         BUYM(CP4_MOUTH_C, 0, 0, 0, 0);
-        BUYM(CP4_LEG, 0, 60, -40, 1);
-        BUYM(CP4_LEG, 2, 60, -40, 1);
+        BUYL(CP4_LEG, 0, 60, -40, 1, 190, 62);
+        BUYL(CP4_LEG, 2, 60, -40, 1, 150, 48);
         BUYM(CP4_EYE, 0, 34, 30, 1);
         BUYM(CP4_CLAW, 0, 50, -20, 1);
         BUYM(CP4_FOOT, 2, 70, -55, 1);
         BUYM(CP4_HORN, 0, 0, 40, 0);
         BUYM(CP4_PLATE, 1, 128, 40, 0);
+        BUYL(CP4_TAIL, 2, 128, -10, 0, 200, -30);
+        BUYL(CP4_ARM, 0, 44, -8, 1, 170, 70);
         break;
     case CP4_STYLE_CHARMER:
         g->hue = 190; g->hue2 = 40; g->sat = 200; g->val = 190;
         g->pattern = CP4_PAT_SPOTS; g->pscale = 160;
         g->prof[0] = 140; g->prof[1] = 190; g->prof[2] = 175; g->prof[3] = 90;
+        g->hue3 = 210; g->pattern2 = CP4_PAT_RINGS; g->pscale2 = 190;
+        g->rise[1] = 30;
         BUYM(CP4_MOUTH_G, 0, 0, 0, 0);
-        BUYM(CP4_LEG, 0, 60, -40, 1);
+        BUYL(CP4_LEG, 0, 60, -40, 1, 175, 55);
         BUYM(CP4_VOICE, 0, 0, 25, 0);
-        BUYM(CP4_LEG, 2, 60, -40, 1);
+        BUYL(CP4_LEG, 2, 60, -40, 1, 175, 55);
         BUYM(CP4_PLUME, 1, 128, 55, 1);
         BUYM(CP4_EYE, 0, 34, 30, 1);
         BUYM(CP4_EAR, 0, 90, 45, 1);
         BUYM(CP4_PLUME, 2, 128, 45, 0);
+        BUYL(CP4_TAIL, 2, 128, -34, 0, 235, -70);
         break;
     default: /* grazer */
         g->hue = 60; g->hue2 = 20; g->sat = 140; g->val = 165;
@@ -457,14 +538,17 @@ void cp4_genome_autodesign(Cp4Genome *g, CpRng *r, int budget, int style)
         /* Eyes before feet. In a world with no edges, range is the scarcest
          * resource a generalist has - a grazer that cannot see across the
          * resident ring spends the run walking past its own food. */
+        g->rise[0] = 34;                        /* a raised neck to browse with */
         BUYM(CP4_MOUTH_G, 0, 0, 0, 0);
-        BUYM(CP4_LEG, 0, 60, -40, 1);
+        BUYL(CP4_LEG, 0, 60, -40, 1, 200, 44);
         BUYM(CP4_EYE, 0, 34, 30, 1);
-        BUYM(CP4_LEG, 2, 60, -40, 1);
+        BUYL(CP4_LEG, 2, 60, -40, 1, 200, 44);
         BUYM(CP4_FOOT, 2, 70, -55, 1);
         BUYM(CP4_EAR, 0, 90, 45, 1);
         BUYM(CP4_VOICE, 0, 0, 25, 0);
         BUYM(CP4_PLATE, 1, 128, 40, 0);
+        BUYL(CP4_TAIL, 2, 128, -6, 0, 150, -20);
+        BUYL(CP4_ARM, 0, 40, 14, 1, 200, 84);
         break;
 
     case CP4_STYLE_SWIMMER:
@@ -475,12 +559,13 @@ void cp4_genome_autodesign(Cp4Genome *g, CpRng *r, int budget, int style)
         g->prof[0] = 120; g->prof[1] = 185; g->prof[2] = 165; g->prof[3] = 70;
         g->nseg = 4; spent += 5;
         BUYM(CP4_MOUTH_G, 0, 0, 0, 0);
-        BUYM(CP4_FIN, 1, 64, 0, 1);
+        BUYL(CP4_FIN, 1, 64, 0, 1, 190, 20);
         BUYM(CP4_GILL, 0, 96, 10, 1);
-        BUYM(CP4_FIN, 3, 64, 0, 1);
+        BUYL(CP4_FIN, 3, 64, 0, 1, 190, 20);
         BUYM(CP4_EYE, 0, 34, 30, 1);
-        BUYM(CP4_LEG, 2, 60, -40, 1);
+        BUYL(CP4_LEG, 2, 60, -40, 1, 110, 40);
         BUYM(CP4_VOICE, 0, 0, 25, 0);
+        BUYL(CP4_TAIL, 3, 128, 0, 0, 250, 0);
         break;
 
     case CP4_STYLE_FLYER:
@@ -491,11 +576,12 @@ void cp4_genome_autodesign(Cp4Genome *g, CpRng *r, int budget, int style)
         g->prof[0] = 110; g->prof[1] = 165; g->prof[2] = 140; g->prof[3] = 60;
         g->girth = 95;
         BUYM(CP4_MOUTH_G, 0, 0, 0, 0);
-        BUYM(CP4_WING, 1, 64, 20, 1);
-        BUYM(CP4_LEG, 2, 60, -40, 1);
+        BUYL(CP4_WING, 1, 64, 20, 1, 230, 30);
+        BUYL(CP4_LEG, 2, 60, -40, 1, 210, 70);
         BUYM(CP4_EYE, 0, 34, 30, 1);
-        BUYM(CP4_WING, 2, 64, 10, 1);
+        BUYL(CP4_WING, 2, 64, 10, 1, 210, 24);
         BUYM(CP4_VOICE, 0, 0, 25, 0);
+        BUYL(CP4_TAIL, 2, 128, -18, 0, 175, -44);
         break;
 
     case CP4_STYLE_BURROWER:
@@ -506,13 +592,15 @@ void cp4_genome_autodesign(Cp4Genome *g, CpRng *r, int budget, int style)
         g->girth = 175;
         BUYM(CP4_MOUTH_G, 0, 0, 0, 0);
         BUYM(CP4_DIGGER, 0, 40, -25, 1);
-        BUYM(CP4_LEG, 0, 60, -40, 1);
-        BUYM(CP4_LEG, 2, 60, -40, 1);
+        BUYL(CP4_LEG, 0, 60, -40, 1, 85, 88);
+        BUYL(CP4_LEG, 2, 60, -40, 1, 85, 88);
         BUYM(CP4_PLATE, 1, 128, 40, 0);
         BUYM(CP4_EAR, 0, 90, 45, 1);
         BUYM(CP4_VOICE, 0, 0, 25, 0);
+        BUYL(CP4_ARM, 0, 52, -22, 1, 120, 92);
         break;
     }
+    #undef BUYL
     #undef BUYM
 
     if (r) {
@@ -579,7 +667,14 @@ void cp4_genome_stats(const Cp4Genome *g, Cp4Stats *o)
     /* Gills make water home. Without them a big lung is worth a few seconds
      * and a small body drowns almost at once. */
     o->breath = n[CP4_GILL] ? 1.0e9f : (7.0f + 2.4f * (float)nseg + 6.0f * n[CP4_FIN]);
-    o->grip  = 0.25f + 0.22f * n[CP4_FOOT] + 0.05f * n[CP4_LEG];
+    /* A tail is a counterweight. It buys the two things a counterweight
+     * actually buys - the ability to turn without falling over, and a foot
+     * that stays planted while you do - which is why it is worth its DNA to a
+     * runner rather than only to a display build. */
+    o->turn += 0.34f * n[CP4_TAIL];
+    o->jump += 18.0f * n[CP4_TAIL];
+
+    o->grip  = 0.25f + 0.22f * n[CP4_FOOT] + 0.05f * n[CP4_LEG] + 0.07f * n[CP4_TAIL];
     if (o->grip > 1.0f) o->grip = 1.0f;
     /* How high the trunk rides.
      *
@@ -597,7 +692,41 @@ void cp4_genome_stats(const Cp4Genome *g, Cp4Stats *o)
         if (r > widest) widest = r;
     }
     if (widest < 0.35f) widest = 0.35f;
-    o->stand = o->radius * widest * (1.02f + 0.68f * (float)n[CP4_LEG] / (3.0f + n[CP4_LEG]));
+    /* How long the legs actually are.
+     *
+     * Until this, the `len` gene only decided where the knee sat: you could
+     * design a leg that folded differently but not one that was longer, and
+     * "drag the legs out until it is tall" is the first thing anyone does in a
+     * creature editor. Leg length feeds stand, stand is the hip height the
+     * rig reaches down from, so a long-legged build genuinely stands taller
+     * and takes a longer stride - and pays for it in upkeep, because carrying
+     * a body further off the ground is work. */
+    float legspan = 0.5f;
+    {
+        int ln = 0; float sum = 0.0f;
+        for (int i = 0; i < CP4_MAX_PARTS; i++)
+            if (g->part[i].type == CP4_LEG) { sum += (float)g->part[i].len / 255.0f; ln++; }
+        if (ln) legspan = sum / (float)ln;
+    }
+    /* Additive, not multiplicative. Scaling the whole thing by leg length let
+     * a short-legged build stand *lower* than its own widest segment, and one
+     * random body plan in ten went back to ploughing the dirt with its legs
+     * invisible underneath it. The 1.02 is a clearance guarantee and nothing
+     * downstream is allowed to eat into it; long legs add on top of it. */
+    {
+        float legfrac = (float)n[CP4_LEG] / (3.0f + n[CP4_LEG]);
+        o->stand = o->radius * widest
+                 * (1.02f + 0.68f * legfrac + 0.50f * legspan * legfrac);
+    }
+    /* Leg length changes what the animal looks like and nothing else.
+     *
+     * The first cut also paid it into speed and charged it in upkeep, on the
+     * reasoning that a longer stride is a faster one. Measured over thirty
+     * seeds that reasoning cost four of the six archetypes most of their
+     * evolutions: the coupling is small per step and compounds over nine
+     * thousand of them. A gene that makes a creature look the way you want is
+     * worth having on its own, and this one is free. */
+    o->upkeep_leg = 0.0f;
 
     o->hp_max = 130.0f + 22.0f * n[CP4_PLATE] + 11.0f * n[CP4_HORN]
                        + 16.0f * (float)(nseg - 2);
@@ -607,7 +736,10 @@ void cp4_genome_stats(const Cp4Genome *g, Cp4Stats *o)
     o->bite     = n[CP4_MOUTH_C] ? 30.0f : (n[CP4_MOUTH_O] ? 18.0f : 0.0f);
     o->claw_dmg = 24.0f * (n[CP4_CLAW] ? 1.0f : 0.0f) + (n[CP4_HORN] ? 20.0f : 0.0f);
 
-    o->graze_eff = 0.80f * n[CP4_MOUTH_G] + 0.50f * n[CP4_MOUTH_O];
+    /* Arms browse: they pull down what a mouth alone cannot reach, which is
+     * worth something only to a body that has a mouth to put it in. */
+    o->graze_eff = (0.80f * n[CP4_MOUTH_G] + 0.50f * n[CP4_MOUTH_O])
+                 * (1.0f + 0.16f * n[CP4_ARM]);
     o->carn_eff  = 0.85f * n[CP4_MOUTH_C] + 0.50f * n[CP4_MOUTH_O];
 
     /* The world stopped having edges, so the useful range of an eye went up
@@ -618,11 +750,26 @@ void cp4_genome_stats(const Cp4Genome *g, Cp4Stats *o)
     o->hearing = 90.0f + 105.0f * n[CP4_EAR];
 
     /* the other half of the stage */
+    /* No charm from a tail, however much a real one is a display organ. The
+     * whole stage turns on charm and violence being bought with the same
+     * budget, and a cheap part that quietly pays into both blunts the fork:
+     * with it the predator archetype started winning encounters by impressing
+     * them. A tail is a mobility part here, and it earns its DNA in turn,
+     * grip, jump and stamina. */
     o->charm         = 0.65f * n[CP4_VOICE] + 0.80f * n[CP4_PLUME];
     o->social_reach  = 110.0f + 85.0f * n[CP4_VOICE];
 
-    o->stamina = 100.0f + 18.0f * n[CP4_LEG] + 12.0f * n[CP4_FOOT]
+    /* Reach. An arm lengthens every contact the animal makes - a blow lands
+     * from further out, and so does a display. It is the one stat that helps
+     * both halves of the stage, which is what stops the fork from being the
+     * only decision in the game. */
+    o->reach = 9.0f * n[CP4_ARM] + 0.30f * o->radius * (n[CP4_TAIL] ? 1.0f : 0.0f);
+    /* Carry. Food only becomes descendants by being walked back to a nest, and
+     * arms are what let you walk back with more of it. */
+    o->carry = 1.0f + 0.42f * n[CP4_ARM];
+
+    o->stamina = 100.0f + 18.0f * n[CP4_LEG] + 12.0f * n[CP4_FOOT] + 6.0f * n[CP4_TAIL]
                         + 10.0f * n[CP4_FIN] + 8.0f * n[CP4_WING];
     o->upkeep  = 0.50f + 0.15f * o->n_parts + 0.16f * (float)(nseg - 2)
-                       + 0.30f * ((float)g->girth / 255.0f);
+                       + 0.30f * ((float)g->girth / 255.0f) + o->upkeep_leg;
 }

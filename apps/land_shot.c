@@ -18,12 +18,12 @@ int main(int argc, char **argv)
 {
     uint32_t seed = 5;
     int steps = 3000, W = 1280, H = 720, every = 0, vis = CP_VIS_TERRA, gallery = 0, table = 0,
-        climate = 0, nseeds = 12, map = 0;
+        climate = 0, nseeds = 12, map = 0, sheet = 0;
     float span = 24000.0f;
     const char *out = "land.png";
     Cp4Genome g;
     cp4_genome_starter(&g);
-    int have = 0;
+    int have = 0, styleid = -1;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--seed") && i + 1 < argc)       seed = (uint32_t)strtoul(argv[++i], NULL, 10);
@@ -35,6 +35,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--seeds") && i + 1 < argc) nseeds = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--climate"))               climate = 1;
         else if (!strcmp(argv[i], "--map"))                   map = 1;
+        else if (!strcmp(argv[i], "--creature"))              sheet = 1;
         else if (!strcmp(argv[i], "--span") && i + 1 < argc)  span = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--size") && i + 1 < argc)  sscanf(argv[++i], "%dx%d", &W, &H);
         else if (!strcmp(argv[i], "--vis") && i + 1 < argc) {
@@ -50,15 +51,88 @@ int main(int argc, char **argv)
             int st = 0;
             for (int k = 0; k < CP4_STYLE_COUNT; k++) if (!strcmp(nm, cp4_style_name(k))) st = k;
             cp4_genome_autodesign(&g, NULL, CP4_GEN_BUDGET[0], st);
+            styleid = st;
             have = 1;
         } else {
             printf("usage: cpore_land [--seed N] [--steps N] [--out F] [--size WxH]\n"
                    "                  [--every N] [--style NAME] [--gallery GEN]\n"
                    "                  [--vis NAME] [--list-parts] [--table] [--seeds N]\n"
-                   "                  [--climate] [--map [--span UNITS]]\n"
+                   "                  [--climate] [--map [--span UNITS]] [--creature]\n"
                    "  styles: grazer predator charmer swimmer flyer burrower\n");
             return 1;
         }
+    }
+
+    /* --creature: the editor's viewport.
+     *
+     * A creature editor is only as good as what it lets you see, and until now
+     * the only view of a genome was one three-quarter thumbnail in a contact
+     * sheet. Four angles and the stat block the parts actually bought is the
+     * minimum for judging a body plan - half the genes (yaw, the limb
+     * proportions, the third coat) do not show at all from a single side. */
+    if (sheet) {
+        /* The sheet is for looking at a finished animal, so it builds at the
+         * last generation's budget rather than the first. At 64 DNA an
+         * archetype can afford a mouth and two leg pairs and nothing that
+         * distinguishes it, which made every style's sheet the same picture. */
+        if (styleid >= 0) {
+            cp4_genome_autodesign(&g, NULL, CP4_GEN_BUDGET[CP4_GENERATIONS - 1], styleid);
+        } else if (!have) {
+            CpRng rng;
+            cp_rng_seed(&rng, seed);
+            cp4_genome_random(&g, &rng, CP4_GEN_BUDGET[CP4_GENERATIONS - 1]);
+        }
+        const int cols = 2, rows = 2;
+        const int tw = W / cols, th = H / rows;
+        const int lw = tw / 2, lh = th / 2;
+        uint8_t *tile = (uint8_t *)malloc((size_t)lw * lh * 4);
+        uint8_t *fb2 = (uint8_t *)malloc((size_t)W * H * 4);
+        if (!tile || !fb2) { fprintf(stderr, "oom\n"); return 1; }
+        memset(fb2, 0, (size_t)W * H * 4);
+        /* side, three-quarter, front, and down the back */
+        static const float AZ[4] = { 1.5708f, 2.3562f, 3.1416f, 0.5236f };
+        static const float EL[4] = { 0.10f,   0.26f,   0.16f,   0.62f   };
+        static const char *NM[4] = { "SIDE", "THREE-QUARTER", "FRONT", "ABOVE" };
+        for (int i = 0; i < cols * rows; i++) {
+            cp4_render_pose(&g, tile, lw, lh, vis, seed + (uint32_t)i, AZ[i], EL[i]);
+            int ox = (i % cols) * tw, oy = (i / cols) * th;
+            for (int y = 0; y < th; y++)
+                for (int x = 0; x < tw; x++) {
+                    const uint8_t *sp = tile + 4 * ((size_t)(y / 2) * lw + (x / 2));
+                    uint8_t *dp = fb2 + 4 * ((size_t)(oy + y) * W + (ox + x));
+                    dp[0] = sp[0]; dp[1] = sp[1]; dp[2] = sp[2]; dp[3] = 255;
+                }
+            cp_px_text(fb2, W, H, ox + 10, oy + 10, 2, NM[i], 0.70f, 0.82f, 0.58f, 1.0f);
+        }
+        if (cp_png_write(out, fb2, W, H) != 0) { fprintf(stderr, "png failed\n"); return 1; }
+
+        Cp4Stats st;
+        cp4_genome_stats(&g, &st);
+        printf("creature: %d dna, %d parts over %d segments\n",
+               cp4_genome_cost(&g), st.n_parts, g.nseg);
+        printf("  parts   ");
+        for (int t = 1; t < CP4_PART_COUNT; t++)
+            if (st.n[t]) printf("%s x%d  ", cp4_part_name(t), st.n[t]);
+        printf("\n");
+        printf("  move    speed %.0f  accel %.0f  turn %.2f  jump %.0f  grip %.2f\n",
+               (double)st.speed, (double)st.accel, (double)st.turn,
+               (double)st.jump, (double)st.grip);
+        printf("  media   swim %.0f  fly %.0f  dig %.0f  breath %s\n",
+               (double)st.swim, (double)st.fly, (double)st.dig,
+               st.breath > 1.0e8f ? "gills" : "lungs");
+        printf("  fight   hp %.0f  armour %.2f  bite %.0f  claw %.0f  reach %.1f\n",
+               (double)st.hp_max, (double)st.armor, (double)st.bite,
+               (double)st.claw_dmg, (double)st.reach);
+        printf("  live    graze %.2f  meat %.2f  carry %.2f  sight %.0f  hear %.0f\n",
+               (double)st.graze_eff, (double)st.carn_eff, (double)st.carry,
+               (double)st.sight, (double)st.hearing);
+        printf("  social  charm %.2f  reach %.0f  upkeep %.2f  stamina %.0f\n",
+               (double)st.charm, (double)st.social_reach, (double)st.upkeep,
+               (double)st.stamina);
+        printf("  coats   %d over %d, hues %d/%d/%d -> %s\n",
+               g.pattern2, g.pattern, g.hue, g.hue2, g.hue3, out);
+        free(tile); free(fb2);
+        return 0;
     }
 
     /* --climate: what the world is actually made of. A biome field that is
@@ -220,7 +294,10 @@ int main(int argc, char **argv)
     if (gallery > 0) {
         const int cols = 4, rows = 2;
         const int tw = W / cols, th = H / rows;
-        const int lw = tw / 4, lh = th / 4;
+        /* Half, not a quarter. A creature editor's gallery is the one place
+         * the pixels are all subject, and at 80x90 a tail and a pair of
+         * arms are the same three pixels. */
+        const int lw = tw / 2, lh = th / 2;
         uint8_t *tile = (uint8_t *)malloc((size_t)lw * lh * 4);
         uint8_t *fb2 = (uint8_t *)malloc((size_t)W * H * 4);
         if (!tile || !fb2) { fprintf(stderr, "oom\n"); return 1; }
@@ -237,16 +314,18 @@ int main(int argc, char **argv)
             int ox = (i % cols) * tw, oy = (i / cols) * th;
             for (int y = 0; y < th; y++) {
                 for (int x = 0; x < tw; x++) {
-                    const uint8_t *sp = tile + 4 * ((size_t)(y / 4) * lw + (x / 4));
+                    const uint8_t *sp = tile + 4 * ((size_t)(y / 2) * lw + (x / 2));
                     uint8_t *dp = fb2 + 4 * ((size_t)(oy + y) * W + (ox + x));
                     dp[0] = sp[0]; dp[1] = sp[1]; dp[2] = sp[2]; dp[3] = 255;
                 }
             }
             Cp4Stats st;
             cp4_genome_stats(&rg, &st);
-            printf("  %d: %3d dna  %2d parts  %d seg  legs %d  charm %.2f  pattern %d\n",
+            printf("  %d: %3d dna  %2d parts  %d seg  legs %d arms %d tails %d  "
+                   "charm %.2f reach %.0f  coats %d/%d\n",
                    i, cp4_genome_cost(&rg), st.n_parts, rg.nseg, st.n[CP4_LEG],
-                   (double)st.charm, rg.pattern);
+                   st.n[CP4_ARM], st.n[CP4_TAIL], (double)st.charm,
+                   (double)st.reach, rg.pattern, rg.pattern2);
         }
         if (cp_png_write(out, fb2, W, H) != 0) { fprintf(stderr, "png failed\n"); return 1; }
         printf("gallery -> %s\n", out);

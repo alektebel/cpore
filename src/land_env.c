@@ -25,7 +25,7 @@ void cp4_env_reset(Cp4Env *e, uint32_t seed, const int32_t *parts, float *obs)
     if (parts) {
         cp4_genome_clear(&g);
         for (int i = 0; i < CP4_MAX_PARTS; i++) {
-            const int32_t *q = parts + i * 6;
+            const int32_t *q = parts + i * 8;
             int t = q[0];
             if (t < 0) t = 0;
             if (t >= CP4_PART_COUNT) t = CP4_PART_COUNT - 1;
@@ -35,9 +35,13 @@ void cp4_env_reset(Cp4Env *e, uint32_t seed, const int32_t *parts, float *obs)
             g.part[i].pitch  = (int8_t)(q[3] < -64 ? -64 : (q[3] > 63 ? 63 : q[3]));
             g.part[i].scale  = (uint8_t)(q[4] < 0 ? 0 : (q[4] > 255 ? 255 : q[4]));
             g.part[i].mirror = (uint8_t)(q[5] ? 1 : 0);
+            /* Limb proportions, defaulted so a caller that only knows about
+             * the first six fields still builds the animal it used to. */
+            g.part[i].len    = (uint8_t)(q[6] <= 0 ? 128 : (q[6] > 255 ? 255 : q[6]));
+            g.part[i].bend   = (int8_t)(q[7] < -127 ? -127 : (q[7] > 127 ? 127 : q[7]));
         }
-        int ns = parts[CP4_MAX_PARTS * 6];
-        int gi = parts[CP4_MAX_PARTS * 6 + 1];
+        int ns = parts[CP4_MAX_PARTS * 8];
+        int gi = parts[CP4_MAX_PARTS * 8 + 1];
         g.nseg  = (uint8_t)(ns < 2 ? 2 : (ns > CP4_MAX_SEG ? CP4_MAX_SEG : ns));
         g.girth = (uint8_t)(gi < 0 ? 0 : (gi > 255 ? 255 : gi));
         cp4_genome_normalise(&g, CP4_GEN_BUDGET[0]);

@@ -1536,7 +1536,8 @@ void cp4_world_step(Cp4World *w, const float act[CP4_ACT_DIM])
     for (int i = 0; i < CP4_MAX_BEASTS; i++) {
         Cp4Beast *b = &w->beast[i];
         if (!b->alive) continue;
-        FLORA_NEAR(w, b->p.x, b->p.z, b->s.radius + 26.0f, {
+        /* an arm pulls in what a mouth alone cannot get to */
+        FLORA_NEAR(w, b->p.x, b->p.z, b->s.radius + 26.0f + b->s.reach, {
             if (cp4_flora_medium(f->type) != b->medium) continue;
             int meat = (f->type == CP4_FLORA_CARCASS);
             if (meat ? b->s.carn_eff <= 0.0f : b->s.graze_eff <= 0.0f) continue;
@@ -1578,7 +1579,7 @@ void cp4_world_step(Cp4World *w, const float act[CP4_ACT_DIM])
         p->sing_t = 0.6f;              /* the throat sac inflates on the call */
         w->songs++;
         p->stam -= 4.0f;
-        float reach = p->s.social_reach;
+        float reach = p->s.social_reach + p->s.reach * 2.0f;
         for (int i = 0; i < CP4_MAX_BEASTS; i++) {
             Cp4Beast *b = &w->beast[i];
             if (!b->alive) continue;
@@ -1614,7 +1615,7 @@ void cp4_world_step(Cp4World *w, const float act[CP4_ACT_DIM])
         Cp4Beast *b = &w->beast[i];
         if (!b->alive) continue;
         if (b->nest == CP4_OWN_NEST) continue;   /* your own do not fight you */
-        float rr = p->s.radius + b->s.radius + 14.0f;
+        float rr = p->s.radius + b->s.radius + 14.0f + p->s.reach;
         float d2 = flat2(b->p, p->p);
         if (d2 > rr * rr) continue;
         /* Reach is three-dimensional. flat2 ignores height, so an animal a
@@ -1712,9 +1713,14 @@ void cp4_world_step(Cp4World *w, const float act[CP4_ACT_DIM])
             reward += 1.0f;
         } else if (w->home.alive && dh2 < near_r) {
             /* home ground: bank surplus food, and recover on it */
+            /* Carry. Food only becomes descendants by being banked, and arms
+             * are what let an animal bank it faster - which is the whole
+             * reason a grasping limb is worth thirteen DNA to something that
+             * already has a mouth. */
             if (want_nest && p->energy > 60.0f) {
-                p->energy -= 26.0f * dt * 10.0f;
-                w->home.store += 26.0f * dt * 10.0f;
+                float rate = 26.0f * dt * 10.0f;
+                p->energy -= rate;
+                w->home.store += rate * p->s.carry;
             }
             p->hp = clampf(p->hp + 7.0f * dt, 0.0f, p->hp_max);
             p->stam = clampf(p->stam + 9.0f * dt, 0.0f, p->s.stamina);
@@ -2039,7 +2045,8 @@ void cp4_policy_greedy(const Cp4World *w, float act[CP4_ACT_DIM])
         if (charmer) {
             /* work on whoever is closest to being won over but not there yet */
             if (nst->standing < 0.65f && d2 < best) { best = d2; target = b->p; have = 1; }
-            if (dist < s->social_reach * 0.8f && nst->standing < 0.65f) sing = 1;
+            if (dist < (s->social_reach + s->reach * 2.0f) * 0.8f
+                && nst->standing < 0.65f) sing = 1;
         } else if (s->carn_eff > 0.0f && s->bite + s->claw_dmg > 8.0f) {
             if (p->s.radius > b->s.radius * 0.85f && d2 < best) {
                 best = d2; target = b->p; have = 1;
@@ -2047,7 +2054,7 @@ void cp4_policy_greedy(const Cp4World *w, float act[CP4_ACT_DIM])
                  * exactly radius+radius+14, so a trigger range inside that is
                  * never reached and the baseline landed literally zero blows
                  * in nine thousand steps. */
-                if (dist < p->s.radius + b->s.radius + 26.0f) attack = 1;
+                if (dist < p->s.radius + b->s.radius + 26.0f + p->s.reach) attack = 1;
             }
         }
     }

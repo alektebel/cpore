@@ -505,31 +505,39 @@ class AquaEnv:
 
 LAND_PART_NAMES = ("none", "graze", "jaw", "beak", "leg", "foot", "claw",
                    "horn", "plate", "eye", "ear", "voice", "plume", "wing",
-                   "fin", "gill", "digger")
+                   "fin", "gill", "digger", "arm", "tail")
 LAND_PART = {n: i for i, n in enumerate(LAND_PART_NAMES)}
-LAND_PART_COST = (0, 6, 14, 18, 9, 7, 12, 13, 13, 7, 8, 12, 11, 16, 9, 11, 12)
-LAND_GEN_BUDGET = (64, 105, 150, 205)
+LAND_PART_COST = (0, 6, 14, 18, 9, 7, 12, 13, 13, 7, 8, 12, 11, 16, 9, 11, 12,
+                  13, 10)
+LAND_GEN_BUDGET = (82, 132, 186, 248)
 LAND_STYLES = ("grazer", "predator", "charmer", "swimmer", "flyer", "burrower")
 MEDIA = ("ground", "water", "air", "under")
-LAND_MAX_PARTS = 12
+LAND_MAX_PARTS = 16
+LAND_PART_FIELDS = 8
 
 
 def land_genome(parts, nseg=3, girth=130):
-    """Build a land body plan from (name, segment, yaw, pitch, scale, mirror).
+    """Build a land body plan from
+    (name, segment, yaw, pitch, scale, mirror, len, bend).
 
-        land_genome([("graze", 0, 0, 0), ("leg", 0, 60, -40, 128, 1)])
+        land_genome([("graze", 0, 0, 0), ("leg", 0, 60, -40, 128, 1, 200, 50)])
 
-    Trailing fields may be omitted: scale defaults to 128 and mirror to 0.
-    Mirrored parts are placed on both flanks and cost twice, which is the
-    trade the whole bilateral-symmetry gene exists to express."""
+    Trailing fields may be omitted: scale defaults to 128, mirror to 0, len to
+    128 (a mid-length limb) and bend to 0. Mirrored parts are placed on both
+    flanks and cost twice, which is the trade the whole bilateral-symmetry gene
+    exists to express; len and bend are how long the limb is and how far its
+    joint folds, which is what makes a leg a leg you designed rather than the
+    one leg everything has."""
+    defaults = (0, 0, 0, 0, 128, 0, 128, 0)
     out = []
     for p in parts:
-        p = tuple(p) + (128, 0)[len(p) - 4:] if len(p) < 6 else tuple(p)
-        t, seg, yaw, pitch, scale, mirror = p
+        p = tuple(p)
+        p = p + defaults[len(p):]
+        t, seg, yaw, pitch, scale, mirror, ln, bend = p[:8]
         if isinstance(t, str):
             t = LAND_PART[t]
         out.append((int(t), int(seg), int(yaw) & 0xFF, int(pitch),
-                    int(scale), 1 if mirror else 0))
+                    int(scale), 1 if mirror else 0, int(ln), int(bend)))
     return {"parts": out, "nseg": int(nseg), "girth": int(girth)}
 
 
@@ -606,11 +614,15 @@ class LandEnv:
         else:
             flat = []
             for p in genome["parts"][:LAND_MAX_PARTS]:
-                t, sg, yw, pt, sc, mr = p
+                p = tuple(p)
+                p = p + (0, 0, 0, 0, 128, 0, 128, 0)[len(p):]
+                t, sg, yw, pt, sc, mr, ln, bd = p[:8]
                 if isinstance(t, str):
                     t = LAND_PART[t]
-                flat += [int(t), int(sg), int(yw) & 0xFF, int(pt), int(sc), int(mr)]
-            flat += [0, 0, 0, 0, 0, 0] * (LAND_MAX_PARTS - len(flat) // 6)
+                flat += [int(t), int(sg), int(yw) & 0xFF, int(pt), int(sc),
+                         int(mr), int(ln), int(bd)]
+            flat += [0, 0, 0, 0, 0, 0, 128, 0] * (
+                LAND_MAX_PARTS - len(flat) // LAND_PART_FIELDS)
             flat += [genome.get("nseg", 3), genome.get("girth", 130)]
             pp = (c_int32 * len(flat))(*flat)
         self._lib.cp4_env_reset(self._h, c_uint32(seed & 0xFFFFFFFF), pp, self._obs)

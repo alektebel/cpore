@@ -24,7 +24,12 @@
 #define CP_PI 3.14159265358979f
 #endif
 
-#define MAX_PRIM 44
+/* A stage-3 animal can now carry sixteen parts, some of which are
+ * multi-link chains drawn twice for mirroring - a tail alone is five.
+ * At 44 the array filled up before the tail and the legs were reached,
+ * and push() dropped them silently, which reads as a body plan the
+ * genome does not have. */
+#define MAX_PRIM 176
 
 typedef struct { float x, y, z; } V3;
 

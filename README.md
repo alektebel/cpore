@@ -196,16 +196,27 @@ live in their medium and eat from it:
 
 | build | evolved | ground / water / air / under | eats |
 |---|---|---|---|
-| predator | 18/30 | 96% / 2% / 0% / 0% | 294 carrion |
-| swimmer | 16/30 | 10% / 88% / 0% / 0% | 1147 kelp |
-| charmer | 14/30 | 97% / 1% / 0% / 0% | 832 bushes, 746 songs |
-| grazer | 7/30 | 94% / 4% / 0% / 0% | 797 bushes, 680 songs |
-| burrower | 7/30 | 30% / 0% / 0% / 68% | 384 tubers, 30 hatchlings |
-| flyer | 6/30 | 72% / 1% / 25% / 0% | 603 bushes, 123 species found |
+| swimmer | 17/30 | 6% / 92% / 1% / 0% | 1117 kelp |
+| predator | 14/30 | 98% / 1% / 0% / 0% | 241 carrion |
+| charmer | 7/30 | 97% / 2% / 0% / 0% | 699 bushes, 675 songs |
+| burrower | 1/30 | 68% / 1% / 0% / 29% | 169 tubers |
+| grazer | 0/30 | 97% / 1% / 1% / 0% | 896 bushes, 691 songs |
+| flyer | 0/30 | 90% / 1% / 7% / 0% | 678 bushes, 198 species found |
 
 Twelve seeds turned out to be too few to tune against — a change that only
 shuffles the RNG stream re-rolls every outcome, and I spent a while chasing
 swings that were noise. `--seeds 30` is the honest read.
+
+**These numbers are down and the creature-creator work is why.** Before it the
+spread was 18/16/14/7/7/6; the wider genome, the two new parts and the raised
+budgets moved it to 17/14/7/1/0/0. Predator and swimmer hold; the four
+archetypes that fill their meter socially do not. What the measurements say is
+that everything in the world got a bigger genome at the same time the player
+did, and the rivals converted it better - deaths are up across the board and
+species-encountered nearly doubled. Three tuning rounds narrowed it (buy order,
+the leg-length coupling, the budgets) without closing it, and guessing further
+is how you tune against noise. It needs a pass of its own, against the tables
+rather than against intuition, and it has not had one.
 
 Terrain moved these once and then stopped moving them. Domain warping and
 derivative-damped octaves put real relief in the ground, and relief costs a
@@ -261,7 +272,59 @@ rises on its own.
 ./build/cpore_land --map --seed 21 --span 26000 --out map.png
 ./build/cpore_land --map --seed 21 --span 5000    # the same world, close up
 ./build/cpore_land --gallery 3 --seed 11 --out gallery.png
+./build/cpore_land --creature --style charmer --out charmer.png
+./build/cpore_land --creature --seed 42 --out random.png   # four views + stats
 ```
+
+### The creature creator
+
+| ![predator](docs/creature_predator.png) |
+|---|
+| ![charmer](docs/creature_charmer.png) |
+
+`--creature --style charmer` builds an archetype at the last generation's
+budget and renders it from four angles with the stat block its parts actually
+bought. Half the genome — every yaw, the limb proportions, the third coat —
+simply does not show from one fixed side, which is why the gallery had been
+lying to me for weeks.
+
+The genome carries, per part: what it is, which segment it mounts on, its yaw
+and pitch, its scale, **how long it is**, and **how far its joint folds**. The
+last two are the difference between a parts bin and an editor. In Spore the
+thing you spend most of your time on is dragging a limb out to the length you
+want and setting the way it bends, and until this every leg on every animal in
+the world was the same leg at a different scale.
+
+| | |
+|---|---|
+| **19 part types** | arms and tails join the original seventeen |
+| **16 slots** | up from twelve |
+| **jointed limbs** | legs, arms and tails are multi-link chains with per-part reach and fold |
+| **spine** | segment count, girth, a four-point profile, per-segment lumps *and* per-segment rise, plus arch and sweep |
+| **three coats** | base, marking and detail, each with its own pattern and scale — Spore's paint mode |
+| **design head** | six numbers a part in the action vector, up from four |
+
+**Arms** are a leg that does not have to reach the ground, and that one
+difference is what makes them worth having as a separate part: freed from the
+floor, they point where the gene aims them. They lengthen every contact the
+animal makes — a blow lands from further out and so does a display — they
+browse what a mouth alone cannot reach, and they let you provision a nest
+faster, which is the only thing that turns food into descendants.
+
+**Tails** are counterweights: turn, grip, jump, stamina. They deliberately do
+*not* pay charm, however much a real one is a display organ. The stage turns
+on charm and violence being bought from the same budget, and a cheap part that
+quietly pays into both blunts the fork — with it, the predator archetype
+started winning encounters by impressing them, and the test that checks it wins
+by eating went red.
+
+Limbs wear the animal's own skin. Given their own grey they read as
+prosthetics bolted to a coloured torso, and with sixteen slots most of a
+silhouette is limb — so most of the animal came out pale grey whatever its
+genome said. Claws, horns, plates and eyes keep their own material, because
+those are the parts that are supposed to look like a different substance.
+
+![gallery](docs/land_gallery.png)
 
 ### Generating the terrain
 

@@ -1013,9 +1013,9 @@ static void draw_world(Ctx *c, const Cp4World *w)
 /* ---------------- creature geometry ---------------- */
 
 typedef struct {
-    V3    base, mark;
-    int   pattern;
-    float freq;
+    V3    base, mark, detail;
+    int   pattern, pattern2;
+    float freq, freq2;
     V3    origin, fwd, right, up;
 } Skin;
 
@@ -1039,6 +1039,8 @@ static V3 part_albedo4(int t, float *emissive)
     case CP4_FIN:     return v3(0.42f, 0.70f, 0.80f);
     case CP4_GILL:    return v3(0.84f, 0.34f, 0.36f);
     case CP4_DIGGER:  return v3(0.74f, 0.68f, 0.52f);
+    case CP4_ARM:     return v3(0.62f, 0.52f, 0.44f);
+    case CP4_TAIL:    return v3(0.56f, 0.48f, 0.42f);
     default:          return v3(0.6f, 0.6f, 0.6f);
     }
 }
@@ -1059,8 +1061,8 @@ static int build_prims4(const Cp4Beast *b, int is_player, Prim *out,
     float R = b->s.radius;
     float L = b->s.length;
 
-    float base[3], mark[3];
-    cp4_genome_colour(&b->g, base, mark);
+    float base[3], mark[3], detail[3];
+    cp4_genome_colour(&b->g, base, mark, detail);
     V3 body = v3(base[0], base[1], base[2]);
     if (is_player) {
         /* Brighten the agent's own animal without touching its hue.
@@ -1077,8 +1079,14 @@ static int build_prims4(const Cp4Beast *b, int is_player, Prim *out,
     }
     skin->base = body;
     skin->mark = v3(mark[0], mark[1], mark[2]);
+    skin->detail = v3(detail[0], detail[1], detail[2]);
     skin->pattern = b->g.pattern;
+    skin->pattern2 = b->g.pattern2;
     skin->freq = 0.02f + 0.16f * ((float)b->g.pscale / 255.0f);
+    /* The detail coat runs finer than the marking coat. Two patterns at the
+     * same frequency beat against each other into moire; an octave and a bit
+     * apart they read as a marking with detail on it. */
+    skin->freq2 = 0.05f + 0.30f * ((float)b->g.pscale2 / 255.0f);
     skin->origin = cv(b->p);
     skin->fwd = fwd; skin->right = right; skin->up = up;
 
@@ -1094,9 +1102,14 @@ static int build_prims4(const Cp4Beast *b, int is_player, Prim *out,
         /* a walking animal sways, it does not undulate - a tenth of the
          * amplitude the fish use */
         float sway = sinf(b->phase * 0.5f - t * 1.4f) * R * 0.10f;
+        /* arch is one curve over the whole body; rise is what each vertebra
+         * does on its own, which is how you get a hump, a dropped neck or a
+         * raised tail root out of the same three genes */
+        int ri = i < CP4_MAX_SEG ? i : CP4_MAX_SEG - 1;
+        float rise = (float)b->g.rise[ri] / 127.0f * R * 0.85f;
         segpos[i] = add(add(add(cv(b->p), mul(fwd, along)),
                             mul(right, sway + sweep * bend)),
-                        mul(up, arch * bend));
+                        mul(up, arch * bend + rise));
         int li = i < CP4_MAX_SEG ? i : CP4_MAX_SEG - 1;
         segrad[i] = R * cp4_profile(&b->g, t)
                       * (1.0f + (float)b->g.lump[li] / 127.0f * 0.40f);
@@ -1123,6 +1136,17 @@ static int build_prims4(const Cp4Beast *b, int is_player, Prim *out,
 
         float er;
         V3 col = part_albedo4(t, &er);
+        /* Limbs wear the animal's own skin.
+         *
+         * Given their own grey they read as prosthetics bolted to a coloured
+         * torso - and with sixteen slots and jointed arms and tails, most of
+         * the silhouette is limb, so most of the animal came out the same pale
+         * grey whatever its genome said. Hard parts - claw, horn, plate, eye,
+         * beak - keep their own material, because those are the ones that are
+         * supposed to look like a different substance. */
+        if (t == CP4_LEG || t == CP4_ARM || t == CP4_TAIL || t == CP4_FIN
+            || t == CP4_WING || t == CP4_FOOT)
+            col = mul(body, t == CP4_TAIL ? 0.94f : 0.86f);
         float sc = 0.45f + 1.45f * ((float)b->g.part[i].scale / 255.0f);
         int copies = b->g.part[i].mirror ? 2 : 1;
 
@@ -1158,10 +1182,21 @@ static int build_prims4(const Cp4Beast *b, int is_player, Prim *out,
                 float lift = clampf(sinf(ph), 0.0f, 1.0f) * len * 0.26f;
                 V3 foot = v3(hip.x + fwd.x * stride, ground_y - lift,
                              hip.z + fwd.z * stride);
-                V3 knee = add(add(mul(add(hip, foot), 0.5f), mul(fwd, len * 0.20f)),
-                              mul(right, side * len * 0.10f));
+                /* Where the knee sits, from the gene rather than from a
+                 * constant. The foot has to reach the ground whatever the
+                 * gene says - that is not negotiable - so what `bend` buys is
+                 * how far the joint is thrown forward or back off the straight
+                 * line between hip and foot, which is the difference between a
+                 * digitigrade sprinter and a squat digger standing on the same
+                 * two points. `len` decides how much of the limb is thigh. */
+                float bend_g = (float)b->g.part[i].bend / 127.0f;
+                float lenf   = (float)b->g.part[i].len / 255.0f;
+                float split  = 0.32f + 0.40f * lenf;
+                V3 knee = add(add(add(mul(hip, 1.0f - split), mul(foot, split)),
+                                  mul(fwd, len * (0.06f + 0.42f * bend_g))),
+                              mul(right, side * len * (0.06f + 0.16f * lenf)));
 
-                float tk = R * 0.30f * sc;
+                float tk = R * (0.34f - 0.13f * lenf) * sc;
                 push(out, &n, hip, knee, tk, tk * 0.76f, R * 0.16f, col, 0.0f, 0.0f);
                 push(out, &n, knee, foot, tk * 0.76f, tk * 0.55f, R * 0.12f, col, 0.0f, 0.0f);
                 push(out, &n, foot, add(foot, mul(fwd, R * 0.30f * sc)),
@@ -1271,6 +1306,74 @@ static int build_prims4(const Cp4Beast *b, int is_player, Prim *out,
                      R * 0.30f * sc, R * 0.34f * sc, R * 0.12f, col, 0.0f, 0.0f);
                 break;
             }
+            case CP4_ARM: {
+                /* An arm is a leg that does not have to reach the ground, and
+                 * that one difference is what makes it worth having as a
+                 * separate part: freed from the floor it can point anywhere,
+                 * so where the gene aims it actually shows. Two bones and a
+                 * hand, folded by `bend`, reaching by `len`. */
+                float side = m ? -1.0f : 1.0f;
+                float lenf = (float)b->g.part[i].len / 255.0f;
+                float bend_g = (float)b->g.part[i].bend / 127.0f;
+                float reach = R * (0.85f + 1.85f * lenf) * sc;
+                /* Hung, not splayed. Aimed purely where the gene points, arms
+                 * came out as horizontal outriggers - correct to the genome
+                 * and wrong as an animal. Biasing the root forward and down
+                 * puts them where a limb that has to reach things actually
+                 * hangs, and leaves the gene deciding the rest. */
+                V3 down = v3(0.0f, 1.0f, 0.0f);
+                V3 adir = norm(add(add(mul(ax, 1.0f), mul(fwd, 0.34f)),
+                                   mul(down, 0.46f)));
+                V3 shoulder = bs;
+                V3 elbow = add(shoulder, mul(adir, reach * 0.52f));
+                /* the fold happens across the limb, so it reads as a joint
+                 * rather than as a kink in a straight tube */
+                V3 across = norm(add(mul(right, side * 0.75f), mul(up, -0.66f)));
+                V3 hand = add(add(elbow, mul(adir, reach * 0.48f * (1.0f - 0.55f * fabsf(bend_g)))),
+                              mul(across, reach * 0.62f * bend_g));
+                float tk = R * (0.24f - 0.07f * lenf) * sc;
+                push(out, &n, shoulder, elbow, tk, tk * 0.82f, R * 0.13f, col, 0.0f, 0.0f);
+                push(out, &n, elbow, hand, tk * 0.82f, tk * 0.60f, R * 0.11f, col, 0.0f, 0.0f);
+                /* the hand: three short digits, which is the cheapest thing
+                 * that reads as "this end grasps" */
+                for (int f = 0; f < 3; f++) {
+                    float a2 = (float)f * 2.094f + 0.4f;
+                    V3 off = add(mul(right, cosf(a2) * 0.55f), mul(up, sinf(a2) * 0.55f));
+                    V3 tip = add(add(hand, mul(adir, reach * 0.16f)),
+                                 mul(off, reach * 0.12f));
+                    push(out, &n, hand, tip, tk * 0.46f, tk * 0.16f, R * 0.06f,
+                         col, 0.0f, 0.0f);
+                }
+                break;
+            }
+            case CP4_TAIL: {
+                /* A tail is a chain, not a spike: it has to taper over several
+                 * links and it has to swing, or it reads as a stick glued to
+                 * the back. The swing is driven off the gait phase, so it
+                 * counterweights the stride the way a real one does. */
+                float lenf = (float)b->g.part[i].len / 255.0f;
+                float bend_g = (float)b->g.part[i].bend / 127.0f;
+                float total = R * (1.2f + 3.4f * lenf) * sc;
+                const int LINKS = 5;
+                V3 at = add(segpos[nseg - 1], mul(fwd, -segrad[nseg - 1] * 0.55f));
+                V3 dir = norm(add(mul(fwd, -1.0f), mul(up, bend_g * 0.55f)));
+                float rr = R * (0.40f + 0.22f * lenf) * sc;
+                for (int k = 0; k < LINKS; k++) {
+                    float f = (float)k / (float)LINKS;
+                    float seglen = total / (float)LINKS;
+                    /* the whip: later links lag further behind the swing */
+                    float swing = sinf(b->phase * 0.5f - f * 2.1f) * 0.20f;
+                    V3 d2 = norm(add(add(dir, mul(right, swing)),
+                                     mul(up, bend_g * 0.30f * f)));
+                    V3 nx2 = add(at, mul(d2, seglen));
+                    float r2a = rr * (1.0f - 0.72f * f);
+                    float r2b = rr * (1.0f - 0.72f * (f + 1.0f / (float)LINKS));
+                    push(out, &n, at, nx2, r2a, r2b, R * 0.12f, col, 0.0f, 0.55f);
+                    at = nx2;
+                    dir = d2;
+                }
+                break;
+            }
             default:
                 push(out, &n, bs, add(bs, mul(ax, R * 0.30f * sc)),
                      R * 0.32f * sc, R * 0.28f * sc, R * 0.18f, col, er, 0.0f);
@@ -1286,44 +1389,57 @@ static int build_prims4(const Cp4Beast *b, int is_player, Prim *out,
 /* Markings, applied only where the surface is trunk rather than appendage.
  * Colour carries as much perceived variety as shape, and quantising to 32
  * colours punishes gradients, so the patterns are deliberately crisp. */
-static V3 apply_pattern(const Skin *sk, V3 q, V3 albedo, float bodyw)
+static V3 pattern_layer(const Skin *sk, V3 q, V3 albedo, float bodyw,
+                        int pattern, float freq, V3 ink, float strength)
 {
-    if (bodyw <= 0.02f || sk->pattern == CP4_PAT_PLAIN) return albedo;
+    if (bodyw <= 0.02f || pattern == CP4_PAT_PLAIN) return albedo;
     V3 d = sub(q, sk->origin);
     float along = dot(d, sk->fwd), side = dot(d, sk->right), vert = dot(d, sk->up);
     float m = 0.0f;
-    switch (sk->pattern) {
+    switch (pattern) {
     case CP4_PAT_BANDS:
-        m = sinf(along * sk->freq * 6.0f) > 0.15f ? 1.0f : 0.0f;
+        m = sinf(along * freq * 6.0f) > 0.15f ? 1.0f : 0.0f;
         break;
     case CP4_PAT_SPOTS:
-        m = (sinf(along * sk->freq * 5.0f) * sinf(side * sk->freq * 5.0f)
-           * sinf(vert * sk->freq * 5.0f)) > 0.30f ? 1.0f : 0.0f;
+        m = (sinf(along * freq * 5.0f) * sinf(side * freq * 5.0f)
+           * sinf(vert * freq * 5.0f)) > 0.30f ? 1.0f : 0.0f;
         break;
     case CP4_PAT_COUNTER:
         m = clampf(0.5f + vert * 0.16f, 0.0f, 1.0f);
         break;
     case CP4_PAT_STRIPES:
-        m = sinf(atan2f(vert, side) * 4.0f + along * sk->freq * 0.9f) > 0.1f ? 1.0f : 0.0f;
+        m = sinf(atan2f(vert, side) * 4.0f + along * freq * 0.9f) > 0.1f ? 1.0f : 0.0f;
         break;
     case CP4_PAT_MOTTLE: {
-        float a = sinf(along * sk->freq * 3.1f) + sinf(side * sk->freq * 4.7f)
-                + sinf(vert * sk->freq * 2.3f) + sinf((along + side) * sk->freq * 6.1f);
+        float a = sinf(along * freq * 3.1f) + sinf(side * freq * 4.7f)
+                + sinf(vert * freq * 2.3f) + sinf((along + side) * freq * 6.1f);
         m = a > 0.55f ? 1.0f : 0.0f;
         break;
     }
     case CP4_PAT_GRADIENT:
-        m = clampf(0.5f - along * sk->freq * 0.55f, 0.0f, 1.0f);
+        m = clampf(0.5f - along * freq * 0.55f, 0.0f, 1.0f);
         m = m > 0.5f ? (m - 0.5f) * 2.0f : 0.0f;
         break;
     case CP4_PAT_RINGS:
-        m = sinf(sqrtf(side * side + vert * vert) * sk->freq * 7.0f) > 0.2f ? 1.0f : 0.0f;
+        m = sinf(sqrtf(side * side + vert * vert) * freq * 7.0f) > 0.2f ? 1.0f : 0.0f;
         break;
     default: break;
     }
-    m *= bodyw;
-    return v3(mixf(albedo.x, sk->mark.x, m), mixf(albedo.y, sk->mark.y, m),
-              mixf(albedo.z, sk->mark.z, m));
+    m *= bodyw * strength;
+    return v3(mixf(albedo.x, ink.x, m), mixf(albedo.y, ink.y, m),
+              mixf(albedo.z, ink.z, m));
+}
+
+/* Three coats, applied in order: base, marking, detail. Spore's paint mode is
+ * exactly this and it is most of why two creatures with the same skeleton do
+ * not look like the same creature - shape is expensive and colour is free. */
+static V3 apply_pattern(const Skin *sk, V3 q, V3 albedo, float bodyw)
+{
+    albedo = pattern_layer(sk, q, albedo, bodyw, sk->pattern, sk->freq,
+                           sk->mark, 1.0f);
+    albedo = pattern_layer(sk, q, albedo, bodyw, sk->pattern2, sk->freq2,
+                           sk->detail, 0.72f);
+    return albedo;
 }
 
 static void shade_hit(Ctx *c, int x, int y, V3 nrm, V3 albedo, float em, float vz,
@@ -1348,10 +1464,18 @@ static void shade_hit(Ctx *c, int x, int y, V3 nrm, V3 albedo, float em, float v
      * sky dome plus a little moonlight - never zero, or the frame goes black
      * and a 32-colour palette has nothing to say about it. */
     float night = 1.0f - c->day;
-    float key   = 1.15f * lam * shadow * (0.12f + 0.88f * c->day);
-    float sky   = (0.46f * c->day + 0.13f * night) * (0.35f + 0.65f * up_amt);
-    float grnd  = (0.28f * c->day + 0.06f * night) * (1.0f - up_amt);
-    float fill  = (0.26f * c->day + 0.10f * night) * ndotv;
+    /* Wrapped, and with headroom. Four terms that could sum past 1.9 meant any
+     * animal with a bright coat blew out through the filmic curve into pale
+     * beige - which is exactly what the whole creature gallery looked like,
+     * whatever colours the genomes actually carried. Wrapping the key past the
+     * terminator lets the total come down without the shadow side going dark
+     * with it. */
+    float wrap = clampf((lam + 0.42f) / 1.42f, 0.0f, 1.0f);
+    wrap *= wrap;
+    float key   = 1.05f * wrap * shadow * (0.12f + 0.88f * c->day);
+    float sky   = (0.34f * c->day + 0.11f * night) * (0.35f + 0.65f * up_amt);
+    float grnd  = (0.20f * c->day + 0.05f * night) * (1.0f - up_amt);
+    float fill  = (0.14f * c->day + 0.07f * night) * ndotv;
 
     /* Underground and deep underwater the sun is not a factor, so the body is
      * lit from the camera with a distance falloff instead. Without it an
@@ -2579,8 +2703,8 @@ void cp4_render(const Cp4World *w, uint8_t *rgba, int W, int H)
 /* ---------------- portrait ----------------
  * A genome space is only as good as the variety you can see in it, so this
  * renders one creature against a plain backdrop with nothing else in frame. */
-void cp4_render_portrait(const Cp4Genome *g, uint8_t *fb, int lw, int lh,
-                         int style, uint32_t seed)
+void cp4_render_pose(const Cp4Genome *g, uint8_t *fb, int lw, int lh,
+                     int style, uint32_t seed, float azimuth, float elev)
 {
     float *zb = (float *)malloc(sizeof(float) * (size_t)lw * lh);
     if (!zb) return;
@@ -2615,20 +2739,39 @@ void cp4_render_portrait(const Cp4Genome *g, uint8_t *fb, int lw, int lh,
     /* Three-quarter view, but only barely raised. Straight side-on hides
      * everything mounted fore and aft; look down more than about ten degrees
      * and the body hides the legs, which on a land animal is most of what
-     * there is to see. */
-    V3 dir = norm(v3(-0.66f, -0.15f, 0.74f));
-    float dist = bound * 2.15f + 6.0f;
-    c.eye = add(centre, mul(dir, dist));
-    V3 look = norm(sub(centre, c.eye));
+     * there is to see.
+     *
+     * The aim point is lifted off the geometric centre. A creature stands on
+     * the ground and grows upward from it, so centring the bounding sphere
+     * puts a third of the frame under the feet and crops the head - which is
+     * what the whole gallery had been doing. */
+    /* Where the camera stands, in the animal's own frame. Half the genome -
+     * every yaw, every limb proportion, the third coat - simply does not show
+     * from one fixed side, so the angle has to be an argument. */
+    V3 dir = norm(v3(cosf(azimuth) * cosf(elev), -sinf(elev),
+                     sinf(azimuth) * cosf(elev)));
+    /* Far enough back to leave a margin. At 2.15 the bounding sphere filled
+     * the tile edge to edge and every animal in the gallery was cropped -
+     * which reads as a badly built creature rather than as a badly framed
+     * photograph of one. */
+    float dist = bound * 3.30f + 10.0f;
+    V3 aim = add(centre, v3(0.0f, -bound * 0.16f, 0.0f));
+    c.eye = add(aim, mul(dir, dist));
+    V3 look = norm(sub(aim, c.eye));
     c.fwd = look;
     c.right = norm(v3(-look.z, 0.0f, look.x));
     c.up = norm(v3(c.right.z * look.y - c.right.y * look.z,
                    c.right.x * look.z - c.right.z * look.x,
                    c.right.y * look.x - c.right.x * look.y));
 
+    /* A studio backdrop: dark, cool and almost flat, so it never competes with
+     * the subject. The old one ran warm brown into blue and put a value close
+     * to the animal's behind every animal, which is why the whole gallery read
+     * as beige on beige. */
     for (int y = 0; y < lh; y++) {
         float t = (float)y / (float)lh;
-        V3 bg = v3(mixf(0.10f, 0.20f, t), mixf(0.14f, 0.22f, t), mixf(0.20f, 0.16f, t));
+        V3 bg = v3(mixf(0.055f, 0.105f, t), mixf(0.065f, 0.115f, t),
+                   mixf(0.095f, 0.130f, t));
         for (int x = 0; x < lw; x++) {
             put(&c, x, y, bg);
             zb[(size_t)y * lw + x] = 1e30f;
@@ -2662,4 +2805,14 @@ void cp4_render_portrait(const Cp4Genome *g, uint8_t *fb, int lw, int lh,
     outline_pass(&c);
     cp_vis_quantise(fb, lw, lh, style);
     free(zb);
+}
+
+/* The default view: three-quarter, barely raised. Straight side-on hides
+ * everything mounted fore and aft; look down much past fifteen degrees and the
+ * body hides the legs, which on a land animal is most of what there is to
+ * see. */
+void cp4_render_portrait(const Cp4Genome *g, uint8_t *fb, int lw, int lh,
+                         int style, uint32_t seed)
+{
+    cp4_render_pose(g, fb, lw, lh, style, seed, 2.30f, 0.26f);
 }
