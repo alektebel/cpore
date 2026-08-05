@@ -131,6 +131,38 @@ static float fbm2(uint32_t s, float x, float z)
          + rnoise(s ^ 0xC3u, x * 4.3f, z * 4.3f) * 0.17f;
 }
 
+/* Wind.
+ *
+ * The one thing a still frame cannot show and the one thing that most decides
+ * whether a landscape is alive. It is not a per-blade wobble: real wind
+ * arrives in gusts that cross the ground as visible bands, so this is a noise
+ * field scrolling along a fixed heading, sampled at whatever is being bent.
+ * Grass, boughs and crowns all read the same field, which is what makes a gust
+ * look like one gust passing over everything rather than three animations
+ * happening at once.
+ *
+ * Nothing in the simulation knows about it. Wind that pushed animals around
+ * would be a mechanic, and a mechanic has to be observable, learnable and
+ * worth an action - this is scenery. */
+static void wind_dir(const Ctx *c, float *wx, float *wz)
+{
+    float a = rhash(c->seed ^ 0x2F41u, 0, 0) * 6.2832f + c->time * 0.012f;
+    *wx = cosf(a); *wz = sinf(a);
+}
+
+static float wind_gust(const Ctx *c, float x, float z)
+{
+    float wx, wz;
+    wind_dir(c, &wx, &wz);
+    float t = c->time * 21.0f;
+    float u = (x - wx * t) * 0.0042f, v = (z - wz * t) * 0.0042f;
+    float g = rnoise(c->seed ^ 0x9E11u, u, v) * 0.68f
+            + rnoise(c->seed ^ 0x55C7u, u * 3.3f, v * 3.3f) * 0.32f;
+    /* squared, so the calm between gusts is genuinely calm */
+    g = clampf((g - 0.28f) * 1.9f, 0.0f, 1.0f);
+    return g * g;
+}
+
 /* The horizon colour is also the haze colour. Getting this wrong is the
  * fastest way to ruin a landscape: too bright and every hill past the first
  * one is the same pale grey, which is exactly what the first build did.
@@ -942,13 +974,26 @@ static void draw_world(Ctx *c, const Cp4World *w)
                  * off everything else */
                 float skyamt = clampf(slope, 0.0f, 1.0f);
                 float night = 1.0f - c->day;
+                /* Wrapped diffuse, and a shadow with a colour in it.
+                 *
+                 * A plain Lambert terminator is a hard line into near-black,
+                 * and near-black is where a landscape stops being a place and
+                 * becomes a diagram. Wrapping the light past the terminator
+                 * and filling what is left with a blue sky term is the whole
+                 * of the look: the unlit side of a hill stays legible, stays
+                 * coloured, and reads as being in shade rather than as being
+                 * switched off. It also costs nothing - it is the same two
+                 * terms with different numbers. */
+                float wrap = clampf((lam + 0.42f) / 1.42f, 0.0f, 1.0f);
+                wrap *= wrap;
                 V3 lightv = add(add(mul(c->sunc,
-                                        1.00f * lam * sh * (0.10f + 0.90f * c->day)
+                                        1.18f * wrap * sh * (0.10f + 0.90f * c->day)
                                         * (0.55f + 0.45f * ao)),
-                                    mul(v3(0.30f, 0.40f, 0.60f),
-                                        (0.26f * c->day + 0.10f * night) * skyamt * ao)),
-                                mul(v3(0.26f, 0.22f, 0.15f),
-                                    (0.13f * c->day + 0.05f * night) * ao));
+                                    mul(v3(0.34f, 0.48f, 0.82f),
+                                        (0.40f * c->day + 0.13f * night)
+                                        * (0.35f + 0.65f * skyamt) * ao)),
+                                mul(v3(0.34f, 0.27f, 0.17f),
+                                    (0.16f * c->day + 0.05f * night) * ao));
                 col = v3(alb.x * lightv.x, alb.y * lightv.y, alb.z * lightv.z);
                 dist = tg;
             } else {
@@ -1472,15 +1517,39 @@ static void sphere_ex(Ctx *c, V3 wp, float rad, V3 albedo, float emissive,
             V3 n = add(add(mul(c->right, nx), mul(c->up, -ny)), mul(c->fwd, -nz));
             float lam = clampf(-dot(n, sun), 0.0f, 1.0f);
             float up_amt = clampf(-n.y, 0.0f, 1.0f);
-            /* Same dome floor as shade_hit, for the same reason, and the same
-             * day term: written without it every tree, boulder and bush in the
-             * world stayed in full sunlight through the night while the ground
-             * they stood on went black, which read as a forest of lamps. */
-            float k = 1.15f * lam * (0.12f + 0.88f * c->day)
-                    + (0.34f * c->day + 0.11f * (1.0f - c->day))
-                      * (0.35f + 0.65f * up_amt)
-                    + 0.13f * nz * (0.25f + 0.75f * c->day);
-            V3 col = v3(albedo.x * k, albedo.y * k, albedo.z * k);
+            /* Three coloured terms rather than one scalar, and the same day
+             * term throughout: written without it every tree, boulder and bush
+             * in the world stayed in full sunlight through the night while the
+             * ground they stood on went black, which read as a forest of
+             * lamps.
+             *
+             * The sun is wrapped past the terminator the same way the ground
+             * is, and what is left over is filled by a blue sky dome. A leaf
+             * on the shaded side of a crown is then blue-green rather than
+             * black, which is most of why a canopy reads as a volume. */
+            float night = 1.0f - c->day;
+            float wrap = clampf((lam + 0.42f) / 1.42f, 0.0f, 1.0f);
+            wrap *= wrap;
+            V3 col = add(add(mul(v3(albedo.x * c->sunc.x, albedo.y * c->sunc.y,
+                                    albedo.z * c->sunc.z),
+                                 1.30f * wrap * (0.12f + 0.88f * c->day)),
+                             mul(v3(albedo.x * 0.34f, albedo.y * 0.48f, albedo.z * 0.82f),
+                                 (0.46f * c->day + 0.14f * night)
+                                 * (0.35f + 0.65f * up_amt))),
+                         mul(albedo, (0.13f * c->day + 0.04f * night) * nz));
+
+            /* Rim. Foliage lit from behind glows at its edge because a leaf is
+             * thin enough to pass light; there is no leaf here, but the edge
+             * is where nz goes to zero and that is enough to put the effect
+             * where it belongs. It is what separates one crown from the crown
+             * behind it when both are in shade. */
+            {
+                float backlit = clampf(dot(c->fwd, mul(c->sun, -1.0f)), 0.0f, 1.0f);
+                float rimf = 1.0f - nz;
+                rimf = rimf * rimf * rimf;
+                col = add(col, mul(c->sunc,
+                                   rimf * (0.10f + 0.85f * backlit) * c->day * 0.55f));
+            }
             if (emissive > 0.0f) col = add(col, mul(albedo, emissive));
             /* the ray through this very pixel, so the scattering halo lines up
              * with the one the terrain behind it is getting */
@@ -1708,6 +1777,10 @@ static void draw_cover(Ctx *c, const Cp4World *w)
             V3 high = mul(v3(alb.x * 1.25f + 0.05f, alb.y * 1.45f + 0.09f,
                              alb.z * 1.10f + 0.03f), lit);
 
+            float wx, wz;
+            wind_dir(c, &wx, &wz);
+            float gust = wind_gust(c, px, pz);
+
             int nb = 2 + (int)(r1 * 3.0f);
             /* fade into the ground it grows out of, so the far edge of the
              * scatter has nothing to see */
@@ -1723,11 +1796,105 @@ static void draw_cover(Ctx *c, const Cp4World *w)
                 float sx = px + cosf(a) * CELL * 0.22f;
                 float sz = pz + sinf(a) * CELL * 0.22f;
                 V3 base = v3(sx, gy + 0.6f, sz);
-                V3 tip  = v3(sx + cosf(a) * hgt * lean, gy - hgt,
-                             sz + sinf(a) * hgt * lean);
+                /* A bent blade is also a shorter one: leaning without losing
+                 * height stretches the grass instead of pushing it over, and
+                 * the gust reads as the whole meadow growing. */
+                float bend = gust * (0.85f + 0.45f * r2);
+                V3 tip  = v3(sx + cosf(a) * hgt * lean + wx * hgt * bend,
+                             gy - hgt * (1.0f - 0.32f * bend),
+                             sz + sinf(a) * hgt * lean + wz * hgt * bend);
                 V3 hi = high;
                 if (b & 1) hi = mul(hi, 0.86f);
                 blade(c, base, tip, 0.30f, low, hi);
+
+                /* One tuft in a few dozen carries a flower head. The ground is
+                 * deliberately low-chroma - grass, rock, sand - so a handful
+                 * of genuinely saturated pixels per square is what gives the
+                 * eye somewhere to land, and it costs one sphere. Rare on
+                 * purpose: a meadow that is half flowers is wallpaper. */
+                if (b == 0 && r2 > 0.955f && dist < 150.0f) {
+                    static const float FC[4][3] = {
+                        { 1.30f, 1.30f, 1.20f }, { 1.25f, 0.28f, 0.36f },
+                        { 0.40f, 0.52f, 1.30f }, { 1.30f, 1.05f, 0.30f },
+                    };
+                    int fi = (int)(r0 * 4.0f) & 3;
+                    sphere(c, tip, 0.62f,
+                           mul(v3(FC[fi][0], FC[fi][1], FC[fi][2]), lit), 0.0f);
+                }
+            }
+        }
+    }
+}
+
+/* Landmarks.
+ *
+ * A world you can walk across in any direction needs somewhere to walk *to*.
+ * Terrain alone will not do it: a hill looks like the hill behind it, and
+ * without a reason to prefer one heading the sensible thing is to stand still.
+ * So the high ground carries rare, tall, obviously artificial-looking stone -
+ * spires and stacked arches - placed on a much coarser grid than the trees and
+ * built to be legible as a silhouette from a kilometre off, which is the range
+ * at which it has to do its job.
+ *
+ * Hashed out of position like everything else here, so they cost no storage
+ * and a seed always grows the same ones in the same places. The simulation
+ * does not know they exist; what they change is where a policy that likes
+ * seeing new things will choose to go. */
+static void draw_landmarks(Ctx *c, const Cp4World *w)
+{
+    (void)w;
+    const float CELL = 620.0f;
+    const float RANGE = 2200.0f;
+    int x0 = (int)floorf((c->eye.x - RANGE) / CELL);
+    int x1 = (int)floorf((c->eye.x + RANGE) / CELL);
+    int z0 = (int)floorf((c->eye.z - RANGE) / CELL);
+    int z1 = (int)floorf((c->eye.z + RANGE) / CELL);
+
+    for (int cz = z0; cz <= z1; cz++) {
+        for (int cx = x0; cx <= x1; cx++) {
+            float r0 = rhash(c->seed ^ 0x4C0Fu, cx, cz);
+            if (r0 > 0.30f) continue;
+            float r1 = rhash(c->seed ^ 0x71B3u, cx, cz);
+            float r2 = rhash(c->seed ^ 0x0D95u, cx, cz);
+            float r3 = rhash(c->seed ^ 0x5AE9u, cx, cz);
+
+            float px = ((float)cx + 0.2f + 0.6f * r1) * CELL;
+            float pz = ((float)cz + 0.2f + 0.6f * r2) * CELL;
+            float dx = px - c->eye.x, dz = pz - c->eye.z;
+            if (dx * dx + dz * dz > RANGE * RANGE) continue;
+
+            float gy = cp4_height(c->seed, px, pz);
+            /* high, dry ground - a spire in a bog is a monument to nothing */
+            float elev = -gy;
+            if (elev < 34.0f) continue;
+            {
+                float nx, ny, nz;
+                cp4_normal(c->seed, px, pz, &nx, &ny, &nz);
+                if (clampf(-ny, 0.0f, 1.0f) < 0.88f) continue;
+            }
+
+            float h = 62.0f + 88.0f * r3;
+            float tone = 0.30f + 0.14f * r1;
+            V3 rock = v3(tone * 1.10f, tone * 1.02f, tone * 0.92f);
+            V3 dark = mul(rock, 0.72f);
+
+            if (r2 < 0.55f) {
+                /* a spire: a stack that narrows and leans a little */
+                float leanx = (r1 - 0.5f) * 0.20f, leanz = (r3 - 0.5f) * 0.20f;
+                for (int t = 0; t < 9; t++) {
+                    float f = (float)t / 8.0f;
+                    sphere(c, v3(px + leanx * h * f, gy - h * f, pz + leanz * h * f),
+                           h * (0.16f - 0.115f * f), t & 1 ? rock : dark, 0.0f);
+                }
+            } else {
+                /* stacked slabs: fewer, wider, and read as put there */
+                for (int t = 0; t < 5; t++) {
+                    float f = (float)t / 4.0f;
+                    float a = r1 * 6.28f + f * 1.1f;
+                    sphere(c, v3(px + cosf(a) * h * 0.06f, gy - h * (0.10f + 0.80f * f),
+                                 pz + sinf(a) * h * 0.06f),
+                           h * (0.22f - 0.09f * f), t & 1 ? dark : rock, 0.0f);
+                }
             }
         }
     }
@@ -1861,12 +2028,20 @@ static void draw_scenery(Ctx *c, const Cp4World *w)
                              leafv * (1.00f - 0.14f * warm),
                              leafv * (0.40f - 0.13f * warm));
 
+            /* The same gust, read at the trunk. A tree leans from the crown
+             * down, so the boughs move a little and the canopy a lot. */
+            float wdx, wdz;
+            wind_dir(c, &wdx, &wdz);
+            float sway = wind_gust(c, s.x, s.z)
+                       * (0.55f + 0.45f * sinf(c->time * 1.7f + s.r1 * 6.28f));
+
             /* Trunk, then boughs. Two stacked spheres were a post: what tells
              * you a tree is a tree at fifty units is the branching, and the
              * grass blade primitive is already a tapering line in space, which
              * is exactly what a bough is. */
             V3 tb = v3(s.x, s.y, s.z);
-            V3 tt = v3(s.x, s.y - h * 0.62f, s.z);
+            V3 tt = v3(s.x + wdx * h * sway * 0.06f, s.y - h * 0.62f,
+                       s.z + wdz * h * sway * 0.06f);
             blade(c, tb, tt, h * 0.075f, mul(trunk, 0.55f), trunk);
             /* short enough to stay inside the crown: a bough that pokes out
              * past the leaves is a spike, not a branch */
@@ -1875,8 +2050,9 @@ static void draw_scenery(Ctx *c, const Cp4World *w)
                 float a = s.r2 * 6.283f + (float)t * 2.094f;
                 float fy = 0.42f + 0.20f * (float)t;
                 blade(c, v3(s.x, s.y - h * fy, s.z),
-                      v3(s.x + cosf(a) * h * lean, s.y - h * (fy + 0.28f),
-                         s.z + sinf(a) * h * lean),
+                      v3(s.x + cosf(a) * h * lean + wdx * h * sway * 0.10f,
+                         s.y - h * (fy + 0.28f),
+                         s.z + sinf(a) * h * lean + wdz * h * sway * 0.10f),
                       h * 0.038f, mul(trunk, 0.5f), trunk);
             }
 
@@ -1892,7 +2068,9 @@ static void draw_scenery(Ctx *c, const Cp4World *w)
                  * as a taper. */
                 for (int t = 0; t < 7; t++) {
                     float f = (float)t / 6.0f;
-                    sphere_ex(c, v3(s.x, s.y - h * (0.40f + 0.56f * f), s.z),
+                    float k = h * sway * 0.16f * f;
+                    sphere_ex(c, v3(s.x + wdx * k, s.y - h * (0.40f + 0.56f * f),
+                                    s.z + wdz * k),
                               h * (0.30f - 0.25f * f * f), leaf, 0.0f, bite);
                 }
             } else {
@@ -1900,14 +2078,16 @@ static void draw_scenery(Ctx *c, const Cp4World *w)
                  * equal spheres came out as a clover leaf - the sizes have to
                  * disagree or the silhouette stays a circle. */
                 float a0 = s.r2 * 6.283f;
-                sphere_ex(c, v3(s.x, s.y - h * 0.80f, s.z), h * 0.27f, leaf, 0.0f, bite);
+                float ck = h * sway * 0.17f;
+                sphere_ex(c, v3(s.x + wdx * ck, s.y - h * 0.80f, s.z + wdz * ck),
+                          h * 0.27f, leaf, 0.0f, bite);
                 for (int t = 0; t < 5; t++) {
                     float a = a0 + (float)t * 1.257f;
                     float rr = h * (0.12f + 0.10f * rhash(c->seed ^ (uint32_t)(0x91u + t),
                                                           (int)s.x, (int)s.z));
-                    sphere_ex(c, v3(s.x + cosf(a) * h * 0.25f,
+                    sphere_ex(c, v3(s.x + cosf(a) * h * 0.25f + wdx * ck * 0.85f,
                                     s.y - h * (0.64f + 0.22f * (float)(t & 1)),
-                                    s.z + sinf(a) * h * 0.25f),
+                                    s.z + sinf(a) * h * 0.25f + wdz * ck * 0.85f),
                               rr, leaf, 0.0f, bite);
                 }
             }
@@ -2368,7 +2548,12 @@ void cp4_render_styled(const Cp4World *w, uint8_t *rgba, int OW, int OH, int sty
     draw_world(&c, w);
     /* Neither belongs underground: a tree hanging in the soil three
      * units from the camera is not scenery, it is a bug with roots. */
-    if (!c.buried) { draw_scenery(&c, w); draw_cover(&c, w); draw_birds(&c, w); }
+    if (!c.buried) {
+        draw_landmarks(&c, w);
+        draw_scenery(&c, w);
+        draw_cover(&c, w);
+        draw_birds(&c, w);
+    }
     draw_nests(&c, w);
     draw_home(&c, w);
     draw_flora(&c, w);

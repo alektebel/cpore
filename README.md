@@ -422,6 +422,42 @@ They are there because a landscape with something alive in the air reads as a
 place and one without reads as a diorama, and because a flock a long way off
 is the cheapest sense of scale there is.
 
+**Wrapped light and coloured shade.** A plain Lambert terminator is a hard
+line into near-black, and near-black is where a landscape stops being a place
+and becomes a diagram. Light now wraps well past the terminator and what is
+left is filled by a blue sky dome, so the unlit side of a hill — or of a
+canopy — stays legible, stays coloured, and reads as being *in shade* rather
+than as being switched off. It is the same two terms with different numbers,
+and it changes the look more than anything else here.
+
+**Rim light**, strongest when the sun is behind what you are looking at.
+Foliage lit from behind glows at its edge because a leaf passes light; there
+are no leaves here, but the silhouette is where the facing term goes to zero
+and that is enough to put the effect where it belongs. It is what separates
+one crown from the crown behind it when both are in shade.
+
+**Wind.** The one thing a still frame cannot show and the one thing that most
+decides whether a landscape is alive — and it is not a per-blade wobble. Real
+wind arrives in gusts that cross the ground as visible bands, so a noise field
+scrolls along a fixed heading and grass, boughs and crowns all read the *same*
+field. That is what makes a gust look like one gust passing over everything
+rather than three animations happening at once. A bent blade is also a shorter
+one; leaning without losing height stretches the grass instead of pushing it
+over.
+
+**Flowers**, one tuft in a few dozen. The ground is deliberately low-chroma, so
+a handful of genuinely saturated pixels per square is what gives the eye
+somewhere to land. Rare on purpose: a meadow that is half flowers is wallpaper.
+
+**Landmarks.** A world you can walk across in any direction needs somewhere to
+walk *to*, and terrain alone will not do it — a hill looks like the hill behind
+it, and without a reason to prefer one heading the sensible thing is to stand
+still. The high ground carries rare stone spires and stacked slabs on a much
+coarser grid than the trees, built to be legible as a silhouette from a
+kilometre off, which is the range at which they have to do their job. The
+simulation does not know they exist; what they change is where a policy that
+likes seeing new things will choose to go.
+
 | ![dawn](docs/land_dawn.png) | ![dusk](docs/land_dusk.png) |
 |---|---|
 | ![savanna](docs/land_savanna.png) | ![from the air](docs/land_air.png) |
