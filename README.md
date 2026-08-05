@@ -196,16 +196,24 @@ live in their medium and eat from it:
 
 | build | evolved | ground / water / air / under | eats |
 |---|---|---|---|
-| grazer | 11/30 | 99% / 0% / 0% / 0% | 938 bushes, 786 songs |
-| predator | 23/30 | 98% / 1% / 0% / 0% | 344 carrion |
-| charmer | 15/30 | 97% / 2% / 0% / 0% | 835 bushes, 727 songs |
-| swimmer | 18/30 | 22% / 77% / 0% / 0% | 1325 kelp |
-| flyer | 8/30 | 76% / 3% / 20% / 0% | 646 bushes, 123 species found |
-| burrower | 7/30 | 26% / 1% / 0% / 71% | 447 tubers |
+| predator | 19/30 | 97% / 1% / 0% / 0% | 272 carrion |
+| charmer | 18/30 | 97% / 1% / 0% / 0% | 670 bushes, 880 songs |
+| swimmer | 15/30 | 12% / 86% / 0% / 0% | 1124 kelp |
+| flyer | 7/30 | 77% / 2% / 20% / 0% | 630 bushes, 122 species found |
+| grazer | 6/30 | 97% / 1% / 0% / 0% | 904 bushes, 797 songs |
+| burrower | 6/30 | 26% / 0% / 0% / 72% | 498 tubers, 30 hatchlings |
 
 Twelve seeds turned out to be too few to tune against — a change that only
 shuffles the RNG stream re-rolls every outcome, and I spent a while chasing
 swings that were noise. `--seeds 30` is the honest read.
+
+The last terrain rewrite moved these. Domain warping and derivative-damped
+octaves put real relief in the ground, and relief costs a grazer more than it
+costs anyone else: the grazer fell from 11/30 to 6/30 while the predator went
+23 to 19 and the charmer 15 to 18. All six archetypes still reach the goal and
+all four media still carry a population, so the spread is wider rather than
+broken — but it is a real shift, not seed noise, and the food economy has not
+been retuned for it.
 
 You can also **build a nest**. It costs energy, it banks the food you carry
 back to it, it heals you, and once the larder is full it hatches a follower
@@ -246,6 +254,54 @@ rises on its own.
 ./build/cpore_land --climate --seed 42   # what this world is made of
 ./build/cpore_land --gallery 3 --seed 11 --out gallery.png
 ```
+
+### Making the landscape worth looking at
+
+A heightfield, a sun and a fog colour will get you a picture of terrain. It
+will not get you a place. Six things, in the order they mattered:
+
+**The ground itself.** Plain fBm makes hills; it does not make *landscape*.
+`cp4_height()` warps its own domain before sampling, fades from ridged noise in
+the low octaves to plain noise in the high ones, and damps each octave by the
+accumulated gradient of the ones below it — so detail collects on flanks and
+thins out on flats, which is what erosion does without anything being eroded.
+Continental relief scales the whole thing, so an ocean basin is flat and a
+highland is not.
+
+**Aerial perspective, per channel.** Distance used to be a lerp toward one
+horizon colour, which is why every ridge past a kilometre came out the same
+flat grey. Air absorbs the ground's own colour on the way to the eye — blue
+least — and scatters sunlight into the beam along its whole length, blue away
+from the sun and warm toward it. Three extinction lengths and one phase term.
+The scale lengths are set against this world's view distance rather than a real
+atmosphere's: written long enough to be physical they do nothing over two and a
+half kilometres, and the far coast came back as a black bar.
+
+**Things standing on it.** Trees, boulders and snags hashed straight out of the
+cell they stand in — nothing stored, nothing simulated, streams with the
+unbounded world for free. Two size classes rather than one range, because a
+stand where every trunk is within a factor of two of every other reads as a
+crop. Trees stop above the snowline, which is most of what makes a mountain
+read as a mountain rather than a tall green hill.
+
+**Ambient occlusion on the terrain.** Creatures had it since stage 2 and the
+ground did not, and it showed: a gully and a ridge crest with the same normal
+were painted the same colour. Sixteen height samples on rings that grow
+quadratically, asking how much sky each point can see. The canopy is folded in
+from the same cell hash — a wood without it is a set of stickers on a lawn.
+
+**Ground cover.** The near ground was the last thing wrong, and it was wrong by
+being correct: shaded, occluded, textured, and still obviously a painted
+surface, because at ten units away a meadow is not a surface at all. Tufts of
+tapered slivers on a fine grid, following the same fertility the flora does, so
+a desert stays bare and a jungle floor is thick.
+
+**A palette that has a sky in it.** All of the above still quantised through
+`abyss`, which was mixed for a lit water column. `terra` is 48 entries with six
+steps of sky, two foliage ramps and warm rock, at 640x360.
+
+| ![savanna](docs/land_savanna.png) | ![from the air](docs/land_air.png) |
+|---|---|
 
 ## Stage 4: civilisation
 
@@ -560,18 +616,26 @@ Full version, including what is deliberately *not* being done and why, in
 
 ## Visual styles
 
-Five of them, and they are not palette swaps — internal resolution, camera
+Six of them, and they are not palette swaps — internal resolution, camera
 scale, dither strength, background value structure and outline treatment all
-move together. `--vis NAME`, or `CporeEnv(vis="c64")` from python. Default is
-`abyss`.
+move together. `--vis NAME`, or `CporeEnv(vis="c64")` from python. Stages 1
+and 2 default to `abyss`; the land stage defaults to `terra`.
 
 | style | resolution | colours | look |
 | --- | --- | --- | --- |
+| `terra` | 640x360 | 48 | daylight land: a six-step sky, two foliage ramps, warm rock |
 | `petri` | 320x180 | 16 | cream paper, ink outlines, muted pigment — the only one with an inverted value structure |
 | `abyss` | 320x180 | 32 | deep water, dithered gradient, dark keylines |
 | `neon` | 320x180 | 16 | near-black void, saturated arcade colour, outlines brighter than fills |
 | `c64` | 160x90 | 16 | the actual Commodore 64 hardware palette, flat field, black keylines |
 | `dmg` | 160x90 | 4 | original Game Boy greens, and nothing else |
+
+`terra` exists because `abyss` was mixed for a lit water column: seven blues,
+five greens and no sky at all. Every land frame drawn with it spent its sky on
+the cyan ramp and its distance on the two neutrals, which is why the first
+landscapes ended in a grey wall. It is also the only style at 640x360 — one
+animal against open water reads fine at 320x180, but a landscape is ridgelines
+and treelines, and those are the first thing to dissolve.
 
 ![petri](docs/hero.png)
 ![c64](docs/style_c64.png)

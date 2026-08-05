@@ -718,6 +718,53 @@ static const uint8_t PAL_C64[16][3] = {
     {120,120,120}, {148,224,137}, {120,105,196}, {159,159,159},
 };
 
+/* Daylight land. The abyss palette was mixed for a lit water column: it has
+ * seven blues, five greens and no sky at all, so every land frame drawn with
+ * it spent its sky on the cyan ramp and its distance on the two neutrals -
+ * which is exactly why the first landscapes ended in a grey wall.
+ *
+ * This one is mixed the other way round. Sky gets six steps because the sky
+ * is half the frame; foliage gets nine across two ramps because a forest that
+ * is one green is a green wall; rock and earth get warm neutrals so slopes
+ * read as ground rather than as shadow. The creature ramps at the end are the
+ * abyss entries kept deliberately close, so a genome's colours survive the
+ * move between stages and an animal does not change species when it walks
+ * out of the sea. */
+static const uint8_t PAL_TERRA[48][3] = {
+    /* sky: zenith to horizon, the six steps aerial perspective walks along */
+    { 38, 62,120}, { 54, 94,160}, { 82,134,196}, {124,176,224},
+    {172,208,238}, {214,232,246},
+    /* cloud and specular */
+    {244,248,252}, {255,255,255},
+    /* night: the sky at the other end of the day, plus a value below it for
+     * silhouette and outline */
+    {  8, 10, 24}, { 18, 24, 50}, { 34, 46, 84},
+    /* water, from a shaded deep to a lit shallow */
+    { 12, 38, 58}, { 20, 62, 92}, { 34, 98,134}, { 60,142,174}, {112,192,212},
+    /* foliage: the shadowed half of every canopy */
+    { 14, 34, 24}, { 24, 58, 36}, { 36, 84, 46}, { 54,116, 58}, { 82,152, 74},
+    /* grass and lit leaves: the other half */
+    {106,172, 78}, {140,198, 96}, {180,220,120}, {214,238,158},
+    /* rock and earth, warm rather than neutral so a cliff is not a shadow */
+    { 30, 26, 24}, { 54, 46, 40}, { 84, 72, 62}, {118,104, 90},
+    {154,140,122}, {192,182,166},
+    /* sand and dry ground */
+    { 96, 62, 36}, {150,104, 60}, {202,160,104}, {238,212,158},
+    /* creature warm */
+    {132, 40, 28}, {198, 76, 40}, {240,140, 72},
+    /* creature rose */
+    {120, 34, 70}, {188, 62,112}, {234,132,170},
+    /* creature cyan: the player reads as this against every biome */
+    { 26, 90,100}, { 52,152,164}, {122,214,220},
+    /* Creature violet. Kept deliberately low in green: written as a softer
+     * blue-violet these two sat right on top of the sky ramp in luma, won a
+     * band of horizon pixels off it, and drew a mauve seam along the join
+     * between sea and sky. */
+    { 66, 44,124}, {114, 76,186},
+    /* snow and ice */
+    {206,222,236}, {238,246,252},
+};
+
 static const Vis VIS[CP_VIS_COUNT] = {
     { "abyss", PAL_ABYSS, 32, 320, 180, 0.30f, 26.0f, 0,
       {0.02f,0.05f,0.08f},
@@ -751,6 +798,18 @@ static const Vis VIS[CP_VIS_COUNT] = {
       {0.251f,0.192f,0.553f}, {0.251f,0.192f,0.553f}, 0.42f, {0.40f,0.71f,0.74f},
       {0.0f,0.0f,0.0f}, {0.58f,0.88f,0.54f}, {0.47f,0.47f,0.47f},
       {0.0f,0.0f,0.0f} },
+
+    /* Twice the linear resolution of the others, which is a deliberate change
+     * of subject rather than a change of mind about pixel art: the aquatic
+     * stage is one animal against open water and reads fine at 320x180, but a
+     * landscape is ridgelines and treelines and those are the first thing to
+     * dissolve. Dither is lower to match - with 48 colours a ramp no longer
+     * needs to be woven so hard to stay smooth. */
+    { "terra", PAL_TERRA, 48, 640, 360, 0.30f, 16.0f, 0,
+      {0.05f,0.06f,0.09f},
+      {0.149f,0.243f,0.471f}, {0.675f,0.816f,0.933f}, 0.10f, {0.46f,0.41f,0.35f},
+      {0.05f,0.06f,0.05f}, {0.84f,0.93f,0.62f}, {0.55f,0.62f,0.50f},
+      {0.02f,0.03f,0.02f} },
 };
 
 const char *cp_vis_name(int style)

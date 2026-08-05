@@ -33,9 +33,12 @@ GEN_BUDGET = (30, 55, 85, 125)
 STATUS = ("running", "dead", "evolved", "timeout")
 
 # render styles; index == the CP_VIS_* enum value
-VIS_STYLES = ("abyss", "dmg", "neon", "petri", "c64")
+VIS_STYLES = ("abyss", "dmg", "neon", "petri", "c64", "terra")
 VIS = {n: i for i, n in enumerate(VIS_STYLES)}
 DEFAULT_VIS = "abyss"
+# The land stage renders through its own palette at twice the resolution;
+# the water palette has no sky in it.
+LAND_VIS = "terra"
 
 # angle units: 0..255 clockwise from the front of the cell
 FRONT, RIGHT, BACK, LEFT = 0, 64, 128, 192
@@ -561,7 +564,7 @@ class LandEnv:
     metadata = {"render_modes": ["rgb_array"]}
 
     def __init__(self, seed: int = 0, genome=None, render_size=(1280, 720),
-                 vis=DEFAULT_VIS):
+                 vis=LAND_VIS):
         self._lib = _bind_land(lib())
         self.obs_dim = int(self._lib.cp4_env_obs_dim())
         self.act_dim = int(self._lib.cp4_env_act_dim())

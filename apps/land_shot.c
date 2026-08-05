@@ -14,7 +14,7 @@
 int main(int argc, char **argv)
 {
     uint32_t seed = 5;
-    int steps = 3000, W = 1280, H = 720, every = 0, vis = CP_VIS_ABYSS, gallery = 0, table = 0,
+    int steps = 3000, W = 1280, H = 720, every = 0, vis = CP_VIS_TERRA, gallery = 0, table = 0,
         climate = 0, nseeds = 12;
     const char *out = "land.png";
     Cp4Genome g;

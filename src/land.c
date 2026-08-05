@@ -67,6 +67,77 @@ static float vnoise(uint32_t seed, float x, float z)
     return (a + (b - a) * u) + ((c + (d - c) * u) - (a + (b - a) * u)) * v;
 }
 
+/* Value noise that also returns its own gradient.
+ *
+ * The gradient is the whole point. Plain fBm can only make rounded lumps
+ * however many octaves it gets, because every octave is added blindly. Knowing
+ * the slope the earlier octaves have already produced lets the later ones be
+ * damped where the ground is steep and left alone where it is flat - and that
+ * one feedback term is what makes a procedural landscape read as eroded, with
+ * crests that stay sharp and basins that fill in, without simulating erosion
+ * or storing a single byte of it. */
+static float vnoise_d(uint32_t seed, float x, float z, float *ddx, float *ddz)
+{
+    float fx = floorf(x), fz = floorf(z);
+    int xi = (int)fx, zi = (int)fz;
+    float u = x - fx, v = z - fz;
+    /* smoothstep and its derivative; quintic would be smoother but 6t(1-t) is
+     * continuous enough for terrain and a good deal cheaper */
+    float su = u * u * (3.0f - 2.0f * u), du = 6.0f * u * (1.0f - u);
+    float sv = v * v * (3.0f - 2.0f * v), dv = 6.0f * v * (1.0f - v);
+    float a = hash2(seed, xi, zi),     b = hash2(seed, xi + 1, zi);
+    float c = hash2(seed, xi, zi + 1), d = hash2(seed, xi + 1, zi + 1);
+    float k0 = a, k1 = b - a, k2 = c - a, k3 = a - b - c + d;
+    *ddx = (k1 + k3 * sv) * du;
+    *ddz = (k2 + k3 * su) * dv;
+    return k0 + k1 * su + k2 * sv + k3 * su * sv;
+}
+
+/* Mountains.
+ *
+ * Three techniques stacked, each doing a job plain fBm cannot:
+ *
+ *   ridged        1 - |2n - 1| creases the field at its midpoint, turning
+ *                 rounded humps into crests and arêtes
+ *   domain warp   the field is sampled at a position that has itself been
+ *                 displaced by noise, so nothing looks like the same blob
+ *                 repeated at three sizes
+ *   derivative    each octave is damped by the slope the previous ones have
+ *   damping       already built up, so steep faces stop accumulating detail
+ *                 and flat ground keeps it - valleys and talus for free
+ *
+ * The first octaves are ridged and the last are plain, because real ground is
+ * sharp at the scale of a mountain range and rounded at the scale of a hill. */
+static float terrain_fbm(uint32_t seed, float x, float z)
+{
+    float sum = 0.0f, amp = 1.0f, freq = 1.0f, norm = 0.0f;
+    float gx = 0.0f, gz = 0.0f;
+
+    for (int i = 0; i < 6; i++) {
+        float dx, dz;
+        float n = vnoise_d(seed ^ ((uint32_t)i * 0x9E3779B1u), x * freq, z * freq, &dx, &dz);
+
+        /* ridged early, plain late */
+        float ridge = 1.0f - (float)i / 5.0f;
+        float t = 2.0f * n - 1.0f;
+        float r = 1.0f - fabsf(t);
+        float dsign = t < 0.0f ? 2.0f : -2.0f;
+        float val = n + (r - n) * ridge;
+        float vdx = dx + (dsign * dx - dx) * ridge;
+        float vdz = dz + (dsign * dz - dz) * ridge;
+
+        float damp = 1.0f / (1.0f + 5.5f * (gx * gx + gz * gz));
+        sum  += amp * val * damp;
+        norm += amp;
+        gx += vdx * freq * amp;
+        gz += vdz * freq * amp;
+
+        amp *= 0.52f;
+        freq *= 2.03f;      /* not exactly 2, so octaves never line up */
+    }
+    return sum / norm - 0.42f;
+}
+
 /* Returns the ground's y coordinate, and y grows *downward* exactly as it did
  * in stage 2 where it meant depth. Keeping the axis pointing the same way in
  * both stages is what lets the stage-2 camera basis, lighting and sphere
@@ -75,16 +146,27 @@ static float vnoise(uint32_t seed, float x, float z)
 float cp4_height(uint32_t seed, float x, float z)
 {
     /* Continental scale, and the reason the world has coastlines rather than a
-     * puddle. One very low-frequency field decides land from sea; the hills
-     * ride on top of it. Roughly a third of the world ends up flooded, in
-     * bodies thousands of units across, which is what makes fins a way to live
-     * somewhere rather than a way to cross a pond. */
+     * puddle. One very low-frequency field decides land from sea; the
+     * mountains ride on top of it. Roughly a third of the world ends up
+     * flooded, in bodies thousands of units across, which is what makes fins a
+     * way to live somewhere rather than a way to cross a pond. */
     float cont = vnoise(seed ^ 0xC0DEu, x * 0.00042f, z * 0.00042f);
-
     float e = (cont - 0.42f) * 300.0f;    /* elevation, up-positive */
-    e += (vnoise(seed,        x * 0.0018f, z * 0.0018f) - 0.5f) * 90.0f;
-    e += (vnoise(seed ^ 0x9E, x * 0.0055f, z * 0.0055f) - 0.5f) * 34.0f;
-    e += (vnoise(seed ^ 0x51, x * 0.0160f, z * 0.0160f) - 0.5f) * 11.0f;
+
+    /* Domain warp. Sampling the mountains at a position that has been pushed
+     * around by another noise field is the cheapest way to stop a landscape
+     * looking like it was assembled out of one shape at three sizes. */
+    float wx, wz;
+    {
+        float sx = x * 0.00075f, sz = z * 0.00075f;
+        wx = x + (vnoise(seed ^ 0x51A7u, sx, sz) - 0.5f) * 420.0f;
+        wz = z + (vnoise(seed ^ 0x2C39u, sx, sz) - 0.5f) * 420.0f;
+    }
+
+    /* Amplitude follows the continent: an ocean floor is flatter than a
+     * mountain range, and a coastal plain flatter than an interior. */
+    float relief = 0.35f + 0.85f * clampf((cont - 0.30f) * 2.2f, 0.0f, 1.0f);
+    e += terrain_fbm(seed, wx * 0.0021f, wz * 0.0021f) * 235.0f * relief;
     return -e;
 }
 
