@@ -40,7 +40,9 @@ typedef struct {
     uint32_t seed;
     float    time;
     V3       sun;        /* where the light comes from this frame */
+    V3       sunc;       /* and what colour it is - a low sun is not white */
     float    day;        /* 0 at midnight, 1 at noon */
+    float    mist;       /* how much haze is lying in the low ground        */
     /* Where the camera itself is. The stage has four media and three of them
      * look nothing like standing on a hill, so the background, the fog colour
      * and the fog distance all switch on these. */
@@ -61,6 +63,26 @@ static V3 sun_dir(int32_t step)
     return norm(d);
 }
 
+/* What colour the sun is, from how high it is.
+ *
+ * A constant warm white is the single most expensive simplification in a
+ * daylight renderer: it means noon and the last ten minutes before dusk are
+ * the same picture at different brightnesses, and the last ten minutes before
+ * dusk are the reason anyone photographs landscapes at all. Sunlight reddens
+ * as it goes because a long path through air scatters the blue out of it -
+ * which the aerial perspective term is already modelling in the other
+ * direction, into the beam. This is the same physics seen from the sun's end,
+ * and one lerp buys the whole golden hour. */
+static V3 sun_colour(V3 sun)
+{
+    float el = clampf(sun.y, 0.0f, 1.0f);         /* 1 = overhead */
+    float t = clampf(el / 0.55f, 0.0f, 1.0f);
+    t = t * t * (3.0f - 2.0f * t);
+    V3 low  = v3(1.30f, 0.46f, 0.16f);
+    V3 high = v3(1.00f, 0.96f, 0.88f);
+    return v3(mixf(low.x, high.x, t), mixf(low.y, high.y, t), mixf(low.z, high.z, t));
+}
+
 static inline void put(Ctx *c, int x, int y, V3 col)
 {
     uint8_t *p = c->fb + 4 * ((size_t)y * c->W + x);
@@ -74,7 +96,18 @@ static inline void put(Ctx *c, int x, int y, V3 col)
 
 static float rhash(uint32_t s, int x, int z)
 {
-    uint32_t h = s ^ (uint32_t)(x * 374761393) ^ (uint32_t)(z * 668265263);
+    /* unsigned throughout: signed overflow here is undefined, and with a
+     * loop counter for x the compiler is entitled to notice */
+    uint32_t h = s ^ ((uint32_t)x * 374761393u) ^ ((uint32_t)z * 668265263u);
+    h = (h ^ (h >> 13)) * 1274126177u;
+    h ^= h >> 16;
+    return (float)(h & 0xFFFFu) / 65535.0f;
+}
+
+static float rhash3(uint32_t s, int x, int y, int z)
+{
+    uint32_t h = s ^ ((uint32_t)x * 374761393u) ^ ((uint32_t)y * 2246822519u)
+                   ^ ((uint32_t)z * 668265263u);
     h = (h ^ (h >> 13)) * 1274126177u;
     h ^= h >> 16;
     return (float)(h & 0xFFFFu) / 65535.0f;
@@ -276,9 +309,49 @@ static V3 aerial(const Ctx *c, V3 col, float dist, V3 ray)
 
     /* how much light has been scattered into the beam by this distance */
     float sr = 1.0f - tr, sg = 1.0f - tg, sb = 1.0f - tb;
-    return v3(col.x * tr + sc.x * sr,
-              col.y * tg + sc.y * sg,
-              col.z * tb + sc.z * sb);
+    V3 out = v3(col.x * tr + sc.x * sr,
+                col.y * tg + sc.y * sg,
+                col.z * tb + sc.z * sb);
+
+    /* Ground mist, integrated in closed form.
+     *
+     * Aerial perspective above is uniform: it makes distance blue but it makes
+     * a valley floor and the ridge above it equally blue, so the landscape
+     * flattens into layers of the same wash. Mist is the opposite - it has a
+     * scale height, it pools in the low ground, and it is what separates one
+     * ridge from the next at dawn. Density falling exponentially with altitude
+     * integrates along a straight ray exactly, so there is nothing to march:
+     *
+     *     rho(t) = D exp(-k a(t)),  a(t) = a0 - ray.y t
+     *     tau    = D exp(-k a0) (exp(k ray.y d) - 1) / (k ray.y)
+     *
+     * One exp and a divide for something a ray marcher would charge fifty
+     * samples for. */
+    if (c->mist > 0.0f) {
+        const float K = 1.0f / 46.0f;      /* scale height, in world units */
+        float a0 = -(c->eye.y + CP4_SEA);  /* altitude above the waterline */
+        float D = 0.0024f * c->mist;
+        float ky = K * ray.y;
+        float base = D * expf(-K * a0);
+        float tau;
+        if (ky > 1e-4f || ky < -1e-4f) tau = base * (expf(ky * dist) - 1.0f) / ky;
+        else                           tau = base * dist;
+        if (tau > 6.0f) tau = 6.0f;
+        /* Never all the way. A mist that reaches 1 erases the horizon, and an
+         * erased horizon is not atmosphere, it is a blank page - the first
+         * tuning washed a whole dawn to one flat tan. */
+        float f = (1.0f - expf(-tau)) * 0.86f;
+        /* the mist is lit by the sun it is standing in, which is why a valley
+         * full of it at dawn is orange on one side and blue on the other */
+        float toward = clampf(dot(ray, tosun), 0.0f, 1.0f);
+        V3 lit_m = v3(0.58f + 0.60f * toward, 0.66f + 0.40f * toward,
+                      0.86f + 0.08f * toward);
+        float amb = 0.16f + 0.84f * c->day;
+        lit_m = mul(lit_m, amb);
+        out = v3(mixf(out.x, lit_m.x, f), mixf(out.y, lit_m.y, f),
+                 mixf(out.z, lit_m.z, f));
+    }
+    return out;
 }
 
 /* ---------------- terrain ---------------- */
@@ -741,8 +814,38 @@ static void draw_world(Ctx *c, const Cp4World *w)
                 float rz = (sinf(q.z * 0.052f - c->time * 1.4f) * 0.045f
                          + cosf((q.x - q.z) * 0.028f + c->time * 0.9f) * 0.030f) * ramp;
                 V3 n = norm(v3(rx, -1.0f, rz));
-                V3 refl = sub(ray, mul(n, 2.0f * dot(ray, n)));
-                V3 sky = sky_col(c, norm(refl));
+                V3 refl = norm(sub(ray, mul(n, 2.0f * dot(ray, n))));
+                V3 sky = sky_col(c, refl);
+
+                /* What the water is actually looking at.
+                 *
+                 * Reflecting the sky alone is right in the middle of a lake
+                 * and wrong everywhere near a shore, which is where most of
+                 * the water in this world is: a bay under a headland reflects
+                 * the headland, and without it the cliff appears to stand on a
+                 * sheet of sky. A short march up the reflected ray is enough -
+                 * anything further away is at a grazing angle and the sky term
+                 * wins anyway. */
+                if (refl.y < -0.004f && tw < 700.0f) {
+                    float rt = 0.0f;
+                    if (terrain_march(c, q, refl, 420.0f, &rt)) {
+                        V3 rq = add(q, mul(refl, rt));
+                        float rnx, rny, rnz;
+                        cp4_normal(c->seed, rq.x, rq.z, &rnx, &rny, &rnz);
+                        V3 ralb = ground_albedo(c, rq, clampf(-rny, 0.0f, 1.0f), tw + rt);
+                        float rlam = clampf(-(rnx * sun.x + rny * sun.y + rnz * sun.z),
+                                            0.0f, 1.0f);
+                        float rk = 0.22f + 0.95f * rlam * (0.12f + 0.88f * c->day);
+                        V3 rc = v3(ralb.x * rk * c->sunc.x, ralb.y * rk * c->sunc.y,
+                                   ralb.z * rk * c->sunc.z);
+                        rc = aerial(c, rc, tw + rt, refl);
+                        /* the reflection fades out with how far up the ray it
+                         * was found, which is also how much air is in the way */
+                        float k2 = clampf(1.0f - rt / 420.0f, 0.0f, 1.0f);
+                        sky = v3(mixf(sky.x, rc.x, k2), mixf(sky.y, rc.y, k2),
+                                 mixf(sky.z, rc.z, k2));
+                    }
+                }
 
                 /* depth of water at this point tints what shows through */
                 float depth = clampf(wdepth, 0.0f, 90.0f);
@@ -757,7 +860,7 @@ static void draw_world(Ctx *c, const Cp4World *w)
                 col = v3(mixf(deep.x, sky.x, f), mixf(deep.y, sky.y, f),
                          mixf(deep.z, sky.z, f));
                 float spec = powf(clampf(dot(norm(refl), tosun), 0.0f, 1.0f), 90.0f);
-                col = add(col, mul(v3(1.0f, 0.94f, 0.78f), spec * 1.6f));
+                col = add(col, mul(c->sunc, spec * 1.6f));
 
                 /* Surf. A coastline drawn as a plane meeting a slope is a
                  * clean geometric edge, and a clean edge is the one thing no
@@ -818,11 +921,28 @@ static void draw_world(Ctx *c, const Cp4World *w)
                 float ao = tg < 620.0f ? terrain_ao(c, q, n) : 1.0f;
                 ao *= 1.0f - 0.55f * canopy;
                 sh *= 1.0f - 0.62f * canopy;
+                /* Cloud shadow. The clouds are already a field on a plane
+                 * overhead; casting them down the sun vector onto the ground
+                 * costs one more sample of a field the sky is sampling anyway,
+                 * and it is the cheapest large-scale variation a landscape can
+                 * have - hills lit and unlit in slow patches, which is most of
+                 * what makes real country look like it has weather over it. */
+                {
+                    float drop = -tosun.y < 0.12f ? 0.12f : -tosun.y;
+                    float t2 = (q.y + 560.0f) / drop;
+                    if (t2 > 3000.0f) t2 = 3000.0f;
+                    float hx = q.x + tosun.x * t2, hz = q.z + tosun.z * t2;
+                    float drift = c->time * 3.5f;
+                    float f2 = fbm2(c->seed ^ 0xBEEFu, (hx + drift) * 0.0011f,
+                                    hz * 0.0011f);
+                    float cov = clampf((f2 - 0.60f) * 4.2f, 0.0f, 1.0f);
+                    sh *= 1.0f - 0.62f * cov;
+                }
                 /* sky light lands on what faces up; a warm bounce comes back
                  * off everything else */
                 float skyamt = clampf(slope, 0.0f, 1.0f);
                 float night = 1.0f - c->day;
-                V3 lightv = add(add(mul(v3(1.00f, 0.94f, 0.80f),
+                V3 lightv = add(add(mul(c->sunc,
                                         1.00f * lam * sh * (0.10f + 0.90f * c->day)
                                         * (0.55f + 0.45f * ao)),
                                     mul(v3(0.30f, 0.40f, 0.60f),
@@ -1214,7 +1334,7 @@ static void shade_hit(Ctx *c, int x, int y, V3 nrm, V3 albedo, float em, float v
         return;
     }
 
-    V3 sunc = v3(1.00f, 0.95f, 0.82f);
+    V3 sunc = c->sunc;
     V3 skyc = c->day > 0.4f ? v3(0.66f, 0.80f, 1.00f) : v3(0.46f, 0.56f, 0.96f);
     V3 bncc = v3(0.78f, 0.70f, 0.46f);
     V3 col = add(add(mul(v3(albedo.x * sunc.x, albedo.y * sunc.y, albedo.z * sunc.z), key),
@@ -1289,7 +1409,20 @@ static void march_creature(Ctx *c, const Prim *pr, int n, V3 centre, float bound
 
 /* ---------------- sphere impostors (everything far away) ---------------- */
 
-static void sphere(Ctx *c, V3 wp, float rad, V3 albedo, float emissive)
+/* A sphere impostor, optionally with its silhouette eaten away.
+ *
+ * `bite` is the whole difference between a tree and a lollipop. A canopy has
+ * no outline - it has a few thousand leaves whose collective edge is ragged at
+ * every scale - and a circle reads as plastic no matter what colour it is
+ * painted. Chewing the rim with a hash of the *world-space* surface point,
+ * quantised to a fraction of the radius, breaks the outline into chunks that
+ * stay put while the camera moves, which is the part that matters: erode in
+ * screen space and the foliage boils.
+ *
+ * Only the rim is touched. Eating into the body as well would open holes in
+ * the middle of the crown and the tree would read as a cloud of peas. */
+static void sphere_ex(Ctx *c, V3 wp, float rad, V3 albedo, float emissive,
+                      float bite)
 {
     V3 d = sub(wp, c->eye);
     float vz = dot(d, c->fwd);
@@ -1320,6 +1453,17 @@ static void sphere(Ctx *c, V3 wp, float rad, V3 albedo, float emissive)
             float d2 = nx * nx + ny * ny;
             if (d2 > 1.0f) continue;
             float nz = sqrtf(1.0f - d2);
+            if (bite > 0.0f && d2 > 0.30f) {
+                V3 sp = add(c->right, c->up);   /* placeholder, replaced below */
+                (void)sp;
+                V3 nrm0 = add(add(mul(c->right, nx), mul(c->up, -ny)), mul(c->fwd, -nz));
+                V3 wsp = add(wp, mul(nrm0, rad));
+                float k = 2.6f / rad;
+                float e = rhash3(c->seed ^ 0x51EDu, (int)floorf(wsp.x * k),
+                                 (int)floorf(wsp.y * k), (int)floorf(wsp.z * k));
+                float lim = 1.0f - bite * e;
+                if (d2 > lim) continue;
+            }
             float z = vz - rad * nz;
             float *zp = &c->zb[(size_t)y * c->W + x];
             if (z >= *zp) continue;
@@ -1346,6 +1490,11 @@ static void sphere(Ctx *c, V3 wp, float rad, V3 albedo, float emissive)
             put(c, x, y, aerial(c, col, z, vray));
         }
     }
+}
+
+static void sphere(Ctx *c, V3 wp, float rad, V3 albedo, float emissive)
+{
+    sphere_ex(c, wp, rad, albedo, emissive, 0.0f);
 }
 
 static void impostor_creature(Ctx *c, const Prim *pr, int n)
@@ -1433,11 +1582,11 @@ static void draw_flora(Ctx *c, const Cp4World *w)
             V3 leaf = v3(0.14f + 0.14f * tint, 0.34f + 0.20f * tint, 0.13f + 0.08f * tint);
             sphere(c, v3(at.x, at.y - h * 0.30f, at.z), f->r * 0.22f,
                    v3(0.32f, 0.24f, 0.16f), 0.0f);
-            sphere(c, v3(at.x, at.y - h, at.z), f->r * 0.80f, leaf, 0.0f);
-            sphere(c, v3(at.x + f->r * 0.55f, at.y - h * 0.72f, at.z + f->r * 0.20f),
-                   f->r * 0.52f, leaf, 0.0f);
-            sphere(c, v3(at.x - f->r * 0.44f, at.y - h * 0.66f, at.z - f->r * 0.40f),
-                   f->r * 0.48f, leaf, 0.0f);
+            sphere_ex(c, v3(at.x, at.y - h, at.z), f->r * 0.80f, leaf, 0.0f, 0.40f);
+            sphere_ex(c, v3(at.x + f->r * 0.55f, at.y - h * 0.72f, at.z + f->r * 0.20f),
+                      f->r * 0.52f, leaf, 0.0f, 0.40f);
+            sphere_ex(c, v3(at.x - f->r * 0.44f, at.y - h * 0.66f, at.z - f->r * 0.40f),
+                      f->r * 0.48f, leaf, 0.0f, 0.40f);
         } else {
             V3 meat = v3(0.56f, 0.22f, 0.20f);
             sphere(c, v3(at.x, at.y - f->r * 0.45f, at.z), f->r * 0.62f, meat, 0.0f);
@@ -1584,6 +1733,67 @@ static void draw_cover(Ctx *c, const Cp4World *w)
     }
 }
 
+/* Birds.
+ *
+ * Nothing in the simulation knows about them and nothing ever will - they are
+ * not food, not rivals, not obstacles. They are here because a landscape with
+ * something alive in the air reads as a place and one without reads as a
+ * diorama, and because a flock a long way off is the cheapest sense of scale
+ * there is: you know how big the hill is because you know how big the birds
+ * are not.
+ *
+ * A flock, not a scatter. They share a drifting centre and each bird keeps its
+ * own offset and its own wingbeat phase, which is enough to read as a flock
+ * without anything resembling flocking. */
+static void draw_birds(Ctx *c, const Cp4World *w)
+{
+    if (c->buried || c->submerged) return;
+    if (c->day < 0.25f) return;                  /* they roost */
+
+    const int N = 13;
+    /* the flock's own slow circuit, anchored to a cell of the world so it does
+     * not follow the player around */
+    float ax = floorf(c->eye.x / 1400.0f) * 1400.0f;
+    float az = floorf(c->eye.z / 1400.0f) * 1400.0f;
+    float r0 = rhash(c->seed ^ 0x8A21u, (int)(ax / 1400.0f), (int)(az / 1400.0f));
+    float t = c->time * 0.055f + r0 * 6.28f;
+    float cx = ax + 700.0f + cosf(t) * 320.0f;
+    float cz = az + 700.0f + sinf(t * 0.87f) * 320.0f;
+    float cy = cp4_height(c->seed, cx, cz) - 150.0f - 90.0f * r0;
+
+    V3 dark = v3(0.05f, 0.05f, 0.06f);
+    for (int i = 0; i < N; i++) {
+        float h1 = rhash(c->seed ^ 0x3B77u, i, 0);
+        float h2 = rhash(c->seed ^ 0x3B77u, i, 1);
+        float h3 = rhash(c->seed ^ 0x3B77u, i, 2);
+        float bx = cx + (h1 - 0.5f) * 170.0f;
+        float bz = cz + (h2 - 0.5f) * 170.0f;
+        float by = cy + (h3 - 0.5f) * 60.0f;
+
+        float d = sqrtf((bx - c->eye.x) * (bx - c->eye.x)
+                      + (bz - c->eye.z) * (bz - c->eye.z));
+        if (d > 1400.0f) continue;
+        /* span grows with distance so they never vanish into one pixel and
+         * never become gulls the size of a tree */
+        float span = 2.2f + d * 0.0075f;
+        float flap = sinf(c->time * 7.5f + h1 * 6.28f) * 0.55f;
+        /* heading: the tangent of the flock's circuit */
+        float hd = t + 1.5708f;
+        float fx = cosf(hd), fz = sinf(hd);
+        float wxd = -fz, wzd = fx;
+
+        V3 body = v3(bx, by, bz);
+        V3 tipl = v3(bx - wxd * span - fx * span * 0.25f,
+                     by - flap * span * 0.7f,
+                     bz - wzd * span - fz * span * 0.25f);
+        V3 tipr = v3(bx + wxd * span - fx * span * 0.25f,
+                     by - flap * span * 0.7f,
+                     bz + wzd * span - fz * span * 0.25f);
+        blade(c, body, tipl, span * 0.16f, dark, dark);
+        blade(c, body, tipr, span * 0.16f, dark, dark);
+    }
+}
+
 /* Scenery.
  *
  * Trees, boulders and snags, hashed straight out of the cell they stand in.
@@ -1633,38 +1843,72 @@ static void draw_scenery(Ctx *c, const Cp4World *w)
             V3 trunk = v3(bark * 1.35f, bark * 1.00f, bark * 0.62f);
             float leafv = 0.26f + 0.30f * s.r2;
             float warm = rhash(c->seed ^ 0x4B93u, (int)s.x, (int)s.z);     /* autumn dice */
-            V3 leaf = s.biome == CP4_BIOME_JUNGLE
+            /* Needles are needles wherever they grow. Keyed on the biome
+             * alone, a conifer standing in tundra picked up the deciduous
+             * autumn dice and came out tan - a stack of orange cones, which is
+             * not a tree of any kind. */
+            V3 leaf = s.kind == SCEN_CONIFER
+                        ? v3(leafv * 0.34f, leafv * 0.72f, leafv * 0.52f)
+                    : s.biome == CP4_BIOME_JUNGLE
                         ? v3(leafv * 0.38f, leafv * 1.05f, leafv * 0.36f)
                     : s.biome == CP4_BIOME_TAIGA
                         ? v3(leafv * 0.36f, leafv * 0.74f, leafv * 0.54f)
-                        : v3(leafv * (0.48f + 0.85f * warm * warm),
-                             leafv * (1.00f - 0.18f * warm),
-                             leafv * (0.40f - 0.16f * warm));
+                        /* Autumn, and rare. Squared, one broadleaf in three
+                         * came out orange and the wood read as a permanent
+                         * October; cubed it is a few trees turning early,
+                         * which is what the colour is for. */
+                        : v3(leafv * (0.50f + 0.62f * warm * warm * warm),
+                             leafv * (1.00f - 0.14f * warm),
+                             leafv * (0.40f - 0.13f * warm));
 
-            sphere(c, v3(s.x, s.y - h * 0.30f, s.z), h * 0.075f, trunk, 0.0f);
-            sphere(c, v3(s.x, s.y - h * 0.62f, s.z), h * 0.060f, trunk, 0.0f);
+            /* Trunk, then boughs. Two stacked spheres were a post: what tells
+             * you a tree is a tree at fifty units is the branching, and the
+             * grass blade primitive is already a tapering line in space, which
+             * is exactly what a bough is. */
+            V3 tb = v3(s.x, s.y, s.z);
+            V3 tt = v3(s.x, s.y - h * 0.62f, s.z);
+            blade(c, tb, tt, h * 0.075f, mul(trunk, 0.55f), trunk);
+            /* short enough to stay inside the crown: a bough that pokes out
+             * past the leaves is a spike, not a branch */
+            float lean = s.kind == SCEN_CONIFER ? 0.12f : 0.24f;
+            for (int t = 0; t < 3; t++) {
+                float a = s.r2 * 6.283f + (float)t * 2.094f;
+                float fy = 0.42f + 0.20f * (float)t;
+                blade(c, v3(s.x, s.y - h * fy, s.z),
+                      v3(s.x + cosf(a) * h * lean, s.y - h * (fy + 0.28f),
+                         s.z + sinf(a) * h * lean),
+                      h * 0.038f, mul(trunk, 0.5f), trunk);
+            }
+
+            /* How much of each crown lobe's rim gets chewed off. Conifers keep
+             * a tighter outline than broadleaves, which is most of the
+             * difference between the two at any distance worth drawing. */
+            float bite = s.kind == SCEN_CONIFER ? 0.34f : 0.46f;
 
             if (s.kind == SCEN_CONIFER) {
                 /* conifer: a stack of narrowing tiers */
-                for (int t = 0; t < 5; t++) {
-                    float f = (float)t / 4.0f;
-                    sphere(c, v3(s.x, s.y - h * (0.46f + 0.52f * f), s.z),
-                           h * (0.31f - 0.24f * f), leaf, 0.0f);
+                /* Seven tiers, not five. With five the steps between them are
+                 * wide enough to read as bands on a spinning top rather than
+                 * as a taper. */
+                for (int t = 0; t < 7; t++) {
+                    float f = (float)t / 6.0f;
+                    sphere_ex(c, v3(s.x, s.y - h * (0.40f + 0.56f * f), s.z),
+                              h * (0.30f - 0.25f * f * f), leaf, 0.0f, bite);
                 }
             } else {
                 /* Broadleaf: a big lobe with smaller ones hung off it. Three
                  * equal spheres came out as a clover leaf - the sizes have to
                  * disagree or the silhouette stays a circle. */
                 float a0 = s.r2 * 6.283f;
-                sphere(c, v3(s.x, s.y - h * 0.80f, s.z), h * 0.27f, leaf, 0.0f);
-                for (int t = 0; t < 4; t++) {
-                    float a = a0 + (float)t * 1.571f;
-                    float rr = h * (0.13f + 0.09f * rhash(c->seed ^ (uint32_t)(0x91u + t),
+                sphere_ex(c, v3(s.x, s.y - h * 0.80f, s.z), h * 0.27f, leaf, 0.0f, bite);
+                for (int t = 0; t < 5; t++) {
+                    float a = a0 + (float)t * 1.257f;
+                    float rr = h * (0.12f + 0.10f * rhash(c->seed ^ (uint32_t)(0x91u + t),
                                                           (int)s.x, (int)s.z));
-                    sphere(c, v3(s.x + cosf(a) * h * 0.24f,
-                                 s.y - h * (0.66f + 0.20f * (float)(t & 1)),
-                                 s.z + sinf(a) * h * 0.24f),
-                           rr, leaf, 0.0f);
+                    sphere_ex(c, v3(s.x + cosf(a) * h * 0.25f,
+                                    s.y - h * (0.64f + 0.22f * (float)(t & 1)),
+                                    s.z + sinf(a) * h * 0.25f),
+                              rr, leaf, 0.0f, bite);
                 }
             }
         }
@@ -1748,6 +1992,149 @@ static void outline_pass(Ctx *c)
             }
         }
     }
+}
+
+/* Post: crepuscular rays, and bloom.
+ *
+ * Everything up to here is a physical answer to "what colour is this point".
+ * These two are not - they are what a lens or an eye does with bright light,
+ * and leaving them out is why a correct render can still look inert. Shafts
+ * say the air has something in it; bloom says the highlights are brighter than
+ * the medium can hold. Both are the difference between a landscape and a
+ * photograph of one.
+ *
+ * Both run at half resolution on the low-res buffer, before quantisation - a
+ * bloom applied after the palette has been chosen has nothing to bleed but
+ * palette entries, and comes out as banding. */
+static void post_pass(Ctx *c)
+{
+    if (c->buried) return;
+    const int hw = c->W / 2, hh = c->H / 2;
+    if (hw < 8 || hh < 8) return;
+    float *bright = (float *)malloc(sizeof(float) * (size_t)hw * hh);
+    float *tmp    = (float *)malloc(sizeof(float) * (size_t)hw * hh);
+    float *shaft  = (float *)malloc(sizeof(float) * (size_t)hw * hh);
+    if (!bright || !tmp || !shaft) { free(bright); free(tmp); free(shaft); return; }
+
+    /* Bright pass, and the sky mask the shafts are cast from. The mask is
+     * geometric, not photometric: a shaft exists where light reaches the eye
+     * unobstructed, so what matters is which pixels are sky - not which are
+     * bright. Using brightness instead makes snowfields glow sideways. */
+    for (int y = 0; y < hh; y++) {
+        for (int x = 0; x < hw; x++) {
+            int sx = x * 2, sy = y * 2;
+            const uint8_t *p = c->fb + 4 * ((size_t)sy * c->W + sx);
+            float lum = (p[0] * 0.30f + p[1] * 0.59f + p[2] * 0.11f) / 255.0f;
+            bright[y * hw + x] = clampf((lum - 0.74f) * 3.4f, 0.0f, 1.0f);
+            float z = c->zb[(size_t)sy * c->W + sx];
+            shaft[y * hw + x] = z > 1e29f ? 1.0f : 0.0f;
+        }
+    }
+
+    /* ---- shafts ---- */
+    V3 tosun = mul(c->sun, -1.0f);
+    float svz = dot(tosun, c->fwd);
+    float strength = 0.0f, ssx = 0.0f, ssy = 0.0f;
+    if (svz > 0.12f && c->day > 0.02f && !c->submerged) {
+        ssx = (c->W * 0.5f + c->focal * dot(tosun, c->right) / svz) * 0.5f;
+        ssy = (c->H * 0.5f - c->focal * dot(tosun, c->up)    / svz) * 0.5f;
+        /* Low sun, strong shafts. At noon the sun is behind the camera or
+         * overhead and there is nothing for the light to rake across. */
+        float low = 1.0f - clampf(c->sun.y, 0.0f, 1.0f);
+        strength = 0.42f * c->day * low * clampf((svz - 0.12f) * 3.0f, 0.0f, 1.0f);
+    }
+    if (strength > 0.001f) {
+        const int N = 22;
+        for (int y = 0; y < hh; y++) {
+            for (int x = 0; x < hw; x++) {
+                float dx = (ssx - (float)x) / (float)N;
+                float dy = (ssy - (float)y) / (float)N;
+                float px = (float)x, py = (float)y;
+                float acc = 0.0f, w = 1.0f, wsum = 0.0f;
+                for (int i = 0; i < N; i++) {
+                    px += dx; py += dy;
+                    int ix = (int)px, iy = (int)py;
+                    if ((unsigned)ix < (unsigned)hw && (unsigned)iy < (unsigned)hh)
+                        acc += shaft[iy * hw + ix] * w;
+                    wsum += w;
+                    w *= 0.90f;
+                }
+                tmp[y * hw + x] = wsum > 0.0f ? acc / wsum : 0.0f;
+            }
+        }
+        /* fade with distance from the sun, or the whole frame lifts evenly */
+        for (int y = 0; y < hh; y++) {
+            for (int x = 0; x < hw; x++) {
+                float dx = ((float)x - ssx) / (float)hw;
+                float dy = ((float)y - ssy) / (float)hw;
+                float d = sqrtf(dx * dx + dy * dy);
+                shaft[y * hw + x] = tmp[y * hw + x] * expf(-d * 2.6f) * strength;
+            }
+        }
+    } else {
+        for (int i = 0; i < hw * hh; i++) shaft[i] = 0.0f;
+    }
+
+    /* ---- bloom: two separable box passes over the bright pass ---- */
+    for (int pass = 0; pass < 2; pass++) {
+        const int R = 3;
+        for (int y = 0; y < hh; y++) {
+            for (int x = 0; x < hw; x++) {
+                float a = 0.0f;
+                for (int k = -R; k <= R; k++) {
+                    int i = x + k; if (i < 0) i = 0; if (i >= hw) i = hw - 1;
+                    a += bright[y * hw + i];
+                }
+                tmp[y * hw + x] = a / (float)(2 * R + 1);
+            }
+        }
+        for (int y = 0; y < hh; y++) {
+            for (int x = 0; x < hw; x++) {
+                float a = 0.0f;
+                for (int k = -R; k <= R; k++) {
+                    int j = y + k; if (j < 0) j = 0; if (j >= hh) j = hh - 1;
+                    a += tmp[j * hw + x];
+                }
+                bright[y * hw + x] = a / (float)(2 * R + 1);
+            }
+        }
+    }
+
+    /* ---- composite, bilinear back up to full resolution ---- */
+    V3 warm = c->sunc;
+    for (int y = 0; y < c->H; y++) {
+        float fy = ((float)y * 0.5f) - 0.25f;
+        int y0 = (int)floorf(fy); float ty = fy - (float)y0;
+        int y1 = y0 + 1;
+        y0 = y0 < 0 ? 0 : (y0 >= hh ? hh - 1 : y0);
+        y1 = y1 < 0 ? 0 : (y1 >= hh ? hh - 1 : y1);
+        for (int x = 0; x < c->W; x++) {
+            float fx = ((float)x * 0.5f) - 0.25f;
+            int x0 = (int)floorf(fx); float tx = fx - (float)x0;
+            int x1 = x0 + 1;
+            x0 = x0 < 0 ? 0 : (x0 >= hw ? hw - 1 : x0);
+            x1 = x1 < 0 ? 0 : (x1 >= hw ? hw - 1 : x1);
+            #define BILERP(BUF) ( \
+                (BUF)[y0 * hw + x0] * (1.0f - tx) * (1.0f - ty) + \
+                (BUF)[y0 * hw + x1] * tx * (1.0f - ty) + \
+                (BUF)[y1 * hw + x0] * (1.0f - tx) * ty + \
+                (BUF)[y1 * hw + x1] * tx * ty )
+            float bl = BILERP(bright);
+            float sh = BILERP(shaft);
+            #undef BILERP
+            uint8_t *p = c->fb + 4 * ((size_t)y * c->W + x);
+            float add_r = bl * 0.42f * warm.x + sh * warm.x;
+            float add_g = bl * 0.42f * warm.y + sh * warm.y;
+            float add_b = bl * 0.42f * warm.z + sh * warm.z;
+            float r = p[0] / 255.0f + add_r;
+            float g = p[1] / 255.0f + add_g;
+            float b2 = p[2] / 255.0f + add_b;
+            p[0] = (uint8_t)(clampf(r,  0.0f, 1.0f) * 255.0f);
+            p[1] = (uint8_t)(clampf(g,  0.0f, 1.0f) * 255.0f);
+            p[2] = (uint8_t)(clampf(b2, 0.0f, 1.0f) * 255.0f);
+        }
+    }
+    free(bright); free(tmp); free(shaft);
 }
 
 /* ---------------- HUD ---------------- */
@@ -1906,7 +2293,17 @@ void cp4_render_styled(const Cp4World *w, uint8_t *rgba, int OW, int OH, int sty
     c.seed = w->seed;
     c.time = (float)w->step * CP4_DT;
     c.sun = sun_dir(w->step);
+    c.sunc = sun_colour(c.sun);
     c.day = w->daylight;
+    /* Mist collects when the ground is cold and the sun is low, which is
+     * to say at dawn and at dusk. Tying it to the daylight curve rather
+     * than to a constant is what makes those two crossings of the day
+     * look like anything. */
+    {
+        float d = c.day;
+        float edge = clampf(1.0f - fabsf(d - 0.34f) / 0.34f, 0.0f, 1.0f);
+        c.mist = 0.22f + 0.78f * edge;
+    }
 
     /* Chase camera: behind and above, looking slightly down. The player grows
      * across four generations, so the camera backs off with it.
@@ -1971,7 +2368,7 @@ void cp4_render_styled(const Cp4World *w, uint8_t *rgba, int OW, int OH, int sty
     draw_world(&c, w);
     /* Neither belongs underground: a tree hanging in the soil three
      * units from the camera is not scenery, it is a bug with roots. */
-    if (!c.buried) { draw_scenery(&c, w); draw_cover(&c, w); }
+    if (!c.buried) { draw_scenery(&c, w); draw_cover(&c, w); draw_birds(&c, w); }
     draw_nests(&c, w);
     draw_home(&c, w);
     draw_flora(&c, w);
@@ -1980,6 +2377,7 @@ void cp4_render_styled(const Cp4World *w, uint8_t *rgba, int OW, int OH, int sty
     draw_creature(&c, p, 1);
 
     outline_pass(&c);
+    post_pass(&c);
     draw_hud4(fb, lw, lh, w, lh / 180 < 1 ? 1 : lh / 180);
     cp_vis_quantise(fb, lw, lh, style);
     cp_vis_blit(fb, lw, lh, rgba, OW, OH, style);
@@ -2026,7 +2424,9 @@ void cp4_render_portrait(const Cp4Genome *g, uint8_t *fb, int lw, int lh,
     c.time = 0.0f;
     c.submerged = c.buried = 0;
     c.sun = norm(v3(0.38f, 0.72f, -0.26f));   /* a portrait is always noon */
+    c.sunc = sun_colour(c.sun);
     c.day = 1.0f;
+    c.mist = 0.0f;
     /* Three-quarter view, but only barely raised. Straight side-on hides
      * everything mounted fore and aft; look down more than about ten degrees
      * and the body hides the legs, which on a land animal is most of what

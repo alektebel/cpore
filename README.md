@@ -375,8 +375,62 @@ a desert stays bare and a jungle floor is thick.
 `abyss`, which was mixed for a lit water column. `terra` is 48 entries with six
 steps of sky, two foliage ramps and warm rock, at 640x360.
 
-| ![savanna](docs/land_savanna.png) | ![from the air](docs/land_air.png) |
+**Trees that are not spheres.** A pixel-art landscape lives on its silhouettes,
+and a circle reads as plastic whatever colour it is painted. Two changes: the
+trunk and boughs are drawn with the same tapering-line primitive the grass
+uses, because what tells you a tree is a tree at fifty units is the branching;
+and each crown lobe has its rim eaten away by a hash of the *world-space*
+surface point, quantised to a fraction of the radius. World space is the part
+that matters — erode in screen space and the foliage boils as the camera
+moves.
+
+**Sunlight that changes colour.** A constant warm white is the most expensive
+simplification in a daylight renderer: it makes noon and the last ten minutes
+before dusk the same picture at different brightnesses, and the last ten
+minutes before dusk are the reason anyone photographs landscapes. Sun colour
+now comes from sun elevation — the same physics the aerial perspective already
+models, seen from the sun's end. One lerp buys the whole golden hour.
+
+**Mist that pools in the low ground.** Aerial perspective is uniform: it makes
+a valley floor and the ridge above it equally blue, so the landscape flattens
+into layers of the same wash. Mist has a scale height. Density falling
+exponentially with altitude integrates along a straight ray in closed form —
+one `exp` and a divide for what a marcher would charge fifty samples for — and
+it is what separates one ridge from the next at dawn. Tied to the daylight
+curve, so the two crossings of the day are the ones with weather in them.
+
+**Cloud shadows**, cast down the sun vector onto the ground from the same field
+the sky is already sampling. One extra sample for slow patches of lit and
+unlit hillside, which is most of what makes real country look like it has
+something moving over it.
+
+**Crepuscular rays and bloom**, at half resolution, before quantisation — a
+bloom applied after the palette has been chosen has nothing to bleed but
+palette entries and comes out as banding. The shaft mask is geometric rather
+than photometric: a shaft exists where light reaches the eye unobstructed, so
+what matters is which pixels are sky, not which are bright. Masking on
+brightness instead makes snowfields glow sideways.
+
+**Water that reflects the land.** Reflecting only the sky is right in the
+middle of a lake and wrong everywhere near a shore, which is where most of the
+water in this world is — without it a headland appears to stand on a sheet of
+sky. A short march up the reflected ray is enough; past that the angle is
+grazing and the sky term wins anyway.
+
+**Birds.** Nothing in the simulation knows about them and nothing ever will.
+They are there because a landscape with something alive in the air reads as a
+place and one without reads as a diorama, and because a flock a long way off
+is the cheapest sense of scale there is.
+
+| ![dawn](docs/land_dawn.png) | ![dusk](docs/land_dusk.png) |
 |---|---|
+| ![savanna](docs/land_savanna.png) | ![from the air](docs/land_air.png) |
+
+None of this touches the simulation: the 30-seed table came back byte-identical
+after the whole pass. It does cost render time — a 640x360 frame is about eight
+seconds, four times the 320x180 styles, and the terrain marcher is the whole of
+it. Rendering is off the training path entirely, which is the point of having
+kept `cp4_world_step` a pure function of state all along.
 
 ## Stage 4: civilisation
 

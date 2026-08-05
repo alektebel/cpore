@@ -49,7 +49,7 @@ static inline float flat2(Cp4Vec a, Cp4Vec b)
 
 static float hash2(uint32_t seed, int x, int z)
 {
-    uint32_t h = seed ^ (uint32_t)(x * 374761393) ^ (uint32_t)(z * 668265263);
+    uint32_t h = seed ^ ((uint32_t)x * 374761393u) ^ ((uint32_t)z * 668265263u);
     h = (h ^ (h >> 13)) * 1274126177u;
     h ^= h >> 16;
     return (float)(h & 0xFFFFu) / 65535.0f;
