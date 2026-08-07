@@ -244,24 +244,86 @@ never picks structs apart from Python.
 creature → civ as one episode, legacy handed forward by the bridges that
 already exist.
 
-## Part V — Generative AI, where it belongs
+## Part V — Generative models in aid of procedural generation
 
-Not in terrain, not in bodies, not anywhere in the loop. The procedural core
-is deterministic, seed-stable and stores nothing — that is what makes the
-unbounded world, the 22 KB snapshot and the RL throughput possible, and a
-diffusion model offers none of it. The BOTW look is already coming from the
-renderer (wrapped light, valley mist, golden hour, wind), which is the
-correct place to keep buying it.
+The world stays procedural: deterministic, seed-stable, storing nothing —
+that is what makes the unbounded world, the 22 KB snapshot and the RL
+throughput possible, and nothing may compromise it. But a generative model
+can *aid* that generation without ever entering the loop, and the test for
+every proposed use is one question: **does the runtime remain a pure
+function of (seed, position, time)?**
 
-Two sanctioned uses, both at the boundary, both optional, C core never aware:
+Uses that pass the test, in order of payoff:
 
+- **A distilled neural residual on the heightfield.** The subtle thing fBm
+  cannot fake is erosion — the way real valleys widen downstream and ridges
+  sharpen. Train a model offline on real elevation data (or on expensively
+  eroded terrain) to predict a detail residual from the coarse procedural
+  height and its slope, then **distill it into a tiny MLP**. A small MLP is
+  itself a pure deterministic function of its inputs — it can sit inside
+  `cp4_height()` as one more octave, seed-conditioned, budgeted in
+  multiply-adds like everything else there. This is the honest version of
+  "generative AI makes the terrain beautiful": the model runs at training
+  time, the game ships a function. (The literature calls the un-distilled
+  version *terrain amplification* — Guérin et al.'s cGAN terrain authoring
+  is the entry point.)
+- **Fitting the procedural parameters against reality.** Cheaper than the
+  above and worth doing first: use real DEM statistics (slope distributions,
+  drainage density, ridge spacing per province type) as a target and let an
+  optimiser — or a model — tune the constants already in `cp4_height`. The
+  code doesn't change shape at all; the numbers stop being guesses.
+- **Offline asset generation.** Palettes, sky gradients, landmark
+  silhouettes, tree-shape parameter sets: generated during development,
+  committed as the same kinds of constants the renderer already carries.
 - **Naming and lore at discovery time.** When a codex card is created, an
   optional Python/web plugin asks an LLM for a species name and two lines of
   field notes from the body plan and biome. Cached per lineage, falls back to
-  a procedural name generator offline. This is the cheap, honest version of
-  "generative AI makes discovery cool".
-- **Development-time assistance** — palettes, landmark silhouettes, tuning
-  docs. Tooling, not runtime.
+  a procedural name generator offline. The C core never knows.
+
+What still fails the test and stays out: any model invoked per-frame or
+per-chunk at runtime, anything that makes two visits to the same coordinates
+disagree, anything that needs the world stored.
+
+## Part VI — Senses, and the umwelt principle
+
+The deepest idea available to this game costs almost nothing given the
+architecture: **every creature lives in the world its senses can afford, and
+no two builds live in the same world.** (The biology word is *umwelt*.) The
+sim already honours this — eyes buy sight that night takes away, ears buy
+hearing that it doesn't, and unperceived entities are zeroed in the
+observation rather than merely hidden by the UI. The direction is to widen
+the roster until choosing senses is as expressive as choosing limbs:
+
+| sense | part | it buys | it's taken away by |
+|---|---|---|---|
+| sight | eye | range, detail | night, rain, underground |
+| hearing | ear | direction of callers, unaffected by dark | wind, distance |
+| smell | nostril | *time* — a scent trail is the past of whoever left it, drifting downwind | rain washing it out, being upwind |
+| vibration | whisker/pad | anything moving on or under the ground, 360°, no light needed | flying (no contact), water |
+| electroreception | lateral organ | live bodies in water, even buried, even in the dark | air — it simply doesn't exist there |
+| echolocation | voice + ear | active sight in total darkness | its own cost: it announces you to everything with ears |
+
+Each row follows the standing law: a sense is a part, it buys information,
+and some medium, weather or time of day takes it away — so senses fork the
+build the same way media do, and a cave, a night, a storm each reshuffle
+which body is the capable one. Echolocation is the designed jewel: the only
+sense that *spends* something (energy, and stealth) to perceive, which makes
+it a decision every time rather than a passive stat.
+
+Where the code goes: scent is the one genuinely new mechanism — a field that
+must remember who passed — and the trick is to keep it POD: a small ring
+buffer of (position, species, timestamp) scent drops on the world struct,
+sampled with wind offset and exponential decay, exactly parallel to how
+species memory already works. Vibration and electroreception are new terms
+in the existing perception resolve in `src/land.c`; echolocation is an
+action bit plus a broadcast event, shaped like the song mechanic that
+already exists. The observation grows one block per sense, and the HUD in
+`web/` shows *only the senses the build owns* — the umwelt made literal: a
+different creature's screen is a different world.
+
+For the lab this roster is a gift: it makes partial observability a design
+axis you can buy, which is a cleaner curiosity/exploration research setting
+than bolting noise onto an observation vector.
 
 ## Milestones, in order, each with an acceptance test
 
@@ -295,6 +357,66 @@ from M1 at all and can proceed in parallel if there are two streams of work.
   it, and must stay thin.
 - **Five-stage parity before fun.** Space (roadmap 11b) still waits. A
   brilliant creature stage beats five adequate stages.
+
+## A reading list
+
+The books behind the ideas above, grouped by the part they serve.
+
+**Procedural worlds (Parts II, V):**
+- *Texturing & Modeling: A Procedural Approach* — Ebert, Musgrave, Peachey,
+  Perlin, Worley. The canon. Musgrave's fractal-terrain chapters are the
+  lineage `cp4_height` descends from; Perlin explains noise from the source.
+- *Procedural Content Generation in Games* — Shaker, Togelius, Nelson. Free
+  online (pcgbook.com). The academic survey, including the ML-assisted PCG
+  that Part V leans on.
+- *Procedural Generation in Game Design* — ed. Short & Adams. The design
+  side: when generated content is fun and when it's wallpaper, by the people
+  who made Dwarf Fortress and Caves of Qud.
+- *The Computational Beauty of Nature* — Flake. Fractals, chaos, adaptation
+  and selection in one book; the closest thing to this project's worldview
+  in print.
+
+**Making it look good (Parts I, V):**
+- *Real-Time Rendering* — Akenine-Möller, Haines, Hoffman. The frame-budget
+  bible; everything M1's quality tier needs a name for is in here.
+- *Physically Based Rendering* — Pharr, Jakob, Humphreys. Free online
+  (pbr-book.org). Overkill on purpose: it's where the aerial perspective,
+  scattering and tonemapping already in `render_land.c` come from.
+- Inigo Quilez's articles (iquilezles.org) — not a book, but the SDF
+  raymarching, smooth-minimum and fBm-derivative techniques this renderer is
+  built on are documented nowhere better.
+- *The Book of Shaders* — Gonzalez Vivo & Lowe. Free online. The gentlest
+  on-ramp to thinking in fields and noise.
+
+**Generative models (Part V):**
+- *Understanding Deep Learning* — Prince. Free online (udlbook). Modern and
+  rigorous, covers diffusion; the right foundation text today.
+- *Generative Deep Learning*, 2nd ed. — Foster. The practical one: VAEs,
+  GANs, diffusion, world models, with code. Enough to build the terrain
+  residual and the distillation in Part V.
+- Guérin et al., *Interactive Example-Based Terrain Authoring with
+  Conditional Generative Adversarial Networks* (2017) — the paper Part V's
+  amplification idea descends from.
+
+**Senses and creatures (Part VI):**
+- *An Immense World* — Yong. Animal senses and the umwelt, one chapter per
+  modality. Not a technical book; it is the design document nature already
+  wrote for Part VI, and the single best source of "strange and cool" here.
+- *Vehicles: Experiments in Synthetic Psychology* — Braitenberg. Fifty
+  pages: how sensors wired to motors produce fear, aggression and love.
+  The spiritual ancestor of every scripted policy in this repo.
+- *Sensory Ecology, Behaviour, and Evolution* — Stevens. The academic
+  backing for the senses table: what each modality costs, what it detects,
+  what defeats it.
+- *AI for Games* — Millington. The perception-simulation chapters (sight
+  cones, sound propagation, knowledge models) are the standard treatment of
+  what `land.c`'s perception resolve does.
+- *The Nature of Code* — Shiffman. Free online. Steering, flocking, and
+  evolutionary systems; the friendliest path into agent behaviour.
+
+**The lab (Part IV):**
+- *Reinforcement Learning: An Introduction* — Sutton & Barto. Free online.
+  Non-negotiable foundation for anyone training against this environment.
 
 ## Is this a lot to ask?
 
