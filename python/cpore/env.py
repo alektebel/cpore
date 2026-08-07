@@ -33,9 +33,9 @@ GEN_BUDGET = (30, 55, 85, 125)
 STATUS = ("running", "dead", "evolved", "timeout")
 
 # render styles; index == the CP_VIS_* enum value
-VIS_STYLES = ("abyss", "dmg", "neon", "petri", "c64", "terra")
+VIS_STYLES = ("abyss", "dmg", "neon", "petri", "c64", "terra", "drop")
 VIS = {n: i for i, n in enumerate(VIS_STYLES)}
-DEFAULT_VIS = "abyss"
+DEFAULT_VIS = "drop"
 # The land stage renders through its own palette at twice the resolution;
 # the water palette has no sky in it.
 LAND_VIS = "terra"

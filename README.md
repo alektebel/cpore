@@ -7,12 +7,23 @@ reinforcement learning environment rather than a game.
 
 Dependencies: `libc` and `libm`. No SDL, no OpenGL, no zlib, no stb.
 
-That screenshot is a pixel-art pipeline written from scratch: the scene is
-rasterised into a small buffer with hard-edged primitives (coverage is
-thresholded at the pixel centre, never blended), quantised to a fixed palette
-with 4x4 ordered dithering, then blown up with nearest-neighbour. The PNG was
-compressed by a DEFLATE implementation in this repo — the small palette also
-cut the file from ~500KB to ~60KB, since few colours suit LZ77 well.
+That screenshot is a renderer written from scratch, and so is the PNG it was
+compressed into. The cell stage draws through `drop`: a linear HDR buffer at
+the output resolution, analytically antialiased primitives, four octaves of
+bloom, a filmic tonemap and a lens pass, with no palette and no upscale
+anywhere in it. The organising idea is darkfield illumination — light a
+specimen obliquely and you see only what it scattered, so the field goes black
+and anything transparent blazes along its edges. It is how pond water is
+actually photographed, and it means a cell reads by its rim rather than its
+fill, which costs one `sqrt` per pixel.
+
+The other six styles are a pixel-art pipeline: hard-edged primitives (coverage
+thresholded at the pixel centre, never blended) into a small buffer, quantised
+to a fixed palette with 4x4 ordered dithering, then blown up with
+nearest-neighbour. They are still there, still the only path stages 2 to 4
+have, and `--vis abyss` gets the old look back. The trade is visible in the
+repository: a palette frame is ~60KB because few colours suit LZ77 well, and
+the frame above is 1.5MB.
 
 ```
 make && make test && make bench
@@ -20,7 +31,10 @@ make && make test && make bench
 ./build/cpore_shot --style hunter --seed 23 --steps 2600 --out shot.png
 ./build/cpore_shot --parts 2:0,7:16,4:112,4:144 --out custom.png
 ./build/cpore_shot --vis-all --out compare.png      # every style, same frame
+./build/cpore_shot --vis abyss --out pixels.png     # the original pixel look
 ```
+
+![a quieter frame](docs/cell_drop.png)
 
 ## Stage 2: aquatic, in 3D
 
@@ -702,7 +716,9 @@ src/land.c              the creature simulation: four media, nests, impress-or-e
 src/land_env.c          stage-3 RL wrapper
 src/civ.c               the civilisation simulation: cities, units, doctrines
 src/civ_env.c           stage-4 RL wrapper, and the bridge from stage 3
-src/render.c            pixel-art rasteriser, five styles, palette-quantised
+src/render.c            pixel-art rasteriser, six styles, palette-quantised
+src/render_cell.c       stage 1's HDR darkfield renderer: the `drop` style
+src/pixfont.h           the 5x7 font, shared by both paths
 src/sdfbody.h           the shared SDF body: round cones under a smooth minimum
 src/render3d.c          sphere-impostor z-buffer renderer for stage 2
 src/render_land.c       ray-marched heightfield, sky and creatures for stage 3
@@ -844,13 +860,18 @@ Full version, including what is deliberately *not* being done and why, in
 
 ## Visual styles
 
-Six of them, and they are not palette swaps — internal resolution, camera
-scale, dither strength, background value structure and outline treatment all
-move together. `--vis NAME`, or `CporeEnv(vis="c64")` from python. Stages 1
-and 2 default to `abyss`; the land stage defaults to `terra`.
+Seven, and `drop` is not one of the others. Six are a pixel-art pipeline and
+are not palette swaps of each other — internal resolution, camera scale,
+dither strength, background value structure and outline treatment all move
+together. `drop` is a separate renderer down a separate path: continuous tone,
+HDR, no palette, no dither, no upscale. `--vis NAME`, or
+`CporeEnv(vis="c64")` from python. Stage 1 defaults to `drop`, stage 2 to
+`abyss`, the land stage to `terra`; asking a stage for a style it cannot
+render gets that stage's own default back.
 
 | style | resolution | colours | look |
 | --- | --- | --- | --- |
+| `drop` | output res | continuous | darkfield microscopy: black field, translucent bodies, bloom, bokeh, a lens |
 | `terra` | 640x360 | 48 | daylight land: a six-step sky, two foliage ramps, warm rock |
 | `petri` | 320x180 | 16 | cream paper, ink outlines, muted pigment — the only one with an inverted value structure |
 | `abyss` | 320x180 | 32 | deep water, dithered gradient, dark keylines |
@@ -865,14 +886,25 @@ landscapes ended in a grey wall. It is also the only style at 640x360 — one
 animal against open water reads fine at 320x180, but a landscape is ridgelines
 and treelines, and those are the first thing to dissolve.
 
-![petri](docs/hero.png)
+![petri](docs/style_petri.png)
 ![c64](docs/style_c64.png)
 ![dmg](docs/style_dmg.png)
 ![neon](docs/style_neon.png)
 ![abyss](docs/style_abyss.png)
 
 `--vis-all` renders the identical terminal state in every style, which is the
-only fair way to compare them.
+only fair way to compare them — and the fairest thing it shows is how much of
+the pixel styles' character came from the constraint rather than the palette.
+
+`drop` needed a different renderer rather than a seventh palette, because
+almost nothing in the pixel path survives removing the palette. Coverage is
+thresholded, which reads as deliberate only while every edge sits on the pixel
+grid; the shading is tuned against a fixed set of 32 colours; and the bloom
+and outline passes exist to fight quantisation artefacts that are no longer
+there. What it does share is the 5x7 font, and even that is used differently —
+the pixel path stamps each set bit as a hard square, `drop` stamps it as a soft
+dot, which turns the same table into a dot-matrix instrument readout that
+blooms like the rest of the frame.
 
 Two of these needed structural work rather than a palette:
 
@@ -888,12 +920,63 @@ Two of these needed structural work rather than a palette:
 The 160x90 styles cannot fit the full HUD, so they drop to vitals plus the
 placement dial.
 
-## Rendering
+## Rendering: the darkfield path
 
-The renderer is a debug view, not a product, and that shaped the choices. At
-these resolutions there is no room for soft shading, so every cell gets a hard dark
-keyline, a fill and one highlight — without the keyline everything dissolves
-into the water. The player is marked with four corner brackets rather than
+A cell in `drop` is a translucent bag, and the shading is the three things
+light does to one. It is absorbed on the way through, so the thick middle of
+the body is where the background goes away. It scatters off what is suspended
+inside, which is why the interior is worth drawing at all — a nucleus with a
+dense core, vacuoles that breathe on their own phase, and a granulated
+cytoplasm, all hashed off the cell's slot so they are stable for the episode
+and all rotated with its heading, because an interior that stays put while the
+body turns reads as a decal. And it grazes the membrane on the way past, which
+is the whole look: at a grazing angle the path through the membrane is long,
+so the edge of a transparent body is the brightest thing on it.
+
+Four things were not obvious, and three of them were bugs:
+
+- **The fresnel exponent is the load-bearing number in the file.** Written at
+  the 3.4 a 3D fresnel wants, essentially all of the rim term lands in the
+  outermost two percent of the radius — which on a twenty-pixel cell is under
+  one pixel, so the single effect the entire look is built on rendered as
+  nothing. On a projected disc the falloff has to be broad enough to occupy a
+  band the eye can see. The membrane line has the same problem and is held to
+  a minimum width in screen space rather than a fraction of the radius.
+- **An additive buffer cannot draw anything dark.** A pupil, a mandible, the
+  throat of a jet: drawn by adding a dark colour they come out as slightly
+  brighter patches of whatever was behind them. They multiply instead, and the
+  lit parts are added on top — the same two-step the membrane already used.
+  The pupil in particular is the darkest thing on the animal and the reason an
+  eye has any contrast, which is most of why Spore's creatures read at all.
+- **Exposure has to be one number in one place.** Every intensity here is
+  scene-referred against six named reference levels, and how far up the
+  tonemapping curve that set lands is a separate decision at the bottom of the
+  file. Mixed together, changing how bright the frame is means retuning forty
+  constants — which is exactly the hole the first pass fell into.
+- **A smoothstep with its edges reversed is a descending ramp, not an error.**
+  Guarding against `e1 < e0` and returning a constant silently multiplied the
+  whole frame by the far end of the vignette, and cost the image every stop
+  above about 15%. It looked like an art problem for three iterations.
+
+Post is four octaves of bloom before the tonemap — one blur radius gives one
+halo size and reads as a filter, and after the tonemap there is nothing above
+white left to bleed — then a grade, lateral chromatic aberration scaled by
+`r^2`, a vignette and grain. The grain is not optional at this exposure: the
+darkest quarter of the frame covers about six 8-bit codes, and without a
+dither of some kind the condenser cone comes out as contour lines.
+
+Depth of field is per-sprite rather than a screen-space gather. Each cell
+hashes to a position in the drop and carries its own defocus width, which for
+round shapes is both cheaper and closer to a real bokeh disc; defocus also
+costs it brightness and saturation, so a crowded frame still has a foreground.
+The player is always on the focal plane. One 1280x720 frame is about 180 ms.
+
+## Rendering: the pixel path
+
+The pixel renderer is a debug view, not a product, and that shaped the choices.
+At those resolutions there is no room for soft shading, so every cell gets a
+hard dark keyline, a fill and one highlight — without the keyline everything
+dissolves into the water. The player is marked with four corner brackets rather than
 concentric rings, because a ring drawn around a 10px cell is just noise on top
 of the cell. Cells under 4px across skip their appendages entirely and draw as
 blobs; there is nothing to be gained from a 1px spike.
@@ -904,10 +987,10 @@ on the membrane, front pointing right. Since the simulation resolves damage,
 armour and thrust against those angles, the dial is a readout of live state,
 not decoration.
 
-The whole file links separately from the sim, so a training build drops it.
+Both renderers link separately from the sim, so a training build drops them.
 
 ## Legal
 
 Mechanics are reimplemented from scratch. No Spore assets, model data, or file
 formats are used, and none should be added. All art here is procedural and
-generated by `src/render.c`.
+generated by `src/render.c` and `src/render_cell.c`.

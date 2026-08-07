@@ -57,8 +57,21 @@ Items are struck through as they land.
 
 ## Next
 
-**8. Slim the HUD.** Two large filled panels eat the corners. Thin
-edge-aligned readouts instead, centre of frame kept clear.
+- ~~**A renderer that is not pixel art.**~~ Stage 1 has one: `drop`, a
+  darkfield microscope plate. Linear HDR at the output resolution, analytic
+  antialiasing, translucent bodies shaded by absorption / interior scatter /
+  fresnel rim, per-sprite depth of field, four octaves of bloom, a filmic
+  tonemap and a lens pass. No palette, no dither, no upscale. The six pixel
+  styles are untouched and still the only path stages 2 to 4 have; porting
+  the treatment upward is the obvious next move, and stage 2 is the natural
+  target since it is already lit water.
+
+**8. Slim the HUD.** Stage 1's is done: hairlines and dot matrix, nothing
+filled, the vitals bent into an arc around the player rather than parked in a
+corner, and the whole layout in units of the frame so it holds its proportion
+at any output size. The land stage still has its two large filled panels
+eating the corners, and wants the same treatment - thin edge-aligned readouts,
+centre of frame kept clear.
 
 **9. Make player predation a real selection pressure.** The player killing
 fish already removes genomes from the pool, but weakly. Strengthen it and

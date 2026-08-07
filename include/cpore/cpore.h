@@ -224,15 +224,30 @@ int32_t cp_env_generation(const CpEnv *e);
 
 /* ---- rendering (optional; pure function of world state) ---- */
 
-/* Visual styles. Each moves internal resolution, palette, camera scale, dither
- * strength and outline treatment together - they are not palette swaps. */
+/* Visual styles.
+ *
+ * The first six are pixel-art styles: each moves internal resolution, palette,
+ * camera scale, dither strength and outline treatment together, and they are
+ * not palette swaps. CP_VIS_DROP is not one of them - it is a separate
+ * continuous-tone path with no palette, no dither and no upscale, and stage 1
+ * is the only stage that has one. Asking any other stage for it gets that
+ * stage's own default back. */
 enum { CP_VIS_ABYSS = 0, CP_VIS_DMG, CP_VIS_NEON, CP_VIS_PETRI, CP_VIS_C64,
-       CP_VIS_TERRA, CP_VIS_COUNT };
+       CP_VIS_TERRA, CP_VIS_DROP, CP_VIS_COUNT };
 const char *cp_vis_name(int style);
+/* 0 for the pixel-art styles, 1 for the continuous-tone ones. Callers that
+ * share the pixel pipeline (quantise/blit/text) must not use it on a style
+ * that answers 1. */
+int         cp_vis_continuous(int style);
 
 void cp_render(const CpWorld *w, uint8_t *rgba, int width, int height);
 void cp_render_styled(const CpWorld *w, uint8_t *rgba, int width, int height,
                       int style);
+/* Stage 1's continuous-tone renderer: an HDR darkfield plate, resolved
+ * straight to the output resolution. Reachable through cp_render_styled with
+ * CP_VIS_DROP; exposed because it is a genuinely different pipeline rather
+ * than another entry in the style table. */
+void cp_render_drop(const CpWorld *w, uint8_t *rgba, int width, int height);
 
 /* Shared pixel pipeline, so stage 2 draws through exactly the same palette,
  * dither and upscale rather than growing a second look. */
