@@ -5,7 +5,8 @@ Items are struck through as they land.
 
 The game-facing plan — what to build so cpore is genuinely fun to play, and
 where each piece of code goes — lives in [GAME_DESIGN.md](GAME_DESIGN.md).
-Its milestones (Walk, Pay, Build, Traverse, Scale, Judge, Live) sequence most
+The staged execution order (MVP → depth → creature pollination → the
+tribe-and-civ arc) lives in [PLAN.md](PLAN.md); together they sequence most
 of the items below.
 
 ## Done
