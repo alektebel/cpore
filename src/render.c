@@ -786,17 +786,26 @@ static const Vis VIS[CP_VIS_COUNT] = {
      * gets told to allocate; the palette is the abyss ramp purely so that a
      * stage sharing the pixel pipeline degrades to a sensible look instead of
      * indexing off the end of an array. */
-    { "drop", PAL_ABYSS, 32, 1280, 720, 1.42f, 0.0f, 0,
+    { "drop", PAL_ABYSS, 32, 1280, 720, 1.85f, 0.0f, 0,
       {0.02f,0.05f,0.08f},
       {0.004f,0.012f,0.017f}, {0.010f,0.030f,0.038f}, 0.28f, {0.34f,0.86f,0.98f},
       {0.01f,0.03f,0.04f}, {0.34f,0.86f,0.92f}, {0.16f,0.40f,0.46f},
       {0.006f,0.016f,0.020f} },
+
+    /* and the same again for the landscape. Neither of these two rows is a
+     * style in the sense the six above are; they exist so that every lookup
+     * keyed on a style index has something valid to find. */
+    { "vista", PAL_TERRA, 48, 1280, 720, 1.00f, 0.0f, 0,
+      {0.05f,0.06f,0.09f},
+      {0.085f,0.190f,0.520f}, {0.520f,0.700f,1.000f}, 0.10f, {0.46f,0.41f,0.35f},
+      {0.05f,0.06f,0.05f}, {0.88f,0.95f,0.78f}, {0.46f,0.55f,0.42f},
+      {0.02f,0.03f,0.02f} },
 };
 
 /* Which styles go down the palette path and which do not. Kept as a function
  * rather than a flag on Vis because it is a property of the pipeline a style
  * selects, not of the style's own parameters. */
-int cp_vis_continuous(int style) { return style == CP_VIS_DROP; }
+int cp_vis_continuous(int style) { return style == CP_VIS_DROP || style == CP_VIS_VISTA; }
 
 const char *cp_vis_name(int style)
 {

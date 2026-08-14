@@ -57,21 +57,34 @@ Items are struck through as they land.
 
 ## Next
 
-- ~~**A renderer that is not pixel art.**~~ Stage 1 has one: `drop`, a
-  darkfield microscope plate. Linear HDR at the output resolution, analytic
-  antialiasing, translucent bodies shaded by absorption / interior scatter /
-  fresnel rim, per-sprite depth of field, four octaves of bloom, a filmic
-  tonemap and a lens pass. No palette, no dither, no upscale. The six pixel
-  styles are untouched and still the only path stages 2 to 4 have; porting
-  the treatment upward is the obvious next move, and stage 2 is the natural
-  target since it is already lit water.
+- ~~**A renderer that is not pixel art.**~~ Two of them. Stage 1 has `drop`, a
+  darkfield microscope plate; stage 3 has `vista`, a landscape where the
+  atmosphere does the drawing. Both are linear HDR at the output resolution
+  with analytic antialiasing, depth of field, four octaves of bloom, a filmic
+  tonemap and a lens pass, and neither has a palette, a dither or an upscale
+  anywhere in it. They share a canvas and a film chain (`hdrcanvas.h`) and
+  nothing else, because a bag of cytoplasm and a hillside disagree about
+  everything between those two ends.
 
-**8. Slim the HUD.** Stage 1's is done: hairlines and dot matrix, nothing
-filled, the vitals bent into an arc around the player rather than parked in a
-corner, and the whole layout in units of the frame so it holds its proportion
-at any output size. The land stage still has its two large filled panels
-eating the corners, and wants the same treatment - thin edge-aligned readouts,
-centre of frame kept clear.
+  `vista` also needed the terrain marcher rebuilt: the pixel renderer spent
+  95% of its frame in `cp4_height`, sampling a two-dimensional function with
+  a three-dimensional ray march at a hundred samples per pixel. Caching the
+  field into a grid around the camera and marching that took it from eight
+  seconds to a quarter of one, which is what paid for everything above.
+
+  Stages 2 and 4 are still pixel-only. Stage 2 is the natural next target
+  since it is already lit water, and much of `vista`'s shading model - banded
+  response, hue-shifted ambient, transmission - transfers to it directly.
+
+**8. Slim the HUD.** Done wherever there is a continuous-tone renderer to do
+it in: hairlines and dot matrix, nothing filled, everything pushed to the
+frame edge, and the whole layout in units of the frame so it holds its
+proportion at any output size. Stage 1 puts the vitals in an arc around the
+player; stage 3 keeps them as thin rules in the corner and adds a dial for the
+hour. The two pixel-path HUDs still have their filled panels, and will keep
+them - the readout that suits a 640x360 palette frame is not the one that
+suits a 1280x720 continuous one, which is most of why these are separate
+renderers rather than one with a flag.
 
 **9. Make player predation a real selection pressure.** The player killing
 fish already removes genomes from the pool, but weakly. Strengthen it and

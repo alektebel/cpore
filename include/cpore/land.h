@@ -378,6 +378,10 @@ const Cp4World *cp4_env_world(const Cp4Env *e);
 void cp4_env_census(const Cp4Env *e, int32_t *counts, float *means);
 
 void cp4_render(const Cp4World *w, uint8_t *rgba, int width, int height);
+/* Stage 3's continuous-tone renderer: a cached heightfield marched into a
+ * linear HDR buffer at the output resolution, with the atmosphere doing the
+ * drawing. Reachable through cp4_render_styled with CP_VIS_VISTA. */
+void cp4_render_vista(const Cp4World *w, uint8_t *rgba, int width, int height);
 void cp4_render_styled(const Cp4World *w, uint8_t *rgba, int width, int height,
                        int style);
 void cp4_render_portrait(const Cp4Genome *g, uint8_t *fb, int lw, int lh,

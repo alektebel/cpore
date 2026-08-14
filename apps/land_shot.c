@@ -17,7 +17,7 @@ static float clampf(float v, float a, float b) { return v < a ? a : (v > b ? b :
 int main(int argc, char **argv)
 {
     uint32_t seed = 5;
-    int steps = 3000, W = 1280, H = 720, every = 0, vis = CP_VIS_TERRA, gallery = 0, table = 0,
+    int steps = 3000, W = 1280, H = 720, every = 0, vis = CP_VIS_VISTA, gallery = 0, table = 0,
         climate = 0, nseeds = 12, map = 0, sheet = 0;
     float span = 24000.0f;
     const char *out = "land.png";

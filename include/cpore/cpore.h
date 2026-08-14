@@ -229,11 +229,11 @@ int32_t cp_env_generation(const CpEnv *e);
  * The first six are pixel-art styles: each moves internal resolution, palette,
  * camera scale, dither strength and outline treatment together, and they are
  * not palette swaps. CP_VIS_DROP is not one of them - it is a separate
- * continuous-tone path with no palette, no dither and no upscale, and stage 1
- * is the only stage that has one. Asking any other stage for it gets that
- * stage's own default back. */
+ * continuous-tone paths with no palette, no dither and no upscale: `drop` is
+ * stage 1's and `vista` is stage 3's. Asking a stage for a continuous style
+ * that is not its own gets that stage's default back. */
 enum { CP_VIS_ABYSS = 0, CP_VIS_DMG, CP_VIS_NEON, CP_VIS_PETRI, CP_VIS_C64,
-       CP_VIS_TERRA, CP_VIS_DROP, CP_VIS_COUNT };
+       CP_VIS_TERRA, CP_VIS_DROP, CP_VIS_VISTA, CP_VIS_COUNT };
 const char *cp_vis_name(int style);
 /* 0 for the pixel-art styles, 1 for the continuous-tone ones. Callers that
  * share the pixel pipeline (quantise/blit/text) must not use it on a style

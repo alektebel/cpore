@@ -540,9 +540,7 @@ likes seeing new things will choose to go.
 | ![savanna](docs/land_savanna.png) | ![from the air](docs/land_air.png) |
 
 None of this touches the simulation: the 30-seed table came back byte-identical
-after the whole pass. It does cost render time — a 640x360 frame is about eight
-seconds, four times the 320x180 styles, and the terrain marcher is the whole of
-it. Rendering is off the training path entirely, which is the point of having
+after the whole pass. Rendering is off the training path entirely, which is the point of having
 kept `cp4_world_step` a pure function of state all along.
 
 ## Stage 4: civilisation
@@ -718,7 +716,10 @@ src/civ.c               the civilisation simulation: cities, units, doctrines
 src/civ_env.c           stage-4 RL wrapper, and the bridge from stage 3
 src/render.c            pixel-art rasteriser, six styles, palette-quantised
 src/render_cell.c       stage 1's HDR darkfield renderer: the `drop` style
-src/pixfont.h           the 5x7 font, shared by both paths
+src/render_terra.c      stage 3's HDR landscape renderer: the `vista` style
+src/hdrcanvas.h         linear float buffer, AA primitives, bloom, film chain
+src/landbody.h          stage-3 genome to round cones, and the three coats
+src/pixfont.h           the 5x7 font, shared by every path
 src/sdfbody.h           the shared SDF body: round cones under a smooth minimum
 src/render3d.c          sphere-impostor z-buffer renderer for stage 2
 src/render_land.c       ray-marched heightfield, sky and creatures for stage 3
@@ -858,20 +859,91 @@ Full version, including what is deliberately *not* being done and why, in
 4. Creature stage on land: legs instead of fins, terrain, and pack behaviour.
 5. Tribal, Civ, Space as further rule sets over the same state.
 
+## Rendering: the landscape path
+
+Stage 3 draws through `vista`, which is to the pixel land renderer what `drop`
+is to the pixel cell one — a separate path rather than a seventh palette.
+
+The organising idea is that a landscape is not carried by detail. Almost all of
+the information in a wide shot of real country is in how contrast and
+saturation decay with distance: a ridge two kilometres out is not a smaller
+ridge, it is a flatter, bluer, lower-contrast one, and four of those stacked
+read as depth before anything else does. So the atmosphere is the primary
+drawing tool here, deliberately stronger than physics wants, and it is a
+two-term model — extinction takes the surface's own colour away and takes blue
+away slowest, in-scatter adds what the air is throwing into the beam, blue away
+from the sun and a warm haze toward it. A single lerp toward one fog colour
+cannot do both, which is why a one-term landscape ends in a grey wall. On top
+of that sits mist with a scale height, integrated in closed form, which pools
+in the low ground and is what separates one ridge from the next at dawn.
+
+Three things follow from that, and they are why it is a separate file:
+
+- **Light is posterised, not colour.** The flat look of a stylised landscape
+  comes from banding the *response* to light, per material, which keeps albedo
+  continuous and boundaries clean because they follow the geometry. Banding the
+  finished image instead couples every material to every other one and the
+  boundaries follow the histogram. Grass and foliage band hardest; rock stays
+  nearly continuous, because a cliff in three steps reads as papercraft.
+- **Shadows shift hue.** The shaded side of a hill in daylight is lit by the
+  sky, and the sky is blue. A shadow that only loses value reads as dirt, and
+  is the most reliable way to make an outdoor render look like an indoor one.
+- **Foliage transmits.** A backlit leaf glows, and that single term does more
+  to make a canopy read as a canopy than any amount of silhouette work. On
+  animals the same term uses the distance field's real thickness — one extra
+  evaluation along the light direction, which is a thing almost no engine can
+  afford and this representation gives away.
+
+### Paying for it
+
+The pixel renderer spends **95% of its frame inside `cp4_height`** — 22.6M calls
+for a 640x360 image, about a hundred per pixel, each ten octaves of value noise
+carrying derivatives. That is the wrong algorithm for the shape of the problem:
+a two-dimensional function sampled by three-dimensional ray marching. Sampling
+it once onto a grid around the camera and marching the grid instead costs
+1.05M evaluations, and `height_core` drops from eight seconds to a quarter of
+one. Everything downstream reads the grid too — normals, occlusion, shadow
+rays, the height a tree stands on — so there is one terrain rather than two
+that disagree at the seams.
+
+Two details that were not obvious:
+
+- **Bilinear reconstruction is C0.** The gradient is piecewise constant inside
+  a cell and jumps at every boundary, and the gradient is the normal — so the
+  hills came out as a low-poly model. Smoothstepping the interpolation weights
+  makes it C1 for two extra multiplies and the faceting goes with it.
+- **The tile has to be the terrain, not a copy of it.** Placing grass and trees
+  with `cp4_height` while the ground under them came from the cache put them on
+  two surfaces that differ by whatever the caching smoothed away, so trunks
+  sank and blades floated.
+
+The new bottleneck is the creature distance field, at about 58% of the frame.
+Most of that was self-inflicted: `creature_sdf` blends an albedo alongside the
+distance and that blend costs an `expf` per primitive, so marching with it
+switched on spent fifty transcendentals per sample on a value thrown away
+everywhere except the one point the ray stops at. Marching for distance only
+and paying for colour once, at the hit, plus refusing to march a ray whose
+remaining span inside the bounding sphere is shorter than the distance the
+field reports, plus looping the primitives' own projected extent rather than
+the bounding sphere's — together those take a 1280x720 frame from fifteen
+seconds to nine. That is four times the pixels of the old renderer for slightly
+less time than it took.
+
 ## Visual styles
 
-Seven, and `drop` is not one of the others. Six are a pixel-art pipeline and
+Eight, and `drop` and `vista` are not among the other six. Six are a pixel-art pipeline and
 are not palette swaps of each other — internal resolution, camera scale,
 dither strength, background value structure and outline treatment all move
 together. `drop` is a separate renderer down a separate path: continuous tone,
 HDR, no palette, no dither, no upscale. `--vis NAME`, or
-`CporeEnv(vis="c64")` from python. Stage 1 defaults to `drop`, stage 2 to
-`abyss`, the land stage to `terra`; asking a stage for a style it cannot
-render gets that stage's own default back.
+`CporeEnv(vis="c64")` from python. Stage 1 defaults to `drop`, stage 3 to
+`vista`, stages 2 and 4 to `abyss` and `terra`; asking a stage for a style it
+cannot render gets that stage's own default back.
 
 | style | resolution | colours | look |
 | --- | --- | --- | --- |
 | `drop` | output res | continuous | darkfield microscopy: black field, translucent bodies, bloom, bokeh, a lens |
+| `vista` | output res | continuous | daylight landscape: banded light, hue-shifted shadow, transmitted foliage, two-term air |
 | `terra` | 640x360 | 48 | daylight land: a six-step sky, two foliage ramps, warm rock |
 | `petri` | 320x180 | 16 | cream paper, ink outlines, muted pigment — the only one with an inverted value structure |
 | `abyss` | 320x180 | 32 | deep water, dithered gradient, dark keylines |
@@ -886,6 +958,7 @@ landscapes ended in a grey wall. It is also the only style at 640x360 — one
 animal against open water reads fine at 320x180, but a landscape is ridgelines
 and treelines, and those are the first thing to dissolve.
 
+![terra](docs/style_terra.png)
 ![petri](docs/style_petri.png)
 ![c64](docs/style_c64.png)
 ![dmg](docs/style_dmg.png)
@@ -993,4 +1066,4 @@ Both renderers link separately from the sim, so a training build drops them.
 
 Mechanics are reimplemented from scratch. No Spore assets, model data, or file
 formats are used, and none should be added. All art here is procedural and
-generated by `src/render.c` and `src/render_cell.c`.
+generated by the renderers in `src/`.
