@@ -1076,6 +1076,11 @@ them is checked too — an API that works behind a UI that never calls it is the
 failure a screenshot cannot show. It prints its results onto the page, which is
 how the one above was verified.
 
+`python3 wasm/build_standalone.py` folds the module and the WebAssembly into a
+single 103KB document that runs from a `file://` URL with no server and makes
+no outbound request — for handing to someone, or for hosting anywhere with a
+content policy that blocks everything.
+
 ## Visual styles
 
 Eight, and `drop` and `vista` are not among the other six. Six are a pixel-art pipeline and
