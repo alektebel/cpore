@@ -711,6 +711,9 @@ src/aqua.c              the aquatic simulation, including the breeding populatio
 src/aqua_env.c          stage-2 RL wrapper
 src/land_genome.c       land body plans: parts, budgets, styles, editing
 src/land_edit.c         the editor session ABI: handles, ints, flat arrays
+wasm/shim.c             the whole C runtime the browser build needs
+wasm/cpore-edit.js      the JS side of that ABI
+wasm/editor.html        the creature editor, in a browser
 src/land.c              the creature simulation: four media, nests, impress-or-eat
 src/land_env.c          stage-3 RL wrapper
 src/civ.c               the civilisation simulation: cities, units, doctrines
@@ -1031,10 +1034,47 @@ legal genes, that **a dropped part is under the pixel it was dropped on**, that
 the budget is never overrun and says no before anything moves, and that slots
 survive a removal.
 
-What is left for a front end is the front end: a parts palette, a DNA meter,
-and mouse events wired to the calls above. Roadmap item 14 is the WebAssembly
-build that would host it in a browser, which is the only option that does not
-cost the project its zero-dependency claim.
+### In a browser
+
+![the editor](docs/editor_web.png)
+
+```
+make wasm      # 57KB of WebAssembly
+make serve     # http://127.0.0.1:8731/editor.html
+```
+
+Drag to orbit, pick a part and click the body to place it, drag a part to move
+it, right-click to remove it, drag a vertebra to hump the spine, paint with the
+three coats. The DNA meter and the stat block update as you go, and a part you
+cannot afford is greyed out in the palette rather than refused after the fact.
+
+**There is no Emscripten.** clang has had a wasm32 target for years and
+`wasm-ld` ships with lld, so the only thing missing was a C runtime — and the
+parts of one this program uses are an allocator, five memory functions and the
+transcendentals. `wasm/shim.c` is the first two, in about two hundred lines;
+the third are left undefined on purpose so the linker turns them into imports
+and the browser's own `Math` supplies them. Taking on a toolchain that brings
+its own libc, in order to demonstrate that the project does not need one, would
+have been a strange trade. The result is **57KB with six imports and no
+runtime**.
+
+The one hazard in the JS is that growing WebAssembly's linear memory *detaches*
+every `ArrayBuffer` view onto it, and the editor grows memory whenever a
+session opens or a frame allocates. So nothing in `cpore-edit.js` caches a
+view: it remakes one on demand, and every call into C is assumed to have
+invalidated whatever was held before it.
+
+Rendering uses the same quality ladder the studio exposes — quarter resolution
+and flat shading while the pointer is down, a proper frame 160 ms after it
+stops. In the browser that measured **34 ms coarse and 64 ms mid** at 512x512
+against 17 and 51 natively, which is the WebAssembly tax and is well inside
+what dragging needs.
+
+`editor.html?selftest=1` drives the model the way the pointer handlers do, then
+dispatches real `PointerEvent`s through those handlers so the wiring between
+them is checked too — an API that works behind a UI that never calls it is the
+failure a screenshot cannot show. It prints its results onto the page, which is
+how the one above was verified.
 
 ## Visual styles
 

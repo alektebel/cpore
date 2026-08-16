@@ -7,3 +7,4 @@ build/
 gmon.out
 __pycache__/
 *.pyc
+wasm/cpore.wasm

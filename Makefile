@@ -58,4 +58,38 @@ aqua: $(BUILD)/cpore_aqua ; @./$(BUILD)/cpore_aqua --seed 3 --steps 2400 --out $
 land: $(BUILD)/cpore_land ; @./$(BUILD)/cpore_land --seed 5 --steps 2400 --out $(BUILD)/land.png
 civ: $(BUILD)/cpore_civ ; @./$(BUILD)/cpore_civ --seed 4 --out $(BUILD)/civ.png
 
-clean: ; rm -rf $(BUILD)
+# ---- WebAssembly ----
+#
+# No Emscripten. clang has had a wasm32 target for years and wasm-ld ships
+# with lld, so the only thing missing is a C runtime - and the parts of one
+# this program actually uses are an allocator, five memory functions and the
+# transcendentals. wasm/shim.c is the first two; the third are left undefined
+# so the linker turns them into imports and the browser's own Math supplies
+# them. Taking on a toolchain that brings its own libc, in order to prove the
+# project does not need one, would have been a strange trade.
+WASM_SRC := src/rng.c src/genome.c src/land_genome.c src/land.c \
+            src/land_edit.c src/render_terra.c wasm/shim.c
+WASM_OBJ := $(WASM_SRC:%.c=$(BUILD)/wasm/%.o)
+WASM_CF  := --target=wasm32 -O2 -std=c99 -nostdlib -ffunction-sections \
+            -fdata-sections -Wall -Wextra -Wno-unused-parameter \
+            -Iwasm/include -Iinclude -D_POSIX_C_SOURCE=200809L
+WASM_EXPORTS := $(shell grep -oE '\bcp4_edit_[a-z_]+' include/cpore/land.h \
+                        | sort -u | sed 's/^/--export=/')
+
+$(BUILD)/wasm/%.o: %.c $(HDRS)
+	@mkdir -p $(dir $@)
+	clang $(WASM_CF) -c $< -o $@
+
+wasm/cpore.wasm: $(WASM_OBJ)
+	wasm-ld --no-entry --gc-sections --import-undefined \
+	  --export=cp_wasm_alloc --export=cp_wasm_free --export=__heap_base \
+	  --initial-memory=33554432 --max-memory=536870912 \
+	  $(WASM_EXPORTS) -o $@ $(WASM_OBJ)
+	@ls -l $@ | awk '{print "  " $$5 " bytes"}'
+
+.PHONY: wasm serve
+wasm: wasm/cpore.wasm
+# the page is ES modules and fetches the .wasm, so it needs an origin
+serve: wasm ; @echo "http://127.0.0.1:8731/editor.html" && cd wasm && python3 -m http.server 8731
+
+clean: ; rm -rf $(BUILD) wasm/cpore.wasm

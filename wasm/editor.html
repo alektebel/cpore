@@ -1,0 +1,443 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>cpore creature editor</title>
+<style>
+  :root {
+    --bg: #0d1013; --panel: #151a1f; --line: #232c34;
+    --ink: #c8d4dc; --dim: #6d7d8a; --hot: #6fd6c4; --warn: #e2604f;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+    display: grid; grid-template-columns: 190px 1fr 210px; height: 100vh;
+  }
+  .panel { background: var(--panel); overflow-y: auto; padding: 12px; }
+  .panel:first-child { border-right: 1px solid var(--line); }
+  .panel:last-child  { border-left: 1px solid var(--line); }
+  h2 { font-size: 11px; letter-spacing: .12em; text-transform: uppercase;
+       color: var(--dim); margin: 16px 0 7px; font-weight: 600; }
+  h2:first-child { margin-top: 0; }
+  #stage { display: flex; flex-direction: column; align-items: center;
+           justify-content: center; gap: 10px; position: relative; }
+  canvas { background: #05080a; border: 1px solid var(--line); border-radius: 3px;
+           cursor: crosshair; touch-action: none; image-rendering: auto; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+  button {
+    font: inherit; color: var(--ink); background: #1c242b;
+    border: 1px solid var(--line); border-radius: 3px; padding: 5px 6px;
+    cursor: pointer; text-align: left; white-space: nowrap; overflow: hidden;
+  }
+  button:hover { border-color: var(--hot); }
+  button.on { background: #1d3b39; border-color: var(--hot); color: #dffaf4; }
+  button:disabled { opacity: .32; cursor: not-allowed; border-color: var(--line); }
+  button .c { float: right; color: var(--dim); }
+  button.on .c { color: #9fe3d6; }
+  .row { display: flex; justify-content: space-between; gap: 8px; padding: 1px 0; }
+  .row span:last-child { color: #eaf2f6; }
+  .meter { height: 7px; background: #0a0e11; border: 1px solid var(--line);
+           border-radius: 4px; overflow: hidden; margin: 5px 0 2px; }
+  .meter i { display: block; height: 100%; background: var(--hot); }
+  .meter i.over { background: var(--warn); }
+  label { display: block; color: var(--dim); margin: 7px 0 1px; font-size: 11px; }
+  input[type=range] { width: 100%; accent-color: var(--hot); }
+  select { width: 100%; font: inherit; background: #1c242b; color: var(--ink);
+           border: 1px solid var(--line); border-radius: 3px; padding: 3px; }
+  #hint { color: var(--dim); font-size: 11px; height: 16px; }
+  #hint b { color: var(--hot); font-weight: 400; }
+  #boot { position: absolute; inset: 0; display: grid; place-items: center;
+          background: var(--bg); color: var(--dim); }
+</style>
+</head>
+<body>
+
+<div class="panel">
+  <h2>Parts</h2>
+  <div class="grid" id="palette"></div>
+  <h2>Selected</h2>
+  <div id="sel">
+    <div class="row"><span>none</span></div>
+  </div>
+  <h2>Start from</h2>
+  <div class="grid" id="styles"></div>
+</div>
+
+<div id="stage">
+  <canvas id="view" width="512" height="512"></canvas>
+  <div id="hint">drag to orbit &middot; pick a part, then click the body</div>
+  <div id="boot">loading cpore.wasm&hellip;</div>
+</div>
+
+<div class="panel">
+  <h2>DNA</h2>
+  <div class="row"><span id="dna">0 / 0</span><span id="nparts">0 parts</span></div>
+  <div class="meter"><i id="dnabar" style="width:0"></i></div>
+  <h2>Body</h2>
+  <label>segments <b id="lseg"></b></label>
+  <input type="range" id="nseg" min="2" max="6" step="1">
+  <label>girth</label><input type="range" id="girth" min="60" max="255">
+  <label>arch</label><input type="range" id="arch" min="-127" max="127">
+  <label>sweep</label><input type="range" id="sweep" min="-127" max="127">
+  <h2>Paint</h2>
+  <label>base hue</label><input type="range" id="hue" min="0" max="255">
+  <label>marking hue</label><input type="range" id="hue2" min="0" max="255">
+  <label>detail hue</label><input type="range" id="hue3" min="0" max="255">
+  <label>saturation</label><input type="range" id="sat" min="0" max="255">
+  <label>value</label><input type="range" id="val" min="40" max="255">
+  <label>marking coat</label><select id="pattern"></select>
+  <label>detail coat</label><select id="pattern2"></select>
+  <h2>Stats</h2>
+  <div id="stats"></div>
+</div>
+
+<script type="module">
+import { CreatureEditor, PARTS, PART_COST, PATTERNS, STYLES }
+  from './cpore-edit.js';
+
+const N = 512;
+const cv = document.getElementById('view');
+const ctx = cv.getContext('2d', { alpha: false });
+const $ = id => document.getElementById(id);
+
+let ed, tool = null, drag = null, settleTimer = 0, selected = null;
+
+/* ---- drawing ----
+ *
+ * Two qualities and a timer. While anything is moving the viewport draws at
+ * quarter resolution with flat shading, which is fast enough to drag against;
+ * a hundred and sixty milliseconds after the last event it redraws properly.
+ * That is the whole reason the C side takes a quality argument, and it is
+ * what makes a ray-marched distance field usable as an editor at all.
+ */
+function paint(q) {
+  const img = ed.render(q);
+  ctx.putImageData(new ImageData(img.data, N, N), 0, 0);
+  if (drag === null && selected !== null) outlineSelected();
+}
+
+function draw(moving) {
+  clearTimeout(settleTimer);
+  paint(moving ? 0 : 2);
+  if (moving) settleTimer = setTimeout(() => { paint(2); refresh(); }, 160);
+  else refresh();
+}
+
+/* A ring where the selected part sits, found by asking the picker rather than
+ * by projecting geometry - the picker is the authority on where things are. */
+function outlineSelected() {
+  const step = 12;
+  ctx.strokeStyle = '#6fd6c4';
+  ctx.lineWidth = 1;
+  for (let y = 0; y < N; y += step)
+    for (let x = 0; x < N; x += step)
+      if (ed.pick(x, y) === selected) ctx.strokeRect(x - 4, y - 4, 9, 9);
+}
+
+/* ---- panels ---- */
+function refresh() {
+  const cost = ed.cost, budget = ed.budget;
+  $('dna').textContent = `${cost} / ${budget}`;
+  const parts = ed.parts();
+  $('nparts').textContent = `${parts.length} part${parts.length === 1 ? '' : 's'}`;
+  const bar = $('dnabar');
+  bar.style.width = Math.min(100, cost / budget * 100) + '%';
+  bar.className = cost > budget ? 'over' : '';
+
+  const s = ed.stats();
+  $('stats').innerHTML = [
+    ['speed', s.speed.toFixed(0)], ['jump', s.jump.toFixed(0)],
+    ['hp', s.hp.toFixed(0)], ['armour', s.armor.toFixed(2)],
+    ['bite', s.bite.toFixed(0)], ['claw', s.claw.toFixed(0)],
+    ['charm', s.charm.toFixed(2)], ['reach', s.reach.toFixed(0)],
+    ['sight', s.sight.toFixed(0)], ['stamina', s.stamina.toFixed(0)],
+    ['swim', s.swim.toFixed(1)], ['fly', s.fly.toFixed(1)],
+    ['dig', s.dig.toFixed(1)],
+  ].map(([k, v]) => `<div class="row"><span>${k}</span><span>${v}</span></div>`).join('');
+
+  const b = ed.body();
+  $('nseg').value = b.nseg; $('lseg').textContent = b.nseg;
+  $('girth').value = b.girth; $('arch').value = b.arch; $('sweep').value = b.sweep;
+  $('hue').value = b.hue; $('hue2').value = b.hue2; $('hue3').value = b.hue3;
+  $('sat').value = b.sat; $('val').value = b.val;
+  $('pattern').value = b.pattern; $('pattern2').value = b.pattern2;
+
+  for (const btn of $('palette').children) {
+    const t = +btn.dataset.type;
+    btn.disabled = !ed.canAfford(t, 1);
+    btn.classList.toggle('on', tool === t);
+  }
+
+  if (selected === null) {
+    $('sel').innerHTML = '<div class="row"><span>none</span></div>';
+  } else {
+    const p = parts.find(q => q.slot === selected);
+    if (!p) { selected = null; return refresh(); }
+    $('sel').innerHTML = `
+      <div class="row"><span>${p.name}</span><span>${p.mirror ? 'mirrored' : 'single'}</span></div>
+      <label>size</label><input type="range" id="pscale" min="20" max="255" value="${p.scale}">
+      <label>reach</label><input type="range" id="plen" min="20" max="255" value="${p.len}">
+      <label>fold</label><input type="range" id="pbend" min="-127" max="127" value="${p.bend}">
+      <div class="grid" style="margin-top:6px">
+        <button id="pmir">mirror</button><button id="pdel">delete</button>
+      </div>`;
+    const live = (id, f) => $(id).addEventListener('input', e => { f(+e.target.value); draw(true); });
+    live('pscale', v => ed.shape(selected, { scale: v }));
+    live('plen',   v => ed.shape(selected, { length: v }));
+    live('pbend',  v => ed.shape(selected, { bend: v }));
+    $('pmir').onclick = () => { ed.setMirror(selected, !p.mirror); draw(false); };
+    $('pdel').onclick = () => { ed.remove(selected); selected = null; draw(false); };
+  }
+}
+
+function hint(t) { $('hint').innerHTML = t; }
+
+/* ---- pointer ----
+ *
+ * One rule decides what a press means, and it is asked of the model rather
+ * than tracked in the UI: if a part is armed and the pointer is over the
+ * body, the press drops it; if a spine handle is under the pointer, the press
+ * grabs the spine; if a part is under it, the press grabs the part; otherwise
+ * the press orbits. Nothing here has to remember what mode it is in.
+ */
+function xy(e) {
+  const r = cv.getBoundingClientRect();
+  return [Math.round((e.clientX - r.left) * N / r.width),
+          Math.round((e.clientY - r.top) * N / r.height)];
+}
+
+cv.addEventListener('pointerdown', e => {
+  const [x, y] = xy(e);
+  cv.setPointerCapture(e.pointerId);
+
+  if (tool !== null && ed.surface(x, y)) {
+    const slot = ed.drop(x, y, tool);
+    if (slot === null) hint('no slot free, or the budget says no');
+    else { selected = slot; hint(`placed <b>${PARTS[tool]}</b>`); }
+    draw(false);
+    return;
+  }
+  const vert = ed.spinePick(x, y, 13);
+  if (vert !== null) { drag = { kind: 'spine', vert }; hint(`vertebra <b>${vert}</b>`); return; }
+
+  const slot = ed.pick(x, y);
+  if (slot !== null) {
+    selected = slot; drag = { kind: 'part', slot };
+    hint(`moving <b>${ed.parts().find(p => p.slot === slot).name}</b>`);
+    draw(false);
+    return;
+  }
+  drag = { kind: 'orbit', x, y };
+});
+
+cv.addEventListener('pointermove', e => {
+  const [x, y] = xy(e);
+  if (!drag) {
+    const over = ed.surface(x, y);
+    cv.style.cursor = tool !== null ? (over ? 'copy' : 'not-allowed')
+                    : (ed.spinePick(x, y, 13) !== null ? 'ns-resize'
+                    : (ed.pick(x, y) !== null ? 'grab' : 'move'));
+    return;
+  }
+  if (drag.kind === 'orbit') {
+    ed.orbit((x - drag.x) * -0.012, (y - drag.y) * 0.010);
+    drag.x = x; drag.y = y;
+  } else if (drag.kind === 'part') {
+    ed.move(drag.slot, x, y);
+  } else {
+    ed.spineDrag(drag.vert, x, y);
+  }
+  draw(true);
+});
+
+const release = () => { if (drag) { drag = null; draw(false); } };
+cv.addEventListener('pointerup', release);
+cv.addEventListener('pointercancel', release);
+
+cv.addEventListener('wheel', e => {
+  e.preventDefault();
+  ed.view({ zoom: ed.getView().zoom * (e.deltaY < 0 ? 1.12 : 1 / 1.12) });
+  draw(true);
+}, { passive: false });
+
+cv.addEventListener('contextmenu', e => {
+  e.preventDefault();
+  const [x, y] = xy(e);
+  const slot = ed.pick(x, y);
+  if (slot !== null) { ed.remove(slot); if (selected === slot) selected = null; draw(false); }
+});
+
+addEventListener('keydown', e => {
+  if (e.key === 'Escape') { tool = null; selected = null; draw(false); hint('drag to orbit &middot; pick a part, then click the body'); }
+  if ((e.key === 'Delete' || e.key === 'Backspace') && selected !== null) {
+    ed.remove(selected); selected = null; draw(false);
+  }
+});
+
+/* ---- build the panels ---- */
+function buildPanels() {
+  const pal = $('palette');
+  PARTS.forEach((name, t) => {
+    if (t === 0) return;
+    const b = document.createElement('button');
+    b.dataset.type = t;
+    b.innerHTML = `${name}<span class="c">${PART_COST[t]}</span>`;
+    b.onclick = () => {
+      tool = tool === t ? null : t;
+      hint(tool === null ? 'drag to orbit' : `click the body to place <b>${name}</b>`);
+      refresh();
+    };
+    pal.appendChild(b);
+  });
+
+  const st = $('styles');
+  STYLES.forEach((name, i) => {
+    const b = document.createElement('button');
+    b.textContent = name;
+    b.onclick = () => { ed.loadStyle(i); selected = null; draw(false); };
+    st.appendChild(b);
+  });
+  ['random', 'mutate'].forEach((name, i) => {
+    const b = document.createElement('button');
+    b.textContent = name;
+    b.onclick = () => {
+      if (i === 0) ed.loadRandom((Math.random() * 1e9) | 0);
+      else ed.mutate((Math.random() * 1e9) | 0, 0.3);
+      selected = null; draw(false);
+    };
+    st.appendChild(b);
+  });
+
+  for (const id of ['pattern', 'pattern2'])
+    $(id).innerHTML = PATTERNS.map((p, i) => `<option value="${i}">${p}</option>`).join('');
+
+  const live = (id, f) => $(id).addEventListener('input', e => { f(+e.target.value); draw(true); });
+  live('nseg',  v => { ed.spine({ nseg: v }); $('lseg').textContent = v; });
+  live('girth', v => ed.spine({ girth: v }));
+  live('arch',  v => ed.spine({ arch: v }));
+  live('sweep', v => ed.spine({ sweep: v }));
+  live('hue',   v => ed.paint({ hue: v }));
+  live('hue2',  v => ed.paint({ hue2: v }));
+  live('hue3',  v => ed.paint({ hue3: v }));
+  live('sat',   v => ed.paint({ sat: v }));
+  live('val',   v => ed.paint({ val: v }));
+  live('pattern',  v => ed.coats({ pattern: v }));
+  live('pattern2', v => ed.coats({ pattern2: v }));
+}
+
+/* ---- boot ---- */
+ed = await CreatureEditor.create('./cpore.wasm', { width: N, height: N, budget: 248 });
+ed.loadStyle('predator');
+buildPanels();
+draw(false);
+$('boot').remove();
+
+/* A scripted session, for the harness: ?selftest=1 drives the model the way
+ * the pointer handlers do, then dispatches real PointerEvents so the wiring
+ * between them is tested too - an API that works behind a UI that does not
+ * call it is the failure mode a screenshot cannot show. */
+if (new URLSearchParams(location.search).has('selftest')) {
+  const log = [];
+  const ok = (c, m) => log.push(`${c ? 'ok  ' : 'FAIL'} ${m}`);
+
+  /* Sample on a grid. The first version of this walked an ellipse round the
+   * centre and found four pixels, because a creature is long and low and an
+   * ellipse is neither - which was a bad sampling pattern reported as a bad
+   * result. */
+  const onBody = [];
+  for (let y = 40; y < N - 40; y += 10)
+    for (let x = 40; x < N - 40; x += 10)
+      if (ed.surface(x, y)) onBody.push([x, y]);
+  /* A creature in a fitted frame covers well under a fifth of the viewport -
+   * it is a long low animal in a square - so the bar is "enough pixels to
+   * work with", not a fraction pulled out of the air. */
+  ok(onBody.length > 50, `surface(): ${onBody.length} of ${Math.pow(Math.floor((N-80)/10),2)} grid pixels on the body`);
+
+  let dropped = 0, back = 0;
+  for (const [x, y] of onBody) {
+    if (dropped >= 6 || !ed.canAfford('horn', 1)) break;
+    const s = ed.drop(x, y, 'horn');
+    if (s === null) continue;
+    dropped++;
+    if (ed.pick(x, y) === s) back++;
+  }
+  /* Not every drop picks back exactly. The union is smooth, so on a fillet
+   * between two parts the nearest primitive is genuinely ambiguous, and a
+   * part large enough to push the surface outward can put a neighbour under
+   * the pointer instead. The C test takes the same view: a majority is the
+   * honest bar, exactness is not. */
+  ok(dropped >= 3, `drop(): placed ${dropped}`);
+  ok(back * 2 >= dropped, `pick(): ${back}/${dropped} found at the pixel dropped on`);
+  ok(ed.cost <= ed.budget, `budget held: ${ed.cost}/${ed.budget}`);
+
+  const v0 = ed.getView().azimuth;
+  ed.orbit(0.4, 0.1);
+  ok(Math.abs(ed.getView().azimuth - v0 - 0.4) < 1e-4, 'orbit() moves the camera');
+
+  let vert = null;
+  for (let y = 0; y < N && vert === null; y += 6)
+    for (let x = 0; x < N; x += 6) {
+      vert = ed.spinePick(x, y, 10);
+      if (vert !== null) { ed.spineDrag(vert, x, y - 50); break; }
+    }
+  ok(vert !== null, `spinePick(): grabbed vertebra ${vert}`);
+
+  ed.paint({ hue: 150 }); ed.coats({ pattern: 'spots' });
+  ok(ed.body().hue === 150 && ed.body().pattern === 2, 'paint() and coats() write');
+
+  /* Now the wiring: real events through the real handlers.
+   *
+   * On a fresh, cheap body. The first version of this ran after the budget
+   * checks above had deliberately filled the animal to 247 of 248 DNA and
+   * every slot, then asserted that a drop succeeds - so it was asserting
+   * success on an operation that is required to refuse. The test was wrong,
+   * not the editor, and it is worth the reset to keep the check meaningful. */
+  ed.loadStyle('grazer');
+  selected = null;
+  const fresh = [];
+  for (let y = 40; y < N - 40; y += 10)
+    for (let x = 40; x < N - 40; x += 10)
+      if (ed.surface(x, y)) fresh.push([x, y]);
+
+  const evt = (type, x, y, btn = 0) => cv.dispatchEvent(new PointerEvent(type, {
+    clientX: cv.getBoundingClientRect().left + x,
+    clientY: cv.getBoundingClientRect().top + y,
+    button: btn, buttons: btn === 2 ? 2 : 1, pointerId: 1, bubbles: true,
+  }));
+
+  const azBefore = ed.getView().azimuth;
+  evt('pointerdown', 12, 12);            /* backdrop: must orbit, not drop */
+  evt('pointermove', 92, 30);
+  evt('pointerup', 92, 30);
+  ok(Math.abs(ed.getView().azimuth - azBefore) > 0.1,
+     'pointer on the backdrop orbits the camera');
+
+  const [bx, by] = fresh[Math.floor(fresh.length / 2)];
+  const nBefore = ed.parts().length;
+  tool = PARTS.indexOf('plate');
+  evt('pointerdown', bx, by);
+  evt('pointerup', bx, by);
+  ok(ed.parts().length === nBefore + 1,
+     `armed part + press on the body places it (${ed.cost}/${ed.budget} DNA)`);
+  tool = null;
+
+  const nAfter = ed.parts().length;
+  evt('contextmenu', bx, by, 2);
+  cv.dispatchEvent(new MouseEvent('contextmenu', {
+    clientX: cv.getBoundingClientRect().left + bx,
+    clientY: cv.getBoundingClientRect().top + by, bubbles: true, cancelable: true }));
+  ok(ed.parts().length < nAfter, 'right-click removes the part under the pointer');
+
+  selected = null;
+  draw(false);
+  const pre = document.createElement('pre');
+  pre.id = 'selftest';
+  pre.style.cssText = 'position:absolute;left:8px;top:8px;color:#6fd6c4;font-size:12px;margin:0;z-index:9;text-shadow:0 0 6px #000';
+  pre.textContent = log.join('\n');
+  $('stage').appendChild(pre);
+  document.title = log.some(l => l.startsWith('FAIL')) ? 'SELFTEST FAIL' : 'SELFTEST PASS';
+}
+</script>
+</body>
+</html>

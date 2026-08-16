@@ -99,9 +99,10 @@ shape, mirror, the spine handles, and paint over the three coats. `Cp4Edit`
 wraps the lot in a handle-and-flat-array ABI that ctypes and WebAssembly can
 both call, and `CreatureEditor` is the Python side of it.
 
-What is left is a front end: a parts palette, a DNA meter, and mouse events
-wired to calls that already exist. That is item 14's WASM build, which is the
-only host that does not cost the project its zero-dependency claim.
+The front end exists too: `make wasm && make serve`. Parts palette, DNA meter,
+live stat block, orbit, drop, drag, right-click to remove, spine handles and
+paint - and `?selftest=1` drives it through its own pointer handlers, so the
+wiring is checked rather than assumed.
 
 Still open on the RL side: `cp4_genome_from_action` sets parts, nseg and girth
 and nothing else, so colour, pattern and the spine genes remain unreachable
@@ -150,9 +151,13 @@ morphology-conditioned policy (GNN or transformer over the body graph) so one
 controller generalises across body plans. Full articulation for the player and
 nearest N, cheap kinematics for the rest.
 
-**14. WASM build and browser editor.** Compile sim and renderer to WebAssembly
-and put a drag-and-drop editor in the browser. Spore-like UX without adding a
-single native dependency to the C core.
+- ~~**14. WASM build and browser editor.**~~ Done for the creature editor, and
+  without Emscripten: clang's wasm32 target plus wasm-ld, with a two-hundred
+  line shim supplying the allocator and the memory functions, and the
+  browser's own Math imported for the transcendentals. 57KB, six imports, no
+  runtime. What is not compiled yet is the simulation itself - Test Drive in
+  a browser wants cp4_world_step and the vista renderer across the same
+  boundary, which is more surface but no new problem.
 
 **15. Animated output and an offline path tracer.** APNG is a short step from
 the existing DEFLATE encoder, and stills badly undersell a world whose whole
