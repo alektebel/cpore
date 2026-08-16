@@ -94,13 +94,14 @@
 <div id="stage">
   <header>
     <h1>Creature Creator</h1>
-    <p>A Spore-like body plan editor. The animal is a signed distance field,
-       ray-marched in WebAssembly &mdash; the same renderer the game uses, so
-       what you build here is what walks around in it.</p>
+    <p>Drag a part onto the animal to place it, drag it again to move it, drag
+       the ring to resize and the tip to lengthen. Drag a vertebra up to hump
+       the spine or sideways to fatten it. Every shape is made by dragging;
+       the panels are for the colours and the numbers.</p>
   </header>
   <canvas id="view" width="512" height="512" tabindex="0"
           aria-label="creature viewport"></canvas>
-  <div id="hint">drag to orbit &middot; pick a part, then click the body</div>
+  <div id="hint">drag a part onto the animal &middot; drag the animal to turn it</div>
   <div id="boot">loading&hellip;</div>
 </div>
 
@@ -135,7 +136,10 @@ const cv = document.getElementById('view');
 const ctx = cv.getContext('2d', { alpha: false });
 const $ = id => document.getElementById(id);
 
-let ed, tool = null, drag = null, settleTimer = 0, selected = null;
+let ed, drag = null, settleTimer = 0, selected = null;
+let carrying = null;   /* a part being dragged off the palette */
+const HINT = 'drag a part onto the animal &middot; drag the animal to turn it';
+let handles = null;    /* screen handles for the selected part */
 
 /* ---- drawing ----
  *
@@ -158,15 +162,35 @@ function draw(moving) {
   else refresh();
 }
 
-/* A ring where the selected part sits, found by asking the picker rather than
- * by projecting geometry - the picker is the authority on where things are. */
+/* The selected part's handles: a ring at its middle to resize it, a dot at
+ * its tip to lengthen it. Drawn from what the picker reported, so a handle
+ * cannot sit where the part is not. */
 function outlineSelected() {
-  const step = 12;
+  if (!handles) return;
+  ctx.save();
   ctx.strokeStyle = '#6fd6c4';
-  ctx.lineWidth = 1;
-  for (let y = 0; y < N; y += step)
-    for (let x = 0; x < N; x += step)
-      if (ed.pick(x, y) === selected) ctx.strokeRect(x - 4, y - 4, 9, 9);
+  ctx.fillStyle = 'rgba(11,14,17,.65)';
+  ctx.lineWidth = 1.5;
+
+  ctx.beginPath();
+  ctx.arc(handles.cx, handles.cy, HANDLE_R, 0, 7);
+  ctx.fill(); ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(handles.cx, handles.cy, 2.5, 0, 7);
+  ctx.stroke();
+
+  if (handles.tip) {
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath();
+    ctx.moveTo(handles.cx, handles.cy);
+    ctx.lineTo(handles.tip[0], handles.tip[1]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.arc(handles.tip[0], handles.tip[1], HANDLE_R * 0.72, 0, 7);
+    ctx.fill(); ctx.stroke();
+  }
+  ctx.restore();
 }
 
 /* ---- panels ---- */
@@ -197,17 +221,14 @@ function refresh() {
   $('sat').value = b.sat; $('val').value = b.val;
   $('pattern').value = b.pattern; $('pattern2').value = b.pattern2;
 
-  for (const btn of $('palette').children) {
-    const t = +btn.dataset.type;
-    btn.disabled = !ed.canAfford(t, 1);
-    btn.classList.toggle('on', tool === t);
-  }
+  for (const btn of $('palette').children)
+    btn.disabled = !ed.canAfford(+btn.dataset.type, 1);
 
   if (selected === null) {
     $('sel').innerHTML = '<div class="row"><span>none</span></div>';
   } else {
     const p = parts.find(q => q.slot === selected);
-    if (!p) { selected = null; return refresh(); }
+    if (!p) { select(null); return refresh(); }
     $('sel').innerHTML = `
       <div class="row"><span>${p.name}</span><span>${p.mirror ? 'mirrored' : 'single'}</span></div>
       <label>size</label><input type="range" id="pscale" min="20" max="255" value="${p.scale}">
@@ -221,7 +242,7 @@ function refresh() {
     live('plen',   v => ed.shape(selected, { length: v }));
     live('pbend',  v => ed.shape(selected, { bend: v }));
     $('pmir').onclick = () => { ed.setMirror(selected, !p.mirror); draw(false); };
-    $('pdel').onclick = () => { ed.remove(selected); selected = null; draw(false); };
+    $('pdel').onclick = () => { ed.remove(selected); select(null); draw(false); };
   }
 }
 
@@ -229,11 +250,16 @@ function hint(t) { $('hint').innerHTML = t; }
 
 /* ---- pointer ----
  *
- * One rule decides what a press means, and it is asked of the model rather
- * than tracked in the UI: if a part is armed and the pointer is over the
- * body, the press drops it; if a spine handle is under the pointer, the press
- * grabs the spine; if a part is under it, the press grabs the part; otherwise
- * the press orbits. Nothing here has to remember what mode it is in.
+ * Everything is a drag. A part comes off the palette under the cursor and is
+ * placed by letting go of it; a placed part is moved by dragging it, resized
+ * by dragging the ring on it and lengthened by dragging its tip; a vertebra
+ * is dragged up into a hump or sideways to fatten. There is no click-then-
+ * click mode anywhere, because that is not how the thing this imitates works
+ * and because a mode is a piece of state the user has to hold that the screen
+ * is not showing them.
+ *
+ * What a press means is asked of the model rather than tracked in the UI:
+ * handle, then vertebra, then part, then orbit. Nothing here remembers a mode.
  */
 function xy(e) {
   const r = cv.getBoundingClientRect();
@@ -241,37 +267,80 @@ function xy(e) {
           Math.round((e.clientY - r.top) * N / r.height)];
 }
 
+const HANDLE_R = 9;
+
+/* Where a part is on screen, asked of the picker.
+ *
+ * The picker is the authority on where things are, so the handles are placed
+ * from what it reports rather than from a second projection of the geometry -
+ * a handle that sits where the part is not is worse than no handle. Coarse on
+ * purpose: this runs when the selection changes, not per frame.
+ */
+function findHandles(slot) {
+  let n = 0, cx = 0, cy = 0, tip = null, best = -1;
+  for (let y = 2; y < N; y += 5)
+    for (let x = 2; x < N; x += 5) {
+      if (ed.pick(x, y) !== slot) continue;
+      n++; cx += x; cy += y;
+      /* The tip is the part's pixel furthest from the middle of the frame.
+       * The camera fits the body, so the middle of the frame is the middle of
+       * the animal, and furthest-from-it is the end you would pull on. */
+      const d = (x - N / 2) ** 2 + (y - N / 2) ** 2;
+      if (d > best) { best = d; tip = [x, y]; }
+    }
+  if (!n) return null;
+  cx /= n; cy /= n;
+  return { cx, cy, tip, n };
+}
+
+function handleAt(x, y) {
+  if (!handles) return null;
+  const near = (hx, hy) => (x - hx) ** 2 + (y - hy) ** 2 < HANDLE_R * HANDLE_R * 2.6;
+  if (handles.tip && near(handles.tip[0], handles.tip[1])) return 'reach';
+  if (near(handles.cx, handles.cy)) return 'size';
+  return null;
+}
+
+function select(slot) {
+  selected = slot;
+  handles = slot === null ? null : findHandles(slot);
+}
+
 cv.addEventListener('pointerdown', e => {
   const [x, y] = xy(e);
   cv.setPointerCapture(e.pointerId);
 
-  if (tool !== null && ed.surface(x, y)) {
-    const slot = ed.drop(x, y, tool);
-    if (slot === null) hint('no slot free, or the budget says no');
-    else { selected = slot; hint(`placed <b>${PARTS[tool]}</b>`); }
-    draw(false);
+  const h = handleAt(x, y);
+  if (h) {
+    const p = ed.parts().find(q => q.slot === selected);
+    drag = { kind: h, slot: selected, x, y, scale: p.scale, len: p.len };
+    hint(h === 'reach' ? 'pull to lengthen' : 'pull to resize');
     return;
   }
   const vert = ed.spinePick(x, y, 13);
-  if (vert !== null) { drag = { kind: 'spine', vert }; hint(`vertebra <b>${vert}</b>`); return; }
-
+  if (vert !== null) {
+    drag = { kind: 'spine', vert, x, y };
+    hint(`vertebra <b>${vert}</b> &middot; up to hump, sideways to fatten`);
+    return;
+  }
   const slot = ed.pick(x, y);
   if (slot !== null) {
-    selected = slot; drag = { kind: 'part', slot };
+    select(slot); drag = { kind: 'part', slot };
     hint(`moving <b>${ed.parts().find(p => p.slot === slot).name}</b>`);
     draw(false);
     return;
   }
+  select(null);
   drag = { kind: 'orbit', x, y };
+  draw(false);
 });
 
 cv.addEventListener('pointermove', e => {
   const [x, y] = xy(e);
   if (!drag) {
-    const over = ed.surface(x, y);
-    cv.style.cursor = tool !== null ? (over ? 'copy' : 'not-allowed')
-                    : (ed.spinePick(x, y, 13) !== null ? 'ns-resize'
-                    : (ed.pick(x, y) !== null ? 'grab' : 'move'));
+    cv.style.cursor = handleAt(x, y) ? 'nwse-resize'
+                    : ed.spinePick(x, y, 13) !== null ? 'ns-resize'
+                    : ed.pick(x, y) !== null ? 'grab' : 'move';
     return;
   }
   if (drag.kind === 'orbit') {
@@ -279,33 +348,112 @@ cv.addEventListener('pointermove', e => {
     drag.x = x; drag.y = y;
   } else if (drag.kind === 'part') {
     ed.move(drag.slot, x, y);
-  } else {
+  } else if (drag.kind === 'spine') {
+    /* Vertical is the hump the gene actually stores; horizontal is girth at
+     * that vertebra, which is the other thing you would reach for while
+     * holding a piece of the spine. */
     ed.spineDrag(drag.vert, x, y);
+    ed.spineGirth(drag.vert, (x - drag.x) * 0.006);
+    drag.x = x;
+  } else {
+    /* Pull away from the part's middle to grow it. Distance rather than a
+     * raw axis, so it works whichever way round the camera is. */
+    const d0 = Math.hypot(drag.x - handles.cx, drag.y - handles.cy);
+    const d1 = Math.hypot(x - handles.cx, y - handles.cy);
+    const k = (d1 - d0) * 1.6;
+    if (drag.kind === 'reach') ed.shape(drag.slot, { length: drag.len + k });
+    else                       ed.shape(drag.slot, { scale: drag.scale + k });
   }
   draw(true);
 });
 
-const release = () => { if (drag) { drag = null; draw(false); } };
+const release = () => {
+  if (!drag) return;
+  const wasPart = drag.kind !== 'orbit';
+  drag = null;
+  if (wasPart && selected !== null) handles = findHandles(selected);
+  draw(false);
+};
 cv.addEventListener('pointerup', release);
 cv.addEventListener('pointercancel', release);
 
 cv.addEventListener('wheel', e => {
   e.preventDefault();
-  ed.view({ zoom: ed.getView().zoom * (e.deltaY < 0 ? 1.12 : 1 / 1.12) });
+  /* Over a part, the wheel resizes it; anywhere else it moves the camera.
+   * Spore resizes with the wheel and so does this, and the disambiguation is
+   * the same question the press asks. */
+  const [x, y] = xy(e);
+  const slot = ed.pick(x, y);
+  if (slot !== null) {
+    const p = ed.parts().find(q => q.slot === slot);
+    ed.shape(slot, { scale: p.scale + (e.deltaY < 0 ? 12 : -12) });
+    if (selected !== slot) select(slot);
+  } else {
+    ed.view({ zoom: ed.getView().zoom * (e.deltaY < 0 ? 1.12 : 1 / 1.12) });
+  }
   draw(true);
 }, { passive: false });
+
+/* ---- dragging a part off the palette ----
+ *
+ * The part is placed the moment the cursor first crosses onto the body and
+ * then follows it, so what you are dragging is the real thing on the real
+ * animal rather than a ghost that will be replaced by something slightly
+ * different when you let go. Releasing off the body takes it away again, so
+ * the drag is cancellable and nothing is committed that was not seen.
+ */
+function carryStart(type, e) {
+  carrying = { type, slot: null };
+  hint(`drop <b>${PARTS[type]}</b> on the body`);
+  document.body.style.cursor = 'copy';
+  e.preventDefault();
+}
+
+addEventListener('pointermove', e => {
+  if (!carrying) return;
+  const r = cv.getBoundingClientRect();
+  const inside = e.clientX >= r.left && e.clientX <= r.right
+              && e.clientY >= r.top && e.clientY <= r.bottom;
+  const [x, y] = xy(e);
+  if (inside && ed.surface(x, y)) {
+    if (carrying.slot === null) {
+      const slot = ed.drop(x, y, carrying.type);
+      if (slot === null) { hint('no slot free, or the budget says no'); return; }
+      carrying.slot = slot;
+    } else {
+      ed.move(carrying.slot, x, y);
+    }
+    draw(true);
+  }
+});
+
+addEventListener('pointerup', () => {
+  if (!carrying) return;
+  document.body.style.cursor = '';
+  if (carrying.slot === null) hint('nothing placed &mdash; drop it on the animal');
+  else { select(carrying.slot); hint(`placed <b>${PARTS[carrying.type]}</b>`); }
+  carrying = null;
+  draw(false);
+});
 
 cv.addEventListener('contextmenu', e => {
   e.preventDefault();
   const [x, y] = xy(e);
   const slot = ed.pick(x, y);
-  if (slot !== null) { ed.remove(slot); if (selected === slot) selected = null; draw(false); }
+  if (slot !== null) { ed.remove(slot); if (selected === slot) select(null); draw(false); }
 });
 
 addEventListener('keydown', e => {
-  if (e.key === 'Escape') { tool = null; selected = null; draw(false); hint('drag to orbit &middot; pick a part, then click the body'); }
+  if (e.key === 'Escape') {
+    /* cancel a carry mid-flight, taking the part with it */
+    if (carrying) {
+      if (carrying.slot !== null) ed.remove(carrying.slot);
+      carrying = null; document.body.style.cursor = '';
+    }
+    select(null); draw(false); hint(HINT);
+  }
   if ((e.key === 'Delete' || e.key === 'Backspace') && selected !== null) {
-    ed.remove(selected); selected = null; draw(false);
+    ed.remove(selected); select(null); draw(false);
   }
 });
 
@@ -317,11 +465,10 @@ function buildPanels() {
     const b = document.createElement('button');
     b.dataset.type = t;
     b.innerHTML = `${name}<span class="c">${PART_COST[t]}</span>`;
-    b.onclick = () => {
-      tool = tool === t ? null : t;
-      hint(tool === null ? 'drag to orbit' : `click the body to place <b>${name}</b>`);
-      refresh();
-    };
+    /* A drag source, not a mode switch. pointerdown starts carrying the part;
+     * the window-level move and up handlers do the rest. */
+    b.addEventListener('pointerdown', e => carryStart(t, e));
+    b.addEventListener('dragstart', e => e.preventDefault());
     pal.appendChild(b);
   });
 
@@ -329,7 +476,7 @@ function buildPanels() {
   STYLES.forEach((name, i) => {
     const b = document.createElement('button');
     b.textContent = name;
-    b.onclick = () => { ed.loadStyle(i); selected = null; draw(false); };
+    b.onclick = () => { ed.loadStyle(i); select(null); draw(false); };
     st.appendChild(b);
   });
   ['random', 'mutate'].forEach((name, i) => {
@@ -338,7 +485,7 @@ function buildPanels() {
     b.onclick = () => {
       if (i === 0) ed.loadRandom((Math.random() * 1e9) | 0);
       else ed.mutate((Math.random() * 1e9) | 0, 0.3);
-      selected = null; draw(false);
+      select(null); draw(false);
     };
     st.appendChild(b);
   });
@@ -447,27 +594,60 @@ if (new URLSearchParams(location.search).has('selftest')) {
   ok(Math.abs(ed.getView().azimuth - azBefore) > 0.1,
      'pointer on the backdrop orbits the camera');
 
+  /* The palette drag, through the real handlers: press on the button, move
+   * over the animal, let go. This is the interaction the editor is for, so it
+   * is the one the harness has to prove works end to end. */
   const [bx, by] = fresh[Math.floor(fresh.length / 2)];
   const nBefore = ed.parts().length;
-  tool = PARTS.indexOf('plate');
-  evt('pointerdown', bx, by);
-  evt('pointerup', bx, by);
-  ok(ed.parts().length === nBefore + 1,
-     `armed part + press on the body places it (${ed.cost}/${ed.budget} DNA)`);
-  tool = null;
+  const plateBtn = [...$('palette').children].find(b => b.textContent.startsWith('plate'));
+  const r = cv.getBoundingClientRect();
+  const winMove = (x, y) => dispatchEvent(new PointerEvent('pointermove', {
+    clientX: r.left + x, clientY: r.top + y, pointerId: 2, bubbles: true }));
 
+  plateBtn.dispatchEvent(new PointerEvent('pointerdown', { pointerId: 2, bubbles: true, cancelable: true }));
+  ok(carrying !== null, 'pressing a palette part starts carrying it');
+  winMove(bx, by);
+  ok(ed.parts().length === nBefore + 1,
+     `dragging it over the animal places it (${ed.cost}/${ed.budget} DNA)`);
+
+  /* and it follows the pointer rather than sticking where it first landed */
+  const placedSlot = carrying.slot;
+  const before = ed.parts().find(p => p.slot === placedSlot);
+  const [ox, oy] = fresh[Math.floor(fresh.length * 0.2)];
+  winMove(ox, oy);
+  const after = ed.parts().find(p => p.slot === placedSlot);
+  ok(before.yaw !== after.yaw || before.seg !== after.seg || before.pitch !== after.pitch,
+     'the carried part follows the pointer');
+  dispatchEvent(new PointerEvent('pointerup', { pointerId: 2, bubbles: true }));
+  ok(carrying === null && selected === placedSlot, 'letting go commits it and selects it');
+
+  /* the handles, dragged */
+  ok(handles !== null, 'the selected part has handles');
+  const sBefore = ed.parts().find(p => p.slot === placedSlot).scale;
+  evt('pointerdown', Math.round(handles.cx), Math.round(handles.cy));
+  evt('pointermove', Math.round(handles.cx + 40), Math.round(handles.cy + 40));
+  evt('pointerup', Math.round(handles.cx + 40), Math.round(handles.cy + 40));
+  ok(ed.parts().find(p => p.slot === placedSlot).scale > sBefore,
+     'dragging the ring away from the part grows it');
+
+  /* Right-click where the part actually is now. The first version of this
+   * used the pixel it was first dropped on, which the drag had since moved it
+   * away from - so it right-clicked bare trunk and reported a correct refusal
+   * as a defect. */
   const nAfter = ed.parts().length;
-  evt('contextmenu', bx, by, 2);
+  const hx = Math.round(handles.cx), hy = Math.round(handles.cy);
   cv.dispatchEvent(new MouseEvent('contextmenu', {
-    clientX: cv.getBoundingClientRect().left + bx,
-    clientY: cv.getBoundingClientRect().top + by, bubbles: true, cancelable: true }));
+    clientX: cv.getBoundingClientRect().left + hx,
+    clientY: cv.getBoundingClientRect().top + hy, bubbles: true, cancelable: true }));
   ok(ed.parts().length < nAfter, 'right-click removes the part under the pointer');
 
-  selected = null;
+  select(null);
   draw(false);
   const pre = document.createElement('pre');
   pre.id = 'selftest';
-  pre.style.cssText = 'position:absolute;left:8px;top:8px;color:#6fd6c4;font-size:12px;margin:0;z-index:9;text-shadow:0 0 6px #000';
+  pre.style.cssText = 'position:absolute;left:8px;top:8px;color:#6fd6c4;'
+    + 'font-size:12px;margin:0;z-index:9;background:#0b0e11ee;padding:8px 10px;'
+    + 'border:1px solid #222b33;border-radius:3px;line-height:1.5';
   pre.textContent = log.join('\n');
   $('stage').appendChild(pre);
   document.title = log.some(l => l.startsWith('FAIL')) ? 'SELFTEST FAIL' : 'SELFTEST PASS';

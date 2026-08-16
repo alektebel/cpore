@@ -1043,10 +1043,27 @@ make wasm      # 57KB of WebAssembly
 make serve     # http://127.0.0.1:8731/editor.html
 ```
 
-Drag to orbit, pick a part and click the body to place it, drag a part to move
-it, right-click to remove it, drag a vertebra to hump the spine, paint with the
-three coats. The DNA meter and the stat block update as you go, and a part you
-cannot afford is greyed out in the palette rather than refused after the fact.
+**Every shape is made by dragging**, which is the whole point of imitating this
+particular editor. A part comes off the palette under the cursor, is placed the
+moment it first crosses onto the body and then follows the pointer, so what you
+are dragging is the real thing on the real animal rather than a ghost that will
+be replaced by something slightly different when you let go — and releasing off
+the body takes it away again, so nothing is committed that was not seen. A
+placed part is moved by dragging it, resized by dragging the ring on it,
+lengthened by dragging its tip, and removed by right-clicking. A vertebra drags
+up into a hump and sideways into a belly. The camera orbits by dragging
+anywhere the animal is not.
+
+There is no click-then-click mode anywhere. A mode is a piece of state the user
+has to hold that the screen is not showing them, and the first version of this
+page had one: you armed a part in the palette and then clicked the body. It
+worked and it was wrong, because it is not how the thing it imitates behaves.
+
+The handles are placed from what the picker reports rather than from a second
+projection of the geometry — a handle that sits where the part is not is worse
+than no handle. The DNA meter and the stat block update as you go, and a part
+you cannot afford is greyed out in the palette rather than refused after the
+fact.
 
 **There is no Emscripten.** clang has had a wasm32 target for years and
 `wasm-ld` ships with lld, so the only thing missing was a C runtime — and the
@@ -1071,10 +1088,12 @@ against 17 and 51 natively, which is the WebAssembly tax and is well inside
 what dragging needs.
 
 `editor.html?selftest=1` drives the model the way the pointer handlers do, then
-dispatches real `PointerEvent`s through those handlers so the wiring between
-them is checked too — an API that works behind a UI that never calls it is the
-failure a screenshot cannot show. It prints its results onto the page, which is
-how the one above was verified.
+dispatches real `PointerEvent`s through those handlers — including the whole
+palette drag: press the button, move over the animal, check the part appeared,
+move again, check it followed, release, check it committed and selected. An API
+that works behind a UI that never calls it is the failure a screenshot cannot
+show. It prints its results onto the page, which is how the one above was
+verified.
 
 `python3 wasm/build_standalone.py` folds the module and the WebAssembly into a
 single 103KB document that runs from a `file://` URL with no server and makes

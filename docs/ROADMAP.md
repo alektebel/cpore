@@ -99,10 +99,13 @@ shape, mirror, the spine handles, and paint over the three coats. `Cp4Edit`
 wraps the lot in a handle-and-flat-array ABI that ctypes and WebAssembly can
 both call, and `CreatureEditor` is the Python side of it.
 
-The front end exists too: `make wasm && make serve`. Parts palette, DNA meter,
-live stat block, orbit, drop, drag, right-click to remove, spine handles and
-paint - and `?selftest=1` drives it through its own pointer handlers, so the
-wiring is checked rather than assumed.
+The front end exists too: `make wasm && make serve`. Every shape is made by
+dragging, as in the editor it imitates - a part comes off the palette under
+the cursor and follows it until you let go, a placed part is dragged to move,
+its ring dragged to resize and its tip dragged to lengthen, a vertebra dragged
+up to hump and sideways to fatten. No click-then-click mode anywhere.
+`?selftest=1` drives the whole palette drag through the real pointer handlers,
+so the wiring is checked rather than assumed.
 
 Still open on the RL side: `cp4_genome_from_action` sets parts, nseg and girth
 and nothing else, so colour, pattern and the spine genes remain unreachable
