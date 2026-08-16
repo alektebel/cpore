@@ -386,6 +386,41 @@ void cp4_render_styled(const Cp4World *w, uint8_t *rgba, int width, int height,
                        int style);
 void cp4_render_portrait(const Cp4Genome *g, uint8_t *fb, int lw, int lh,
                          int style, uint32_t seed);
+
+/* ---- the creature editor's viewport ----
+ *
+ * One animal, a backdrop and a floor, rendered through the same continuous-
+ * tone path the world uses - so what you design is what you get, which is the
+ * one thing an editor viewport has to promise.
+ *
+ * A studio holds its buffers across frames because an editor redraws
+ * constantly and an editor that reallocates a megabyte per frame is an editor
+ * that stutters. `quality` picks an internal resolution and a marcher budget
+ * together: draw at 0 or 1 while the mouse is moving and at 3 when it stops,
+ * and the coarse frames are fast enough to drag against while the settled one
+ * is supersampled.
+ */
+typedef struct Cp4Studio Cp4Studio;
+
+typedef struct {
+    float azimuth;   /* turntable, radians                            */
+    float elev;      /* camera rise, radians                          */
+    float zoom;      /* 1 frames the whole animal; larger moves in    */
+    float phase;     /* gait phase, so the pose can breathe           */
+    int   quality;   /* 0 coarse .. 3 settled and supersampled        */
+} Cp4View;
+
+Cp4Studio *cp4_studio_new(int width, int height);
+void       cp4_studio_free(Cp4Studio *s);
+void       cp4_studio_size(const Cp4Studio *s, int32_t *w, int32_t *h);
+void       cp4_studio_render(Cp4Studio *s, const Cp4Genome *g,
+                             const Cp4View *v, uint8_t *rgba);
+/* Which genome slot is under a pixel, or -1 for the backdrop or the trunk.
+ * The same march the renderer runs, so the answer can never disagree with
+ * what is on screen - which is the usual failure of a separate picking
+ * representation, and the one a user notices immediately. */
+int        cp4_studio_pick(Cp4Studio *s, const Cp4Genome *g,
+                           const Cp4View *v, int px, int py);
 /* The same, from a chosen angle. azimuth turns around the animal, elev raises
  * the camera; both in radians. A creature editor that can only show you one
  * angle is not showing you the creature - the whole reason a part carries a

@@ -2281,6 +2281,24 @@ void cp4_render(const Cp4World *w, uint8_t *rgba, int W, int H)
 void cp4_render_pose(const Cp4Genome *g, uint8_t *fb, int lw, int lh,
                      int style, uint32_t seed, float azimuth, float elev)
 {
+    /* An editor viewport that does not look like the game is an editor that
+     * lies about what you are making, so a continuous style routes to the
+     * studio rather than falling through to a palette nothing else uses any
+     * more. One-shot callers pay for a studio per call; anything redrawing
+     * interactively should hold one open with cp4_studio_new. */
+    if (cp_vis_continuous(style)) {
+        Cp4Studio *st = cp4_studio_new(lw, lh);
+        if (st) {
+            Cp4View v;
+            v.azimuth = azimuth; v.elev = elev; v.zoom = 1.0f;
+            v.phase = (float)(seed % 128) * 0.05f; v.quality = 3;
+            cp4_studio_render(st, g, &v, fb);
+            cp4_studio_free(st);
+            return;
+        }
+        style = CP_VIS_TERRA;
+    }
+
     float *zb = (float *)malloc(sizeof(float) * (size_t)lw * lh);
     if (!zb) return;
 

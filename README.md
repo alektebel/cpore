@@ -929,6 +929,46 @@ the bounding sphere's — together those take a 1280x720 frame from fifteen
 seconds to nine. That is four times the pixels of the old renderer for slightly
 less time than it took.
 
+## The creature editor's viewport
+
+`--creature` renders one animal from four angles against a studio backdrop,
+with the stat block the parts actually bought. It goes through the same
+continuous-tone path the world does, which is the only promise a viewport has
+to make: what you design is what you get.
+
+```
+./build/cpore_land --creature --style predator --out sheet.png
+./build/cpore_land --gallery 4 --seed 12 --out gallery.png
+```
+
+Underneath is `Cp4Studio`, built for an editor rather than for a still. It
+holds its buffers across frames, and `quality` selects an internal resolution
+and a light-transport budget together, so a caller can draw coarse while the
+mouse is moving and settle when it stops. On this machine, one predator at
+512x512:
+
+| quality | what it does | time | rate |
+| --- | --- | --- | --- |
+| 0 | quarter res, flat shading | 17 ms | 60 fps |
+| 1 | half res, ambient occlusion | 51 ms | 20 fps |
+| 2 | full res, occlusion + shadows | 0.70 s | — |
+| 3 | 2x supersampled, everything | 2.9 s | — |
+
+That ladder is what makes direct manipulation feasible without a GPU: drag
+against 0 or 1, settle to 2, export at 3.
+
+The other half is `cp4_studio_pick`, which answers *which genome slot is under
+this pixel* in about ten microseconds. It runs the same march the renderer
+does and stops at the first hit, so picking cannot disagree with what is on
+screen — which is the usual failure of a separate picking representation, and
+the one a user notices immediately. `Prim` carries the genome slot that pushed
+it, stamped by the builder, so a pixel maps back to the gene that drew it.
+
+Between those two, the parts an interactive editor still needs are the drag
+semantics (project the mouse back onto the body surface to get a new
+`seg/yaw/pitch`), the spine handles, and a front end. Roadmap item 14 is the
+WebAssembly build that would host it.
+
 ## Visual styles
 
 Eight, and `drop` and `vista` are not among the other six. Six are a pixel-art pipeline and

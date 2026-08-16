@@ -150,6 +150,11 @@ static int build_prims4(const Cp4Beast *b, int is_player, Prim *out,
         if (t == CP4_NONE) continue;
         int sg = b->g.part[i].seg;
         if (sg >= nseg) sg = nseg - 1;
+        /* Everything pushed from here to the end of this iteration belongs to
+         * genome slot i, whatever shape it turned out to be - a spike is one
+         * cone and a tail is five. Stamping the range afterwards is what lets
+         * an editor turn a pixel back into the gene that drew it. */
+        int prim0 = n;
 
         float er;
         V3 col = part_albedo4(t, &er);
@@ -397,6 +402,9 @@ static int build_prims4(const Cp4Beast *b, int is_player, Prim *out,
                 break;
             }
         }
+        /* close the range opened above: every primitive this iteration pushed,
+         * across both mirror copies, belongs to genome slot i */
+        for (int z = prim0; z < n; z++) out[z].part = i;
     }
 
     prim_bounds(out, n, cv(b->p), centre, bound);

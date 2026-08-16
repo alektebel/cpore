@@ -177,8 +177,22 @@ typedef struct {
     V3       sun, sunc;
     float    day, mist;
     int      submerged, buried;
+    /* A creature viewport is the same shading model with the world taken
+     * away: no heightfield to shadow against and no kilometres of air to
+     * look through. One flag short-circuits both rather than threading a
+     * second set of branches through every term below. */
+    int      studio;
+    /* How much light transport the creature marcher is allowed: 0 flat, 1
+     * ambient occlusion, 2 occlusion and self-shadowing. The world always
+     * wants 2; an editor dragging a limb wants 0, and would rather have the
+     * frame. Screen size alone cannot express that - a creature filling the
+     * viewport is exactly when the shadow is most expensive and exactly when
+     * the user is least able to see it. */
+    int      detail;
     Tile     tile;
 } Land;
+
+static inline C3 v2c(V3 v) { return c3(v.x, v.y, v.z); }
 
 static inline void putz(Land *c, int x, int y, V3 col, float z)
 {
@@ -495,6 +509,7 @@ static V3 sky_col(const Land *c, V3 ray)
  * cheapest antialiasing available. */
 static V3 aerial(const Land *c, V3 col, float dist, V3 ray)
 {
+    if (c->studio) return col;
     if (c->buried || c->submerged) {
         float fd = c->buried ? 62.0f : 300.0f;
         float cap = c->buried ? 0.88f : 0.95f;
@@ -638,6 +653,7 @@ static float terrain_ao(const Land *c, V3 q, V3 n)
 
 static float terrain_shadow(const Land *c, V3 q)
 {
+    if (c->studio) return 1.0f;
     V3 l = mul(c->sun, -1.0f);
     float res = 1.0f, t = 4.0f, dt = 4.5f;
     for (int i = 0; i < 26; i++) {
@@ -1427,8 +1443,8 @@ static void march_creature(Land *c, const Prim *pr, int n, V3 centre, float boun
      * is twenty evaluations spent on a gradient nobody can see. Same for the
      * march itself - a small beast needs far fewer steps to resolve to within
      * a pixel. */
-    int   hi    = rpx > 46.0f;
-    int   shad  = rpx > 130.0f;              /* only what fills the frame  */
+    int   hi    = c->detail >= 1 && rpx > 46.0f;
+    int   shad  = c->detail >= 2 && rpx > 130.0f;   /* only what fills the frame */
     int   steps = rpx > 90.0f ? 56 : (rpx > 30.0f ? 38 : 22);
     /* The hit epsilon is set against a pixel, not against the animal. Chasing
      * the surface to a thirtieth of a unit on a body forty units across is
@@ -1839,6 +1855,7 @@ void cp4_render_vista(const Cp4World *w, uint8_t *rgba, int W, int H)
     for (size_t i = 0; i < (size_t)W * H; i++) c.zb[i] = Z_CLEAR;
 
     c.focal = (float)W * 0.62f;          /* wide: this stage is about the view */
+    c.detail = 2;
     c.seed = w->seed;
     c.time = (float)w->step * CP4_DT;
     c.sun = sun_dir(w->step);
@@ -1921,4 +1938,385 @@ void cp4_render_vista(const Cp4World *w, uint8_t *rgba, int W, int H)
     tile_free(&c.tile);
     free(c.h.px);
     free(c.zb);
+}
+
+/* ------------------------------------------------------------------ *
+ * the studio
+ *
+ * The creature editor's viewport. Same shading model as the landscape - the
+ * bodies are the thing both are for - with the world taken away and replaced
+ * by a backdrop, a floor and a fixed key light.
+ *
+ * Two things here exist for the editor rather than for the picture:
+ *
+ * `quality` selects an internal resolution and a marcher budget together, so
+ * a caller can draw a coarse frame while the mouse is moving and a settled
+ * one when it stops. That is the whole trick behind every distance-field
+ * editor: at a quarter resolution this is fast enough to drag against, and
+ * the sharp image lands a fraction of a second after you let go.
+ *
+ * `cp4_studio_pick` answers "which part is under this pixel", which is the
+ * one thing direct manipulation cannot be built without. It is the same march
+ * the renderer does, stopped at the first hit and asked for an identity
+ * instead of a colour - so picking can never disagree with what is on screen,
+ * which is the usual failure of a separate picking representation.
+ * ------------------------------------------------------------------ */
+
+struct Cp4Studio {
+    Land land;
+    int  W, H;          /* output size                                  */
+    int  cap;           /* internal pixels allocated (at the finest SS) */
+};
+
+/* Internal resolution as a multiple of the output, per quality step. The top
+ * one supersamples: at 2x linear the marcher runs four rays per output pixel,
+ * which is what removes the stair-stepping from a silhouette that has no
+ * pixel grid to hide behind any more. */
+static const float STUDIO_SCALE[4] = { 0.25f, 0.5f, 1.0f, 2.0f };
+
+Cp4Studio *cp4_studio_new(int w, int h)
+{
+    if (w < 16 || h < 16) return NULL;
+    Cp4Studio *s = (Cp4Studio *)calloc(1, sizeof(Cp4Studio));
+    if (!s) return NULL;
+    s->W = w; s->H = h;
+    s->cap = (w * 2) * (h * 2);
+    s->land.h.px = (float *)malloc(sizeof(float) * (size_t)s->cap * 3);
+    s->land.zb   = (float *)malloc(sizeof(float) * (size_t)s->cap);
+    if (!s->land.h.px || !s->land.zb) { cp4_studio_free(s); return NULL; }
+    return s;
+}
+
+void cp4_studio_free(Cp4Studio *s)
+{
+    if (!s) return;
+    free(s->land.h.px);
+    free(s->land.zb);
+    free(s);
+}
+
+void cp4_studio_size(const Cp4Studio *s, int32_t *w, int32_t *h)
+{
+    if (!s) return;
+    if (w) *w = s->W;
+    if (h) *h = s->H;
+}
+
+/* Build the animal, and stand it on the floor. A genome is not a beast, so
+ * the parts of Cp4Beast the rig actually reads - stats, stance, phase - are
+ * filled in and the rest left at zero. */
+static int studio_build(const Cp4Genome *g, float phase, Prim *pr,
+                        V3 *centre, float *bound, Skin *sk)
+{
+    Cp4Beast b;
+    memset(&b, 0, sizeof(b));
+    b.g = *g;
+    cp4_genome_stats(&b.g, &b.s);
+    b.hp = b.hp_max = b.s.hp_max;
+    b.alive = 1;
+    b.p.x = 0.0f; b.p.y = -b.s.stand; b.p.z = 0.0f;
+    b.yaw = 0.0f;
+    b.phase = phase;
+    return build_prims4(&b, 0, pr, centre, bound, sk);
+}
+
+/* Camera, from the turntable. Kept in one place because the picker has to
+ * agree with the renderer exactly, and the cheapest way to guarantee that is
+ * for there to be one function that decides.
+ *
+ * The framing fits the body rather than its bounding sphere. prim_bounds
+ * measures from the body's centre to whatever sticks out furthest, so a long
+ * tail sets the radius and every animal that has one is then framed as though
+ * it were a ball of that size - which is why the gallery had a small creature
+ * marooned in the middle of every tile. Taking the real extent perpendicular
+ * to the view, and aiming at the middle of what is actually there, fills the
+ * frame with the animal whatever shape it turned out to be. */
+static void studio_camera(Land *c, const Cp4View *v, const Prim *pr, int n,
+                          V3 centre, float bound, int W, int H)
+{
+    float zoom = v->zoom > 0.05f ? v->zoom : 1.0f;
+    V3 dir = norm(v3(cosf(v->azimuth) * cosf(v->elev), -sinf(v->elev),
+                     sinf(v->azimuth) * cosf(v->elev)));
+    c->focal = (float)W * 0.98f;
+
+    /* the middle of the body, not the middle of its bounding sphere */
+    V3 lo = v3(1e9f, 1e9f, 1e9f), hi = v3(-1e9f, -1e9f, -1e9f);
+    for (int i = 0; i < n; i++) {
+        for (int e = 0; e < 2; e++) {
+            V3 p = e ? pr[i].b : pr[i].a;
+            float r = e ? pr[i].rb : pr[i].ra;
+            if (p.x - r < lo.x) lo.x = p.x - r;
+            if (p.y - r < lo.y) lo.y = p.y - r;
+            if (p.z - r < lo.z) lo.z = p.z - r;
+            if (p.x + r > hi.x) hi.x = p.x + r;
+            if (p.y + r > hi.y) hi.y = p.y + r;
+            if (p.z + r > hi.z) hi.z = p.z + r;
+        }
+    }
+    V3 aim = n > 0 ? mul(add(lo, hi), 0.5f) : centre;
+
+    /* Extent across the view and depth along it, then the standard fit. The
+     * margin leaves the animal short of the edge, because a creature touching
+     * the frame reads as a badly built one rather than a badly framed shot. */
+    float ext = 1.0f, depth = 0.0f;
+    for (int i = 0; i < n; i++) {
+        for (int e = 0; e < 2; e++) {
+            V3 rel = sub(e ? pr[i].b : pr[i].a, aim);
+            float r = (e ? pr[i].rb : pr[i].ra) + pr[i].k * 0.5f;
+            float along = dot(rel, dir);
+            V3 perp = sub(rel, mul(dir, along));
+            float pl = sqrtf(dot(perp, perp)) + r;
+            if (pl > ext) ext = pl;
+            float dp = fabsf(along) + r;
+            if (dp > depth) depth = dp;
+        }
+    }
+    float halftan = 0.5f * (float)(W < H ? W : H) / c->focal;
+    float dist = ext / (halftan * 0.84f) + depth;
+    if (dist < bound * 0.9f) dist = bound * 0.9f;
+
+    c->eye = add(aim, mul(dir, dist / zoom));
+    V3 look = norm(sub(aim, c->eye));
+    c->fwd = look;
+    c->right = norm(v3(-look.z, 0.0f, look.x));
+    c->up = norm(v3(c->right.z * look.y - c->right.y * look.z,
+                    c->right.x * look.z - c->right.z * look.x,
+                    c->right.y * look.x - c->right.x * look.y));
+    c->W = W; c->H = H;
+}
+
+static void studio_light(Land *c)
+{
+    /* A portrait is always the same hour, because the point of it is to
+     * compare one body against another rather than one afternoon against
+     * another. Three-quarter key, slightly above. */
+    c->sun = norm(v3(0.42f, 0.76f, -0.30f));
+    c->sunc = sun_colour(c->sun);
+    c->day = 1.0f;
+    c->mist = 0.0f;
+    c->studio = 1;
+    c->submerged = c->buried = 0;
+    c->time = 0.0f;
+    c->seed = 0x5C0AEu;
+}
+
+/* Backdrop and floor.
+ *
+ * A cyclorama rather than a gradient: dark, cool, falling off toward the
+ * corners so the eye is pushed to the middle, with a soft pool of light
+ * behind the subject. The floor is a disc that fades out rather than a plane
+ * that runs to a horizon - a horizon line behind a creature reads as a
+ * landscape, and this is deliberately not one.
+ */
+static void studio_ground(Land *c, const Prim *pr, int n, float bound,
+                          int quality)
+{
+    V3 tosun = mul(c->sun, -1.0f);
+    float R = bound * 2.6f;
+    for (int y = 0; y < c->H; y++) {
+        for (int x = 0; x < c->W; x++) {
+            float px = ((float)x + 0.5f - c->W * 0.5f) / c->focal;
+            float py = ((float)y + 0.5f - c->H * 0.5f) / c->focal;
+            V3 ray = norm(add(add(mul(c->right, px), mul(c->up, -py)), c->fwd));
+
+            /* backdrop */
+            float u = ((float)x + 0.5f) / c->W - 0.5f;
+            float w = ((float)y + 0.5f) / c->H - 0.5f;
+            float rad = sqrtf(u * u + w * w);
+            float pool = expf(-rad * rad * 5.0f);
+            V3 bg = add(v3(0.020f, 0.026f, 0.040f), mul(v3(0.10f, 0.12f, 0.17f), pool));
+            hdr_set(&c->h, x, y, v2c(bg));
+            c->zb[(size_t)y * c->W + x] = Z_CLEAR;
+
+            /* floor at y = 0, which is exactly where the legs reach */
+            if (ray.y <= 0.001f) continue;
+            float t = (0.0f - c->eye.y) / ray.y;
+            if (t <= 0.0f) continue;
+            V3 h = add(c->eye, mul(ray, t));
+            float r = sqrtf(h.x * h.x + h.z * h.z);
+            float fade = sstep(R, R * 0.35f, r);
+            if (fade <= 0.001f) continue;
+
+            float grain = 0.90f + 0.20f * rnoise(0x77u, h.x * 0.32f, h.z * 0.32f);
+            V3 alb = mul(v3(0.105f, 0.112f, 0.108f), grain);
+
+            /* The contact shadow is the whole reason there is a floor. An
+             * animal without one floats, and floating hides exactly the thing
+             * the leg rig exists to show. Traced against the real body, so it
+             * is the shadow of this creature and not a blob. */
+            /* The contact shadow is the whole reason there is a floor: an
+             * animal without one floats, and floating hides exactly what the
+             * leg rig exists to show. It is also, unguarded, about half the
+             * frame - so it is traced only where a body could plausibly be
+             * over, only at the settled qualities, and with a tenth of the
+             * reach a general soft shadow needs. */
+            float sh = 1.0f;
+            if (quality >= 2 && r < bound * 1.45f) {
+                float res = 1.0f, tt = 0.6f;
+                for (int k = 0; k < 12 && tt < bound * 1.6f; k++) {
+                    float dd = creature_sdf(pr, n, add(h, mul(tosun, tt)),
+                                            NULL, NULL, NULL);
+                    if (dd < 0.04f) { res = 0.0f; break; }
+                    float kk = 6.0f * dd / tt;
+                    if (kk < res) res = kk;
+                    tt += clampf(dd, 0.5f, 3.5f);
+                }
+                sh = sstep(0.0f, 1.0f, clampf(res, 0.0f, 1.0f));
+            }
+
+            V3 col = shade(c, alb, v3(0.0f, -1.0f, 0.0f), ray,
+                           0.55f + 0.45f * sstep(bound * 2.4f, bound * 0.6f, r),
+                           sh, MAT_GROUND, 0.0f);
+            V3 out = clerp3(bg, col, fade);
+            hdr_set(&c->h, x, y, v2c(out));
+            c->zb[(size_t)y * c->W + x] = t * dot(ray, c->fwd);
+        }
+    }
+}
+
+void cp4_studio_render(Cp4Studio *s, const Cp4Genome *g, const Cp4View *v,
+                       uint8_t *rgba)
+{
+    if (!s || !g || !v || !rgba) return;
+    int q = v->quality < 0 ? 0 : (v->quality > 3 ? 3 : v->quality);
+    float sc = STUDIO_SCALE[q];
+    int iw = (int)(s->W * sc), ih = (int)(s->H * sc);
+    if (iw < 8) iw = 8;
+    if (ih < 8) ih = 8;
+    if (iw * ih > s->cap) return;
+
+    static Prim pr[MAX_PRIM];
+    V3 centre;
+    float bound;
+    Skin sk;
+    int n = studio_build(g, v->phase, pr, &centre, &bound, &sk);
+    if (n <= 0) return;
+
+    Land *c = &s->land;
+    c->h.W = iw; c->h.H = ih;
+    c->h.expo = VISTA_EXPOSURE * 1.10f;
+    c->h.ui = 1.0f;
+    c->h.step = 0;
+    studio_light(c);
+    c->detail = q >= 2 ? 2 : (q >= 1 ? 1 : 0);
+    studio_camera(c, v, pr, n, centre, bound, iw, ih);
+
+    studio_ground(c, pr, n, bound, q);
+    march_creature(c, pr, n, centre, bound, &sk);
+
+    if (q >= 2) bloom(&c->h, 1.15f, 0.24f);
+
+    /* Resolve into the top-left of the caller's buffer at the internal size,
+     * then rescale in place. Doing it this way keeps the film chain shared
+     * with every other renderer instead of growing a second copy that drifts
+     * out of step with it. */
+    uint8_t *tmp = (uint8_t *)malloc((size_t)iw * ih * 4);
+    if (!tmp) return;
+    resolve(&c->h, tmp);
+
+    /* Box filter when downsampling from the supersampled pass, bilinear when
+     * blowing a coarse pass up. The first is what makes quality 3 look
+     * antialiased; the second is what makes quality 0 look soft rather than
+     * blocky, which is the right failure mode while something is moving. */
+    for (int y = 0; y < s->H; y++) {
+        for (int x = 0; x < s->W; x++) {
+            uint8_t *d = rgba + 4 * ((size_t)y * s->W + x);
+            if (sc > 1.001f) {
+                int k = (int)(sc + 0.5f);
+                int sx0 = x * k, sy0 = y * k;
+                int acc[3] = { 0, 0, 0 }, cnt = 0;
+                for (int j = 0; j < k; j++)
+                    for (int i = 0; i < k; i++) {
+                        int sx = sx0 + i, sy = sy0 + j;
+                        if (sx >= iw || sy >= ih) continue;
+                        const uint8_t *p = tmp + 4 * ((size_t)sy * iw + sx);
+                        acc[0] += p[0]; acc[1] += p[1]; acc[2] += p[2];
+                        cnt++;
+                    }
+                if (!cnt) cnt = 1;
+                d[0] = (uint8_t)(acc[0] / cnt);
+                d[1] = (uint8_t)(acc[1] / cnt);
+                d[2] = (uint8_t)(acc[2] / cnt);
+            } else {
+                float fx = ((float)x + 0.5f) * sc - 0.5f;
+                float fy = ((float)y + 0.5f) * sc - 0.5f;
+                int x0 = (int)floorf(fx), y0 = (int)floorf(fy);
+                float tx = fx - (float)x0, ty = fy - (float)y0;
+                int x1 = x0 + 1, y1 = y0 + 1;
+                if (x0 < 0) x0 = 0;
+                if (y0 < 0) y0 = 0;
+                if (x1 >= iw) x1 = iw - 1;
+                if (y1 >= ih) y1 = ih - 1;
+                if (x0 >= iw) x0 = iw - 1;
+                if (y0 >= ih) y0 = ih - 1;
+                for (int ch = 0; ch < 3; ch++) {
+                    float a = tmp[4 * ((size_t)y0 * iw + x0) + ch];
+                    float b = tmp[4 * ((size_t)y0 * iw + x1) + ch];
+                    float e = tmp[4 * ((size_t)y1 * iw + x0) + ch];
+                    float f = tmp[4 * ((size_t)y1 * iw + x1) + ch];
+                    d[ch] = (uint8_t)(mixf(mixf(a, b, tx), mixf(e, f, tx), ty) + 0.5f);
+                }
+            }
+            d[3] = 255;
+        }
+    }
+    free(tmp);
+}
+
+int cp4_studio_pick(Cp4Studio *s, const Cp4Genome *g, const Cp4View *v,
+                    int px, int py)
+{
+    if (!s || !g || !v) return -1;
+    if (px < 0 || py < 0 || px >= s->W || py >= s->H) return -1;
+
+    static Prim pr[MAX_PRIM];
+    V3 centre;
+    float bound;
+    Skin sk;
+    int n = studio_build(g, v->phase, pr, &centre, &bound, &sk);
+    if (n <= 0) return -1;
+
+    Land *c = &s->land;
+    studio_light(c);
+    c->detail = 0;
+    studio_camera(c, v, pr, n, centre, bound, s->W, s->H);
+
+    float sx = ((float)px + 0.5f - c->W * 0.5f) / c->focal;
+    float sy = ((float)py + 0.5f - c->H * 0.5f) / c->focal;
+    V3 ray = norm(add(add(mul(c->right, sx), mul(c->up, -sy)), c->fwd));
+
+    V3 oc = sub(c->eye, centre);
+    float b = dot(oc, ray);
+    float cc = dot(oc, oc) - bound * bound;
+    float disc = b * b - cc;
+    if (disc < 0.0f) return -1;
+    float sq = sqrtf(disc);
+    float t = -b - sq, tmax = -b + sq;
+    if (tmax < 0.5f) return -1;
+    if (t < 0.5f) t = 0.5f;
+
+    /* The same march the renderer runs, stopped at the first hit. Sharing it
+     * is the point: a picker with its own idea of where the surface is will
+     * eventually disagree with the image, and the user is always right about
+     * the image. */
+    for (int i = 0; i < 140 && t < tmax; i++) {
+        V3 q = add(c->eye, mul(ray, t));
+        float d = creature_sdf(pr, n, q, NULL, NULL, NULL);
+        if (d < 0.02f) {
+            /* Which primitive owns the hit is whichever one is nearest it.
+             * The union is smooth, so on a fillet between two parts this is
+             * genuinely ambiguous - and nearest is the answer a user dragging
+             * at that spot means. */
+            float best = 1e9f;
+            int bi = -1;
+            for (int k = 0; k < n; k++) {
+                float dk = sd_cone(q, &pr[k]);
+                if (dk < best) { best = dk; bi = k; }
+            }
+            return bi >= 0 ? pr[bi].part : -1;
+        }
+        if (d > tmax - t) break;
+        t += d * 0.9f;
+    }
+    return -1;
 }

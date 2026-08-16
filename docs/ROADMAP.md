@@ -86,6 +86,27 @@ them - the readout that suits a 640x360 palette frame is not the one that
 suits a 1280x720 continuous one, which is most of why these are separate
 renderers rather than one with a flag.
 
+**8b. The creature editor.** The viewport is done: `Cp4Studio` renders one
+animal through the world's own shading path, holds its buffers across frames,
+and scales resolution and light transport together so a caller can draw at 60
+fps while dragging and settle to a supersampled frame when it stops.
+`cp4_studio_pick` turns a pixel back into the genome slot that drew it, using
+the same march as the renderer so the two can never disagree.
+
+What is left, in order: drag semantics (project the mouse onto the body
+surface to get a new seg/yaw/pitch, with handles for scale and reach), spine
+editing (nseg, rise, lump, arch, sweep as things you pull rather than numbers
+you set), a parts palette against the DNA budget, and paint mode over the
+three coats that already exist. Then item 14's WASM build to host it in a
+browser, which is the only front end that does not cost the project its
+zero-dependency claim.
+
+One gap worth fixing alongside: `cp4_genome_from_action` and Python's
+`land_genome()` can both set parts, nseg and girth and nothing else, so the
+colour, pattern and spine genes are unreachable from the RL action space and
+from the bindings. Every animal an agent designs is the same beige with plain
+coats and a straight back.
+
 **9. Make player predation a real selection pressure.** The player killing
 fish already removes genomes from the pool, but weakly. Strengthen it and
 verify the population measurably shifts away from whatever body type the
