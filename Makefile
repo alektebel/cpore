@@ -8,8 +8,10 @@ LIB_SRC := src/rng.c src/genome.c src/world.c src/policy.c src/env.c \
            src/aqua_genome.c src/aqua.c src/aqua_env.c \
            src/land_genome.c src/land.c src/land_env.c \
            src/civ.c src/civ_env.c
+# The editor session lives here and not in LIB_SRC: it drives the studio,
+# so it belongs to the half of the project a training build drops.
 VIS_SRC := src/render.c src/render_cell.c src/render3d.c src/render_land.c \
-           src/render_terra.c src/render_civ.c src/png.c
+           src/render_terra.c src/render_civ.c src/land_edit.c src/png.c
 LIB_OBJ := $(LIB_SRC:%.c=$(BUILD)/%.o)
 VIS_OBJ := $(VIS_SRC:%.c=$(BUILD)/%.o)
 

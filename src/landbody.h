@@ -62,6 +62,57 @@ static V3 part_albedo4(int t, float *emissive)
     }
 }
 
+/* The spine, on its own.
+ *
+ * Split out of build_prims4 because an editor has to answer questions the
+ * renderer never asks - which vertebra is nearest this point, what yaw and
+ * pitch would put a part here - and the only safe way to answer them is from
+ * the same arithmetic that drew the picture. A second copy of this that
+ * drifted by a degree would put every dropped part slightly off the surface
+ * it was dropped on, which is the kind of wrongness a user feels immediately
+ * and cannot describe. */
+typedef struct {
+    V3    pos[CP4_MAX_SEG];      /* vertebra centres, world space */
+    float rad[CP4_MAX_SEG];      /* and how thick the body is there */
+    int   n;                     /* how many are in use */
+    V3    fwd, right, up;        /* the body's own frame */
+    float R, L;                  /* nominal radius and length */
+} LandSpine;
+
+static void land_spine(const Cp4Beast *b, LandSpine *s)
+{
+    basis3(b->yaw, b->pitch, &s->fwd, &s->right, &s->up);
+    int nseg = b->g.nseg < 2 ? 2 : b->g.nseg;
+    if (nseg > CP4_MAX_SEG) nseg = CP4_MAX_SEG;
+    s->n = nseg;
+    float R = b->s.radius, L = b->s.length;
+    s->R = R; s->L = L;
+
+    float arch  = (float)b->g.arch  / 127.0f * R * 1.3f;
+    float sweep = (float)b->g.sweep / 127.0f * R * 0.9f;
+
+    for (int i = 0; i < nseg; i++) {
+        float t = (float)i / (float)(nseg - 1);
+        float along = (0.5f - t) * L;
+        float bend = sinf(LB_PI * t);
+        /* a walking animal sways, it does not undulate - a tenth of the
+         * amplitude the fish use */
+        float sway = sinf(b->phase * 0.5f - t * 1.4f) * R * 0.10f;
+        /* arch is one curve over the whole body; rise is what each vertebra
+         * does on its own, which is how you get a hump, a dropped neck or a
+         * raised tail root out of the same three genes */
+        int ri = i < CP4_MAX_SEG ? i : CP4_MAX_SEG - 1;
+        float rise = (float)b->g.rise[ri] / 127.0f * R * 0.85f;
+        s->pos[i] = add(add(add(cv(b->p), mul(s->fwd, along)),
+                            mul(s->right, sway + sweep * bend)),
+                        mul(s->up, arch * bend + rise));
+        int li = i < CP4_MAX_SEG ? i : CP4_MAX_SEG - 1;
+        s->rad[i] = R * cp4_profile(&b->g, t)
+                      * (1.0f + (float)b->g.lump[li] / 127.0f * 0.40f);
+        if (s->rad[i] < R * 0.15f) s->rad[i] = R * 0.15f;
+    }
+}
+
 /* Build a land animal in world space.
  *
  * The one real departure from the fish is legs: they are not decorative studs
@@ -107,31 +158,13 @@ static int build_prims4(const Cp4Beast *b, int is_player, Prim *out,
     skin->origin = cv(b->p);
     skin->fwd = fwd; skin->right = right; skin->up = up;
 
-    float arch  = (float)b->g.arch  / 127.0f * R * 1.3f;
-    float sweep = (float)b->g.sweep / 127.0f * R * 0.9f;
-
-    V3 segpos[CP4_MAX_SEG];
-    float segrad[CP4_MAX_SEG];
-    for (int i = 0; i < nseg; i++) {
-        float t = (float)i / (float)(nseg - 1);
-        float along = (0.5f - t) * L;
-        float bend = sinf(LB_PI * t);
-        /* a walking animal sways, it does not undulate - a tenth of the
-         * amplitude the fish use */
-        float sway = sinf(b->phase * 0.5f - t * 1.4f) * R * 0.10f;
-        /* arch is one curve over the whole body; rise is what each vertebra
-         * does on its own, which is how you get a hump, a dropped neck or a
-         * raised tail root out of the same three genes */
-        int ri = i < CP4_MAX_SEG ? i : CP4_MAX_SEG - 1;
-        float rise = (float)b->g.rise[ri] / 127.0f * R * 0.85f;
-        segpos[i] = add(add(add(cv(b->p), mul(fwd, along)),
-                            mul(right, sway + sweep * bend)),
-                        mul(up, arch * bend + rise));
-        int li = i < CP4_MAX_SEG ? i : CP4_MAX_SEG - 1;
-        segrad[i] = R * cp4_profile(&b->g, t)
-                      * (1.0f + (float)b->g.lump[li] / 127.0f * 0.40f);
-        if (segrad[i] < R * 0.15f) segrad[i] = R * 0.15f;
-    }
+    LandSpine sp;
+    land_spine(b, &sp);
+    V3 *segpos = sp.pos;
+    float *segrad = sp.rad;
+    /* take the segment count from the spine too, so the two can never
+     * disagree about how many vertebrae there are */
+    nseg = sp.n;
 
     int n = 0;
     float bk = R * 0.34f;

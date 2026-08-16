@@ -773,3 +773,184 @@ void cp4_genome_stats(const Cp4Genome *g, Cp4Stats *o)
     o->upkeep  = 0.50f + 0.15f * o->n_parts + 0.16f * (float)(nseg - 2)
                        + 0.30f * ((float)g->girth / 255.0f) + o->upkeep_leg;
 }
+
+/* ------------------------------------------------------------------ *
+ * editing operations
+ *
+ * What an editor does to a genome, as opposed to what evolution does to one.
+ * The difference that matters is failure: a mutation that overruns the budget
+ * is normalised and whatever falls off, falls off, because nobody is watching.
+ * A user who drags a part onto a body that cannot afford it has to be told
+ * no, and told before anything moves - silently dropping some *other* part to
+ * make room is the single most infuriating thing an editor can do.
+ * ------------------------------------------------------------------ */
+
+int cp4_genome_free_slot(const Cp4Genome *g)
+{
+    for (int i = 0; i < CP4_MAX_PARTS; i++)
+        if (g->part[i].type == CP4_NONE) return i;
+    return -1;
+}
+
+/* What this genome costs with one more part of `type` on it. Mirroring
+ * doubles the price, which is the trade the whole bilateral-symmetry gene
+ * exists to express. */
+int cp4_genome_cost_with(const Cp4Genome *g, int type, int mirror)
+{
+    return cp4_genome_cost(g) + cp4_part_cost(type) * (mirror ? 2 : 1);
+}
+
+int cp4_genome_can_afford(const Cp4Genome *g, int type, int mirror, int budget)
+{
+    if (type <= CP4_NONE || type >= CP4_PART_COUNT) return 0;
+    if (cp4_genome_free_slot(g) < 0) return 0;
+    return cp4_genome_cost_with(g, type, mirror) <= budget;
+}
+
+/* Spore mirrors anything you do not place on the midline, and that is most of
+ * why creatures built in it look like animals rather than like collections.
+ * The midline here is the yaw axis: 0 is straight ahead and 128 straight
+ * back, so the lateral component is what decides. */
+int cp4_genome_should_mirror(int yaw)
+{
+    float a = (float)(yaw & 0xFF) * (2.0f * 3.14159265358979f / 256.0f);
+    return fabsf(sinf(a)) > 0.30f;
+}
+
+int cp4_genome_place(Cp4Genome *g, int type, int seg, int yaw, int pitch,
+                     int mirror, int budget)
+{
+    if (!g) return -1;
+    if (type <= CP4_NONE || type >= CP4_PART_COUNT) return -1;
+    if (mirror < 0) mirror = cp4_genome_should_mirror(yaw);
+    if (!cp4_genome_can_afford(g, type, mirror, budget)) return -1;
+    int slot = cp4_genome_free_slot(g);
+    if (slot < 0) return -1;
+    if (seg < 0) seg = 0;
+    if (seg >= CP4_MAX_SEG) seg = CP4_MAX_SEG - 1;
+    if (pitch > 127) pitch = 127;
+    if (pitch < -127) pitch = -127;
+    g->part[slot].type = (uint8_t)type;
+    g->part[slot].seg = (uint8_t)seg;
+    g->part[slot].yaw = (uint8_t)(yaw & 0xFF);
+    g->part[slot].pitch = (int8_t)pitch;
+    g->part[slot].mirror = (uint8_t)(mirror ? 1 : 0);
+    g->part[slot].scale = 128;
+    g->part[slot].len = 128;
+    g->part[slot].bend = 0;
+    return slot;
+}
+
+int cp4_genome_move(Cp4Genome *g, int slot, int seg, int yaw, int pitch)
+{
+    if (!g || slot < 0 || slot >= CP4_MAX_PARTS) return 0;
+    if (g->part[slot].type == CP4_NONE) return 0;
+    if (seg < 0) seg = 0;
+    if (seg >= CP4_MAX_SEG) seg = CP4_MAX_SEG - 1;
+    if (pitch > 127) pitch = 127;
+    if (pitch < -127) pitch = -127;
+    g->part[slot].seg = (uint8_t)seg;
+    g->part[slot].yaw = (uint8_t)(yaw & 0xFF);
+    g->part[slot].pitch = (int8_t)pitch;
+    return 1;
+}
+
+/* Removing a part leaves its slot empty rather than compacting the array,
+ * because an editor holds slot indices - in a selection, in an undo stack -
+ * and compacting would silently repoint every one of them at a different
+ * part. cp4_genome_normalise compacts when the genome goes back to the
+ * simulation, which is the right moment for it. */
+int cp4_genome_remove(Cp4Genome *g, int slot)
+{
+    if (!g || slot < 0 || slot >= CP4_MAX_PARTS) return 0;
+    if (g->part[slot].type == CP4_NONE) return 0;
+    memset(&g->part[slot], 0, sizeof(g->part[slot]));
+    g->part[slot].len = 128;
+    return 1;
+}
+
+/* Size, reach and fold, which in Spore are the handles you spend the most
+ * time on: dragging a limb out to the length you want and setting how it
+ * folds is most of what turns a parts bin into a creature. Each is clamped
+ * rather than rejected, because a drag that runs past the end of a range
+ * should stop there, not fail. */
+int cp4_genome_shape(Cp4Genome *g, int slot, int scale, int len, int bend)
+{
+    if (!g || slot < 0 || slot >= CP4_MAX_PARTS) return 0;
+    if (g->part[slot].type == CP4_NONE) return 0;
+    if (scale >= 0) g->part[slot].scale = (uint8_t)(scale > 255 ? 255 : (scale < 20 ? 20 : scale));
+    if (len   >= 0) g->part[slot].len   = (uint8_t)(len   > 255 ? 255 : (len   < 20 ? 20 : len));
+    if (bend > -1000) {
+        if (bend > 127) bend = 127;
+        if (bend < -127) bend = -127;
+        g->part[slot].bend = (int8_t)bend;
+    }
+    return 1;
+}
+
+int cp4_genome_mirror(Cp4Genome *g, int slot, int on, int budget)
+{
+    if (!g || slot < 0 || slot >= CP4_MAX_PARTS) return 0;
+    int t = g->part[slot].type;
+    if (t == CP4_NONE) return 0;
+    if (on && !g->part[slot].mirror) {
+        /* turning symmetry on costs another copy of the part */
+        if (cp4_genome_cost(g) + cp4_part_cost(t) > budget) return 0;
+    }
+    g->part[slot].mirror = (uint8_t)(on ? 1 : 0);
+    return 1;
+}
+
+/* ---- paint ----
+ *
+ * The three coats have been in the genome since the stage was written and
+ * have never been reachable from outside it: cp4_genome_from_action does not
+ * touch them and neither did the bindings, so every animal anything other
+ * than the random generator produced came out the same beige with both coats
+ * plain. Colour is the cheapest variety there is - shape is expensive and a
+ * hue is one byte - so an editor that cannot paint is missing most of the
+ * space it is supposed to be exploring.
+ */
+void cp4_genome_paint(Cp4Genome *g, int hue, int hue2, int hue3,
+                      int sat, int val)
+{
+    if (!g) return;
+    if (hue  >= 0) g->hue  = (uint8_t)(hue  & 0xFF);
+    if (hue2 >= 0) g->hue2 = (uint8_t)(hue2 & 0xFF);
+    if (hue3 >= 0) g->hue3 = (uint8_t)(hue3 & 0xFF);
+    if (sat  >= 0) g->sat  = (uint8_t)(sat > 255 ? 255 : sat);
+    if (val  >= 0) g->val  = (uint8_t)(val > 255 ? 255 : val);
+}
+
+void cp4_genome_coats(Cp4Genome *g, int pattern, int pscale,
+                      int pattern2, int pscale2)
+{
+    if (!g) return;
+    if (pattern  >= 0) g->pattern  = (uint8_t)(pattern  % CP4_PAT_COUNT);
+    if (pscale   >= 0) g->pscale   = (uint8_t)(pscale > 255 ? 255 : pscale);
+    if (pattern2 >= 0) g->pattern2 = (uint8_t)(pattern2 % CP4_PAT_COUNT);
+    if (pscale2  >= 0) g->pscale2  = (uint8_t)(pscale2 > 255 ? 255 : pscale2);
+}
+
+/* ---- the spine, as numbers ----
+ * The same three genes cp4_studio_spine_drag writes, for callers that have a
+ * value rather than a gesture. */
+void cp4_genome_spine(Cp4Genome *g, int nseg, int girth, int arch, int sweep)
+{
+    if (!g) return;
+    if (nseg >= 0) {
+        if (nseg < 2) nseg = 2;
+        if (nseg > CP4_MAX_SEG) nseg = CP4_MAX_SEG;
+        g->nseg = (uint8_t)nseg;
+    }
+    if (girth >= 0) g->girth = (uint8_t)(girth > 255 ? 255 : girth);
+    if (arch  > -1000) g->arch  = (int8_t)(arch  > 127 ? 127 : (arch  < -127 ? -127 : arch));
+    if (sweep > -1000) g->sweep = (int8_t)(sweep > 127 ? 127 : (sweep < -127 ? -127 : sweep));
+}
+
+void cp4_genome_vertebra(Cp4Genome *g, int i, int rise, int lump)
+{
+    if (!g || i < 0 || i >= CP4_MAX_SEG) return;
+    if (rise > -1000) g->rise[i] = (int8_t)(rise > 127 ? 127 : (rise < -127 ? -127 : rise));
+    if (lump > -1000) g->lump[i] = (int8_t)(lump > 127 ? 127 : (lump < -127 ? -127 : lump));
+}

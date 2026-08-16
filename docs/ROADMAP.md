@@ -86,26 +86,29 @@ them - the readout that suits a 640x360 palette frame is not the one that
 suits a 1280x720 continuous one, which is most of why these are separate
 renderers rather than one with a flag.
 
-**8b. The creature editor.** The viewport is done: `Cp4Studio` renders one
-animal through the world's own shading path, holds its buffers across frames,
-and scales resolution and light transport together so a caller can draw at 60
-fps while dragging and settle to a supersampled frame when it stops.
-`cp4_studio_pick` turns a pixel back into the genome slot that drew it, using
-the same march as the renderer so the two can never disagree.
+**8b. The creature editor.** Everything below the front end is done.
 
-What is left, in order: drag semantics (project the mouse onto the body
-surface to get a new seg/yaw/pitch, with handles for scale and reach), spine
-editing (nseg, rise, lump, arch, sweep as things you pull rather than numbers
-you set), a parts palette against the DNA budget, and paint mode over the
-three coats that already exist. Then item 14's WASM build to host it in a
-browser, which is the only front end that does not cost the project its
-zero-dependency claim.
+`Cp4Studio` renders one animal through the world's own shading path, holds its
+buffers across frames, and scales resolution and light transport together so a
+caller draws at 60 fps while dragging and settles to a supersampled frame when
+it stops. `cp4_studio_pick` turns a pixel into the genome slot that drew it and
+`cp4_studio_surface` turns one into a place on the body; both run the same
+march as the renderer, off the same `land_spine`, so none of the three can
+disagree about where the animal is. On top of those: place, move, remove,
+shape, mirror, the spine handles, and paint over the three coats. `Cp4Edit`
+wraps the lot in a handle-and-flat-array ABI that ctypes and WebAssembly can
+both call, and `CreatureEditor` is the Python side of it.
 
-One gap worth fixing alongside: `cp4_genome_from_action` and Python's
-`land_genome()` can both set parts, nseg and girth and nothing else, so the
-colour, pattern and spine genes are unreachable from the RL action space and
-from the bindings. Every animal an agent designs is the same beige with plain
-coats and a straight back.
+What is left is a front end: a parts palette, a DNA meter, and mouse events
+wired to calls that already exist. That is item 14's WASM build, which is the
+only host that does not cost the project its zero-dependency claim.
+
+Still open on the RL side: `cp4_genome_from_action` sets parts, nseg and girth
+and nothing else, so colour, pattern and the spine genes remain unreachable
+from the action space and every animal an agent designs is the same beige with
+plain coats and a straight back. The editor can now set all of them, so the
+work is widening the action head rather than plumbing - but it changes
+CP4_ACT_DIM, which is an RL interface break and wants its own decision.
 
 **9. Make player predation a real selection pressure.** The player killing
 fish already removes genomes from the pool, but weakly. Strengthen it and

@@ -709,7 +709,8 @@ src/env.c               RL wrapper: reset/step/observe/save/load
 src/aqua_genome.c       3D body plans: parts, costs, mutation
 src/aqua.c              the aquatic simulation, including the breeding population
 src/aqua_env.c          stage-2 RL wrapper
-src/land_genome.c       land body plans: parts, budgets, styles
+src/land_genome.c       land body plans: parts, budgets, styles, editing
+src/land_edit.c         the editor session ABI: handles, ints, flat arrays
 src/land.c              the creature simulation: four media, nests, impress-or-eat
 src/land_env.c          stage-3 RL wrapper
 src/civ.c               the civilisation simulation: cities, units, doctrines
@@ -964,10 +965,76 @@ screen — which is the usual failure of a separate picking representation, and
 the one a user notices immediately. `Prim` carries the genome slot that pushed
 it, stamped by the builder, so a pixel maps back to the gene that drew it.
 
-Between those two, the parts an interactive editor still needs are the drag
-semantics (project the mouse back onto the body surface to get a new
-`seg/yaw/pitch`), the spine handles, and a front end. Roadmap item 14 is the
-WebAssembly build that would host it.
+### Editing
+
+`cp4_studio_surface` is the inverse: it turns a pixel into *a place on the
+body* — the `seg`, `yaw` and `pitch` that would put a part right there. Pick
+says what you grabbed, surface says where you dropped it, and between them
+that is everything direct manipulation needs from a renderer. Both run against
+the same spine `build_prims4` drew from, extracted into `land_spine` for
+exactly that reason: a second copy that drifted by a degree would put every
+dropped part slightly off the surface it was dropped on, which is the kind of
+wrongness a user feels at once and cannot describe.
+
+On top sit the genome operations — place, move, remove, shape, mirror, paint,
+and the spine handles. They differ from mutation in how they fail. A mutation
+that overruns the budget is normalised and whatever falls off falls off,
+because nobody is watching; a user who drops a part onto a body that cannot
+afford it has to be told no, **and told before anything moves**. Slots are
+stable across a removal for the same reason: an editor holds indices, in a
+selection and in an undo stack, and compacting would silently repoint every
+one of them. `cp4_genome_normalise` compacts once, when the genome stops being
+a document and becomes a creature.
+
+Paint reaches genes that nothing outside the genome could set before. The
+three coats have been in `Cp4Genome` since the stage was written, and
+`cp4_genome_from_action` never touched them — so every animal that did not
+come from the random generator was the same beige with both coats plain.
+
+![built by clicking](docs/editor_made.png)
+
+### The session ABI
+
+Everything above speaks in structs, which is right for C and wrong for
+anything calling in from outside: ctypes and WebAssembly both need a struct
+layout, and a struct layout is a promise this project breaks every time the
+genome grows a gene. So `Cp4Edit` draws the boundary at an opaque handle,
+integers and flat arrays. A Python binding and a browser front end want the
+same surface — open a session, say where the mouse is, get pixels back — which
+is why there is one of these and not two.
+
+```python
+from cpore.env import CreatureEditor
+
+ed = CreatureEditor(560, 560)
+ed.load({"parts": [(2, 0, 0, 0, 128, 0, 128, 0)], "nseg": 5, "girth": 175})
+ed.spine(arch=45)
+
+ed.surface(280, 300)          # (seg, yaw, pitch) under the pointer, or None
+slot = ed.drop(280, 340, "leg")   # mirrored automatically, off the midline
+ed.shape(slot, length=215, bend=75)
+
+v = ed.spine_pick(300, 260)   # grab a vertebra
+ed.spine_drag(v, 300, 200)    # and pull it into a hump
+
+ed.paint(hue=28, sat=220)
+ed.coats(pattern="bands", pattern2="spots")
+ed.save_png("creature.png")
+
+LandEnv(genome=ed.finish())   # and take it for a walk
+```
+
+`python3 python/creature_editor_demo.py` runs exactly that and then test-drives
+the result in the simulation. The editor's own checks are in `make test`: that
+the body is reachable from the viewport, that every surface hit decodes to
+legal genes, that **a dropped part is under the pixel it was dropped on**, that
+the budget is never overrun and says no before anything moves, and that slots
+survive a removal.
+
+What is left for a front end is the front end: a parts palette, a DNA meter,
+and mouse events wired to the calls above. Roadmap item 14 is the WebAssembly
+build that would host it in a browser, which is the only option that does not
+cost the project its zero-dependency claim.
 
 ## Visual styles
 

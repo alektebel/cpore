@@ -2320,3 +2320,224 @@ int cp4_studio_pick(Cp4Studio *s, const Cp4Genome *g, const Cp4View *v,
     }
     return -1;
 }
+
+/* ------------------------------------------------------------------ *
+ * editing
+ *
+ * The inverse of picking. Picking turns a pixel into a gene; these turn a
+ * pixel into a *place on the body*, which is what dropping and dragging a
+ * part actually need. Both run against the same spine the renderer drew from,
+ * so a part dropped on a pixel lands on the surface that pixel showed - the
+ * failure mode otherwise is a part that appears half a body-radius from where
+ * it was dropped, which users feel instantly and cannot describe.
+ * ------------------------------------------------------------------ */
+
+/* The ray through a pixel, in world space. One function, so the renderer, the
+ * picker and the editor cannot disagree about where the camera is pointing. */
+static V3 studio_ray(const Land *c, float px, float py)
+{
+    float sx = (px + 0.5f - c->W * 0.5f) / c->focal;
+    float sy = (py + 0.5f - c->H * 0.5f) / c->focal;
+    return norm(add(add(mul(c->right, sx), mul(c->up, -sy)), c->fwd));
+}
+
+/* March to the body and return the hit point. */
+static int studio_hit(const Land *c, const Prim *pr, int n, V3 centre,
+                      float bound, V3 ray, V3 *out)
+{
+    V3 oc = sub(c->eye, centre);
+    float b = dot(oc, ray);
+    float cc = dot(oc, oc) - bound * bound;
+    float disc = b * b - cc;
+    if (disc < 0.0f) return 0;
+    float sq = sqrtf(disc);
+    float t = -b - sq, tmax = -b + sq;
+    if (tmax < 0.5f) return 0;
+    if (t < 0.5f) t = 0.5f;
+    for (int i = 0; i < 160 && t < tmax; i++) {
+        V3 q = add(c->eye, mul(ray, t));
+        float d = creature_sdf(pr, n, q, NULL, NULL, NULL);
+        if (d < 0.02f) { *out = q; return 1; }
+        if (d > tmax - t) return 0;
+        t += d * 0.9f;
+    }
+    return 0;
+}
+
+/* A world point on the body, expressed as the genes that would put a part
+ * there: which vertebra it is nearest, and the yaw and pitch of the direction
+ * out to it in the body's own frame. */
+static void surface_to_genes(const LandSpine *sp, V3 p,
+                             int *seg, int *yaw, int *pitch)
+{
+    int best = 0;
+    float bd = 1e9f;
+    for (int i = 0; i < sp->n; i++) {
+        V3 d = sub(p, sp->pos[i]);
+        /* Distance measured against the body's thickness there, not in raw
+         * units. A thick chest and a thin tail root are not equally far from
+         * a point just because the metres say so - what decides which
+         * vertebra owns a patch of skin is which one's surface it is on. */
+        float l = sqrtf(dot(d, d)) / (sp->rad[i] > 0.01f ? sp->rad[i] : 0.01f);
+        if (l < bd) { bd = l; best = i; }
+    }
+    V3 d = sub(p, sp->pos[best]);
+    float l = sqrtf(dot(d, d));
+    if (l > 1e-4f) d = mul(d, 1.0f / l);
+    float f = dot(d, sp->fwd), r = dot(d, sp->right), u = dot(d, sp->up);
+    float pit = asinf(clampf(u, -1.0f, 1.0f));
+    float ya  = atan2f(r, f);
+    if (ya < 0.0f) ya += 2.0f * TPI;
+
+    *seg = best;
+    *yaw = ((int)(ya * 256.0f / (2.0f * TPI) + 0.5f)) & 0xFF;
+    /* pitch is stored over +-128 for +-pi, so the same scale the builder uses */
+    int pi = (int)(pit * 128.0f / TPI + (pit >= 0.0f ? 0.5f : -0.5f));
+    if (pi > 127) pi = 127;
+    if (pi < -127) pi = -127;
+    *pitch = pi;
+}
+
+int cp4_studio_surface(Cp4Studio *s, const Cp4Genome *g, const Cp4View *v,
+                       int px, int py, int32_t *seg, int32_t *yaw, int32_t *pitch)
+{
+    if (!s || !g || !v) return 0;
+    static Prim pr[MAX_PRIM];
+    V3 centre;
+    float bound;
+    Skin sk;
+    int n = studio_build(g, v->phase, pr, &centre, &bound, &sk);
+    if (n <= 0) return 0;
+
+    Land *c = &s->land;
+    studio_light(c);
+    c->detail = 0;
+    studio_camera(c, v, pr, n, centre, bound, s->W, s->H);
+
+    V3 hit;
+    if (!studio_hit(c, pr, n, centre, bound, studio_ray(c, (float)px, (float)py), &hit))
+        return 0;
+
+    Cp4Beast b;
+    memset(&b, 0, sizeof(b));
+    b.g = *g;
+    cp4_genome_stats(&b.g, &b.s);
+    b.p.x = 0.0f; b.p.y = -b.s.stand; b.p.z = 0.0f;
+    b.phase = v->phase;
+    LandSpine sp;
+    land_spine(&b, &sp);
+
+    int sg, ya, pi;
+    surface_to_genes(&sp, hit, &sg, &ya, &pi);
+    if (seg) *seg = sg;
+    if (yaw) *yaw = ya;
+    if (pitch) *pitch = pi;
+    return 1;
+}
+
+/* Which vertebra is nearest a pixel. The handles an editor draws for the
+ * spine are the vertebrae themselves, so this is what a click on one has to
+ * resolve to - and it deliberately does not require hitting the body, because
+ * a handle is grabbable from just outside the silhouette. */
+int cp4_studio_spine_pick(Cp4Studio *s, const Cp4Genome *g, const Cp4View *v,
+                          int px, int py, float grab_px)
+{
+    if (!s || !g || !v) return -1;
+    static Prim pr[MAX_PRIM];
+    V3 centre;
+    float bound;
+    Skin sk;
+    int n = studio_build(g, v->phase, pr, &centre, &bound, &sk);
+    if (n <= 0) return -1;
+
+    Land *c = &s->land;
+    studio_light(c);
+    c->detail = 0;
+    studio_camera(c, v, pr, n, centre, bound, s->W, s->H);
+
+    Cp4Beast b;
+    memset(&b, 0, sizeof(b));
+    b.g = *g;
+    cp4_genome_stats(&b.g, &b.s);
+    b.p.x = 0.0f; b.p.y = -b.s.stand; b.p.z = 0.0f;
+    b.phase = v->phase;
+    LandSpine sp;
+    land_spine(&b, &sp);
+
+    float r2 = (grab_px > 1.0f ? grab_px : 14.0f);
+    r2 *= r2;
+    int best = -1;
+    float bd = r2;
+    for (int i = 0; i < sp.n; i++) {
+        float sx, sy, vz;
+        if (!project(c, sp.pos[i], &sx, &sy, &vz)) continue;
+        float dx = sx - (float)px, dy = sy - (float)py;
+        float d2 = dx * dx + dy * dy;
+        if (d2 < bd) { bd = d2; best = i; }
+    }
+    return best;
+}
+
+/* Drag a vertebra. The screen delta is resolved against the body's own up
+ * axis, so pulling upward raises that vertebra whatever angle the turntable
+ * is at - which is what "drag it up" has to mean when the thing you are
+ * dragging is in three dimensions and the mouse is in two. */
+int cp4_studio_spine_drag(Cp4Studio *s, Cp4Genome *g, const Cp4View *v,
+                          int vert, int px, int py)
+{
+    if (!s || !g || !v) return 0;
+    if (vert < 0 || vert >= CP4_MAX_SEG) return 0;
+
+    static Prim pr[MAX_PRIM];
+    V3 centre;
+    float bound;
+    Skin sk;
+    int n = studio_build(g, v->phase, pr, &centre, &bound, &sk);
+    if (n <= 0) return 0;
+
+    Land *c = &s->land;
+    studio_light(c);
+    c->detail = 0;
+    studio_camera(c, v, pr, n, centre, bound, s->W, s->H);
+
+    Cp4Beast b;
+    memset(&b, 0, sizeof(b));
+    b.g = *g;
+    cp4_genome_stats(&b.g, &b.s);
+    b.p.x = 0.0f; b.p.y = -b.s.stand; b.p.z = 0.0f;
+    b.phase = v->phase;
+    LandSpine sp;
+    land_spine(&b, &sp);
+    if (vert >= sp.n) return 0;
+
+    /* Where the vertebra is now, and where the pointer is, both on the plane
+     * through it facing the camera. */
+    float sx, sy, vz;
+    if (!project(c, sp.pos[vert], &sx, &sy, &vz)) return 0;
+    V3 ray = studio_ray(c, (float)px, (float)py);
+    float denom = dot(ray, c->fwd);
+    if (denom < 1e-4f) return 0;
+    V3 target = add(c->eye, mul(ray, vz / denom));
+    V3 delta = sub(target, sp.pos[vert]);
+
+    /* Only the component along the body's own up axis is a rise; the rest is
+     * the user asking for something this gene cannot express. */
+    float du = dot(delta, sp.up);
+    float R = sp.R > 0.01f ? sp.R : 0.01f;
+    int rise = g->rise[vert] + (int)(du / (R * 0.85f) * 127.0f);
+    if (rise > 127) rise = 127;
+    if (rise < -127) rise = -127;
+    g->rise[vert] = (int8_t)rise;
+    return 1;
+}
+
+/* Fatten or thin one vertebra: the other half of pulling clay about. */
+int cp4_studio_spine_girth(Cp4Genome *g, int vert, float amount)
+{
+    if (!g || vert < 0 || vert >= CP4_MAX_SEG) return 0;
+    int l = g->lump[vert] + (int)(amount * 127.0f);
+    if (l > 127) l = 127;
+    if (l < -127) l = -127;
+    g->lump[vert] = (int8_t)l;
+    return 1;
+}

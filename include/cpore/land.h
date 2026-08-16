@@ -421,6 +421,121 @@ void       cp4_studio_render(Cp4Studio *s, const Cp4Genome *g,
  * representation, and the one a user notices immediately. */
 int        cp4_studio_pick(Cp4Studio *s, const Cp4Genome *g,
                            const Cp4View *v, int px, int py);
+/* The inverse: where on the body a pixel lands, as the genes that would put a
+ * part there. 0 if the ray missed. This and cp4_studio_pick between them are
+ * everything direct manipulation needs from the renderer - one says what you
+ * grabbed, the other says where you dropped it. */
+int        cp4_studio_surface(Cp4Studio *s, const Cp4Genome *g,
+                              const Cp4View *v, int px, int py,
+                              int32_t *seg, int32_t *yaw, int32_t *pitch);
+/* Spine handles. The pick does not require hitting the body, because a handle
+ * is grabbable from just outside the silhouette. */
+int        cp4_studio_spine_pick(Cp4Studio *s, const Cp4Genome *g,
+                                 const Cp4View *v, int px, int py, float grab_px);
+int        cp4_studio_spine_drag(Cp4Studio *s, Cp4Genome *g, const Cp4View *v,
+                                 int vert, int px, int py);
+int        cp4_studio_spine_girth(Cp4Genome *g, int vert, float amount);
+
+/* ---- editing a genome ----
+ *
+ * What an editor does to a body plan, as opposed to what evolution does. The
+ * difference that matters is failure: a mutation that overruns the budget is
+ * normalised and whatever falls off falls off, because nobody is watching. A
+ * user who drops a part onto a body that cannot afford it has to be told no,
+ * and told before anything moves.
+ *
+ * Slots are stable. Removing a part empties its slot rather than compacting
+ * the array, because an editor holds indices - in a selection, in an undo
+ * stack - and compacting would silently repoint every one of them.
+ * cp4_genome_normalise compacts when the genome goes back to the simulation.
+ */
+int  cp4_genome_free_slot(const Cp4Genome *g);
+int  cp4_genome_cost_with(const Cp4Genome *g, int type, int mirror);
+int  cp4_genome_can_afford(const Cp4Genome *g, int type, int mirror, int budget);
+/* Spore mirrors anything not placed on the midline, and that is most of why
+ * creatures built in it look like animals. Pass mirror = -1 to cp4_genome_place
+ * to have it decided from the yaw this way. */
+int  cp4_genome_should_mirror(int yaw);
+int  cp4_genome_place(Cp4Genome *g, int type, int seg, int yaw, int pitch,
+                      int mirror, int budget);
+int  cp4_genome_move(Cp4Genome *g, int slot, int seg, int yaw, int pitch);
+int  cp4_genome_remove(Cp4Genome *g, int slot);
+/* size, reach and fold: pass -1 (or <= -1000 for bend) to leave one alone */
+int  cp4_genome_shape(Cp4Genome *g, int slot, int scale, int len, int bend);
+int  cp4_genome_mirror(Cp4Genome *g, int slot, int on, int budget);
+
+/* Paint. The three coats have been in the genome since the stage was written
+ * and were reachable from nothing outside it, so every animal that did not
+ * come out of the random generator was the same beige with both coats plain.
+ * Pass -1 to leave a field alone. */
+void cp4_genome_paint(Cp4Genome *g, int hue, int hue2, int hue3, int sat, int val);
+void cp4_genome_coats(Cp4Genome *g, int pattern, int pscale,
+                      int pattern2, int pscale2);
+void cp4_genome_spine(Cp4Genome *g, int nseg, int girth, int arch, int sweep);
+void cp4_genome_vertebra(Cp4Genome *g, int i, int rise, int lump);
+
+/* ---- the editor session ABI ----
+ *
+ * Everything above speaks in structs, which is right for C and wrong for
+ * anything calling in from outside it: ctypes and WebAssembly both need a
+ * struct layout, and a struct layout is a promise this project breaks every
+ * time the genome grows a gene. So the boundary is an opaque handle,
+ * integers and flat arrays, and no external caller needs to know what a
+ * Cp4Genome looks like. A Python binding and a browser front end want the
+ * same surface - open a session, say where the mouse is, get pixels back -
+ * which is why there is one of these and not two.
+ */
+typedef struct Cp4Edit Cp4Edit;
+
+Cp4Edit *cp4_edit_create(int32_t w, int32_t h, int32_t budget);
+void     cp4_edit_free(Cp4Edit *e);
+void     cp4_edit_budget(Cp4Edit *e, int32_t budget);
+
+/* parts: CP4_MAX_PARTS groups of eight int32 - type, seg, yaw, pitch, scale,
+ * mirror, len, bend - or NULL for an empty body. */
+void     cp4_edit_load(Cp4Edit *e, const int32_t *parts, int32_t nseg, int32_t girth);
+void     cp4_edit_random(Cp4Edit *e, uint32_t seed);
+void     cp4_edit_style(Cp4Edit *e, int32_t style);
+void     cp4_edit_mutate(Cp4Edit *e, uint32_t seed, float rate);
+
+void     cp4_edit_view(Cp4Edit *e, float azimuth, float elev, float zoom, float phase);
+void     cp4_edit_orbit(Cp4Edit *e, float dazimuth, float delev);
+void     cp4_edit_get_view(const Cp4Edit *e, float *out /* 4 */);
+void     cp4_edit_render(Cp4Edit *e, uint8_t *rgba, int32_t quality);
+
+/* Everything below is in screen coordinates, where a mouse would be. A drop
+ * or a move that cannot happen changes nothing and says so, so a front end
+ * can simply try it and report the answer. */
+/* Is the pointer over the body, and where? cp4_edit_pick answers "which part"
+ * and says none over bare trunk, which is right and leaves a hover cursor
+ * with no way to ask. out takes seg, yaw, pitch. */
+int32_t  cp4_edit_surface(Cp4Edit *e, int32_t x, int32_t y, int32_t *out /* 3 */);
+int32_t  cp4_edit_pick(Cp4Edit *e, int32_t x, int32_t y);
+int32_t  cp4_edit_drop(Cp4Edit *e, int32_t x, int32_t y, int32_t type, int32_t mirror);
+int32_t  cp4_edit_move(Cp4Edit *e, int32_t slot, int32_t x, int32_t y);
+int32_t  cp4_edit_remove(Cp4Edit *e, int32_t slot);
+int32_t  cp4_edit_shape(Cp4Edit *e, int32_t slot, int32_t scale, int32_t len, int32_t bend);
+int32_t  cp4_edit_mirror(Cp4Edit *e, int32_t slot, int32_t on);
+int32_t  cp4_edit_spine_pick(Cp4Edit *e, int32_t x, int32_t y, float grab_px);
+int32_t  cp4_edit_spine_drag(Cp4Edit *e, int32_t vert, int32_t x, int32_t y);
+int32_t  cp4_edit_spine_girth(Cp4Edit *e, int32_t vert, float amount);
+void     cp4_edit_spine_set(Cp4Edit *e, int32_t nseg, int32_t girth,
+                            int32_t arch, int32_t sweep);
+void     cp4_edit_paint(Cp4Edit *e, int32_t hue, int32_t hue2, int32_t hue3,
+                        int32_t sat, int32_t val);
+void     cp4_edit_coats(Cp4Edit *e, int32_t pattern, int32_t pscale,
+                        int32_t pattern2, int32_t pscale2);
+
+int32_t  cp4_edit_cost(const Cp4Edit *e);
+int32_t  cp4_edit_budget_get(const Cp4Edit *e);
+int32_t  cp4_edit_can_afford(const Cp4Edit *e, int32_t type, int32_t mirror);
+void     cp4_edit_genome(const Cp4Edit *e, int32_t *out /* MAX_PARTS*8 */);
+void     cp4_edit_body(const Cp4Edit *e, int32_t *out /* 13 */);
+int32_t  cp4_edit_stat_count(void);
+void     cp4_edit_stats(const Cp4Edit *e, float *out /* cp4_edit_stat_count() */);
+/* Hand the finished animal to the simulation: compacts slots once, at the
+ * moment the genome stops being a document and becomes a creature. */
+void     cp4_edit_finish(Cp4Edit *e, int32_t *parts_out);
 /* The same, from a chosen angle. azimuth turns around the animal, elev raises
  * the camera; both in radians. A creature editor that can only show you one
  * angle is not showing you the creature - the whole reason a part carries a

@@ -1264,6 +1264,114 @@ int main(void)
         free(w);
     }
 
+    /* ---- the creature editor ----
+     *
+     * These run against the renderer rather than the simulation, which is
+     * unusual for this file, and deliberate: the thing being tested is that
+     * a pixel and a gene agree with each other, and that agreement only
+     * exists if both sides come from the same arithmetic. A unit test of
+     * either half alone would pass while the editor put parts a body-radius
+     * from where they were dropped. */
+    {
+        const int N = 320;
+        const int BUDGET = CP4_GEN_BUDGET[CP4_GENERATIONS - 1];
+        Cp4Studio *st = cp4_studio_new(N, N);
+        CHECK(st != NULL, "editor: a studio can be opened");
+        if (st) {
+            Cp4View v;
+            v.azimuth = 2.3562f; v.elev = 0.26f; v.zoom = 1.0f;
+            v.phase = 0.0f; v.quality = 0;
+
+            Cp4Genome g;
+            cp4_genome_clear(&g);
+            cp4_genome_spine(&g, 4, 150, 20, 0);
+            cp4_genome_place(&g, CP4_MOUTH_C, 0, 0, 0, 0, BUDGET);
+
+            /* the body is reachable, and every answer is in range */
+            int hits = 0, bad = 0;
+            for (int y = N / 4; y < N * 3 / 4; y += 5)
+                for (int x = N / 4; x < N * 3 / 4; x += 5) {
+                    int32_t sg, ya, pi;
+                    if (!cp4_studio_surface(st, &g, &v, x, y, &sg, &ya, &pi)) continue;
+                    hits++;
+                    if (sg < 0 || sg >= CP4_MAX_SEG) bad++;
+                    if (ya < 0 || ya > 255) bad++;
+                    if (pi < -127 || pi > 127) bad++;
+                }
+            CHECK(hits > 30, "editor: the body is reachable from the viewport");
+            CHECK(bad == 0, "editor: every surface hit decodes to legal genes");
+
+            /* drop a part where a pixel says, and pick it back at that pixel */
+            int placed = 0, same = 0;
+            for (int k = 0; k < 20; k++) {
+                int x = N / 2 + (int)(46.0f * cosf((float)k * 0.83f));
+                int y = N / 2 + (int)(33.0f * sinf((float)k * 1.27f));
+                int32_t sg, ya, pi;
+                if (!cp4_studio_surface(st, &g, &v, x, y, &sg, &ya, &pi)) continue;
+                int slot = cp4_genome_place(&g, CP4_HORN, sg, ya, pi, -1, BUDGET);
+                if (slot < 0) break;
+                placed++;
+                if (cp4_studio_pick(st, &g, &v, x, y) == slot) same++;
+            }
+            CHECK(placed >= 5, "editor: parts drop onto the body from screen coordinates");
+            CHECK(same * 2 >= placed,
+                  "editor: a dropped part is under the pixel it was dropped on");
+
+            /* the budget holds, and says no before anything moves */
+            int n = 0;
+            while (cp4_genome_place(&g, CP4_HORN, 0, 64, 0, 1, BUDGET) >= 0) n++;
+            (void)n;
+            CHECK(cp4_genome_cost(&g) <= BUDGET,
+                  "editor: filling up never overruns the DNA budget");
+            CHECK(!cp4_genome_can_afford(&g, CP4_HORN, 1, BUDGET)
+                  || cp4_genome_free_slot(&g) < 0,
+                  "editor: when the budget says no it means no");
+
+            /* slots are stable across a removal, because an editor holds them */
+            int keep = -1, victim = -1;
+            for (int i = CP4_MAX_PARTS - 1; i >= 0; i--)
+                if (g.part[i].type != CP4_NONE) { keep = i; break; }
+            for (int i = 0; i < keep; i++)
+                if (g.part[i].type != CP4_NONE) { victim = i; break; }
+            if (keep > 0 && victim >= 0) {
+                int kt = g.part[keep].type;
+                cp4_genome_remove(&g, victim);
+                CHECK(g.part[keep].type == kt,
+                      "editor: removing a part does not renumber the others");
+            }
+
+            /* spine handles move the genes they claim to */
+            int vert = -1;
+            for (int y = 0; y < N && vert < 0; y += 4)
+                for (int x = 0; x < N; x += 4) {
+                    vert = cp4_studio_spine_pick(st, &g, &v, x, y, 8.0f);
+                    if (vert >= 0) {
+                        int8_t was = g.rise[vert];
+                        cp4_studio_spine_drag(st, &g, &v, vert, x, y - 30);
+                        CHECK(g.rise[vert] != was,
+                              "editor: dragging a vertebra moves its rise gene");
+                        break;
+                    }
+                }
+            CHECK(vert >= 0, "editor: spine handles are grabbable from the viewport");
+
+            /* paint reaches genes that nothing outside the genome could */
+            cp4_genome_paint(&g, 150, 20, 210, 220, 200);
+            cp4_genome_coats(&g, CP4_PAT_BANDS, 90, CP4_PAT_SPOTS, 200);
+            CHECK(g.hue == 150 && g.pattern == CP4_PAT_BANDS
+                  && g.pattern2 == CP4_PAT_SPOTS,
+                  "editor: paint writes all three coats");
+
+            /* and what comes out is still an animal the simulation accepts */
+            Cp4Stats s4;
+            cp4_genome_normalise(&g, BUDGET);
+            cp4_genome_stats(&g, &s4);
+            CHECK(s4.n_parts > 0 && s4.hp_max > 0.0f && cp4_genome_cost(&g) <= BUDGET,
+                  "editor: an edited genome is a viable animal");
+            cp4_studio_free(st);
+        }
+    }
+
     printf(fails ? "\n%d test(s) failed\n" : "\nall tests passed\n", fails);
     return fails ? 1 : 0;
 }
