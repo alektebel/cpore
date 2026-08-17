@@ -137,29 +137,90 @@ const ctx = cv.getContext('2d', { alpha: false });
 const $ = id => document.getElementById(id);
 
 let ed, drag = null, settleTimer = 0, selected = null;
+let settleQ = 0;       /* the quality already on screen */
+let frame = null;      /* the last rendered frame, for redrawing the overlay */
+let selPanel = null;   /* what the selection panel is currently showing */
+let pending = 0;       /* the animation frame a drag redraw is queued on */
 let carrying = null;   /* a part being dragged off the palette */
 const HINT = 'drag a part onto the animal &middot; drag the animal to turn it';
 let handles = null;    /* screen handles for the selected part */
 
 /* ---- drawing ----
  *
- * Two qualities and a timer. While anything is moving the viewport draws at
- * quarter resolution with flat shading, which is fast enough to drag against;
- * a hundred and sixty milliseconds after the last event it redraws properly.
- * That is the whole reason the C side takes a quality argument, and it is
- * what makes a ray-marched distance field usable as an editor at all.
+ * A ladder, climbed one rung at a time, and never more than one rung per turn
+ * of the event loop.
+ *
+ * The first version had two rungs and went straight from the quarter-scale
+ * drag frame to the full one, which measured at 800ms - so every mouse release
+ * and every button press froze the page for most of a second, and *that*, not
+ * the marching, was what made the editor feel slow. Two things fix it. The
+ * renderer got cheaper (the contact shadow no longer costs the square of the
+ * resolution, and the creature self-shadow is held for the export), and the
+ * climb got a middle rung: quarter scale while you move, half scale a
+ * heartbeat after you stop, full a third of a second after that. Each rung is
+ * scheduled rather than run inline, so a press during the climb cancels what
+ * has not been drawn yet instead of queueing behind it.
+ *
+ * The numbers below are the measured cost of each rung at 512 square, which is
+ * the only honest way to choose the delays: a rung is worth climbing when it
+ * costs less than the pause that triggered it.
+ *
+ *     q0  quarter scale, flat            30 ms
+ *     q1  half scale, occlusion          90 ms
+ *     q2  full scale, bloom             300 ms
+ *     q3  supersampled, self-shadow     1.2 s   (export only)
  */
 function paint(q) {
   const img = ed.render(q);
-  ctx.putImageData(new ImageData(img.data, N, N), 0, 0);
+  /* Kept, so the overlay can be redrawn without re-marching. The copy is
+   * necessary - the module hands back the same buffer every time. */
+  frame = new ImageData(new Uint8ClampedArray(img.data), N, N);
+  settleQ = q;
+  overlay();
+}
+
+/* The handles, over the frame already rendered.
+ *
+ * Selecting a part, deselecting one, or pressing on one changes nothing about
+ * the geometry, so none of them should cost a ray march - they used to cost a
+ * full redraw each, which is why pressing the mouse felt heavier than moving
+ * it. */
+function overlay() {
+  if (!frame) return;
+  ctx.putImageData(frame, 0, 0);
   if (drag === null && selected !== null) outlineSelected();
 }
 
 function draw(moving) {
   clearTimeout(settleTimer);
-  paint(moving ? 0 : 2);
-  if (moving) settleTimer = setTimeout(() => { paint(2); refresh(); }, 160);
-  else refresh();
+  if (moving) {
+    /* One frame per frame. A pointermove can fire faster than a 30ms render
+     * finishes, and painting inline from the handler builds a queue of frames
+     * for positions the mouse has already left - which is what "laggy" is,
+     * as distinct from "slow". Coalescing onto the next animation frame draws
+     * where the cursor is instead of where it was. */
+    if (!pending) {
+      pending = requestAnimationFrame(() => { pending = 0; paint(0); refresh(); });
+    }
+    climb(1, 150);
+    return;
+  }
+  /* Drop any drag frame still queued: it would land after this one and undo
+   * it, which is the settle flickering back to coarse for no reason. */
+  if (pending) { cancelAnimationFrame(pending); pending = 0; }
+  paint(1);
+  refresh();
+  climb(2, 260);
+}
+
+/* One rung, later. Re-arms itself until the top, so a single pause walks all
+ * the way up and any interruption starts the walk over from wherever it is. */
+function climb(q, delay) {
+  if (q > 2) return;
+  settleTimer = setTimeout(() => {
+    paint(q);
+    if (q === 1) climb(2, 260);
+  }, delay);
 }
 
 /* The selected part's handles: a ring at its middle to resize it, a dot at
@@ -214,21 +275,36 @@ function refresh() {
     ['dig', s.dig.toFixed(1)],
   ].map(([k, v]) => `<div class="row"><span>${k}</span><span>${v}</span></div>`).join('');
 
+  /* Never write back into the control the user has hold of. Assigning .value
+   * on a range input mid-drag snaps the thumb to wherever the model rounded
+   * to, which reads as the slider fighting you. */
+  const set = (id, v) => { const el = $(id); if (el !== document.activeElement) el.value = v; };
   const b = ed.body();
-  $('nseg').value = b.nseg; $('lseg').textContent = b.nseg;
-  $('girth').value = b.girth; $('arch').value = b.arch; $('sweep').value = b.sweep;
-  $('hue').value = b.hue; $('hue2').value = b.hue2; $('hue3').value = b.hue3;
-  $('sat').value = b.sat; $('val').value = b.val;
-  $('pattern').value = b.pattern; $('pattern2').value = b.pattern2;
+  set('nseg', b.nseg); $('lseg').textContent = b.nseg;
+  set('girth', b.girth); set('arch', b.arch); set('sweep', b.sweep);
+  set('hue', b.hue); set('hue2', b.hue2); set('hue3', b.hue3);
+  set('sat', b.sat); set('val', b.val);
+  set('pattern', b.pattern); set('pattern2', b.pattern2);
 
   for (const btn of $('palette').children)
     btn.disabled = !ed.canAfford(+btn.dataset.type, 1);
 
   if (selected === null) {
-    $('sel').innerHTML = '<div class="row"><span>none</span></div>';
+    if (selPanel !== null) { $('sel').innerHTML = '<div class="row"><span>none</span></div>'; selPanel = null; }
   } else {
     const p = parts.find(q => q.slot === selected);
     if (!p) { select(null); return refresh(); }
+    /* Rebuilding this panel destroys the input the pointer is captured on, so
+     * it is rebuilt only when it would say something different in a way the
+     * live values cannot cover - a different part, or a different mirroring.
+     * Dragging `size` used to replace the slider underneath the cursor a
+     * fraction of a second in, which felt like the editor dropping the drag. */
+    const sig = `${selected}:${p.name}:${p.mirror}`;
+    if (sig === selPanel) {
+      set('pscale', p.scale); set('plen', p.len); set('pbend', p.bend);
+      return;
+    }
+    selPanel = sig;
     $('sel').innerHTML = `
       <div class="row"><span>${p.name}</span><span>${p.mirror ? 'mirrored' : 'single'}</span></div>
       <label>size</label><input type="range" id="pscale" min="20" max="255" value="${p.scale}">
@@ -269,28 +345,21 @@ function xy(e) {
 
 const HANDLE_R = 9;
 
-/* Where a part is on screen, asked of the picker.
+/* Where a part is on screen: one call, straight out of the geometry.
  *
- * The picker is the authority on where things are, so the handles are placed
- * from what it reports rather than from a second projection of the geometry -
- * a handle that sits where the part is not is worse than no handle. Coarse on
- * purpose: this runs when the selection changes, not per frame.
+ * This used to sample the picker over a five-pixel grid and average the hits,
+ * which is ten thousand ray marches - fifty-five milliseconds - to find two
+ * points, paid every time the selection changed and again every time a drag
+ * ended. The parts already know where they are; the C side projects them.
  */
 function findHandles(slot) {
-  let n = 0, cx = 0, cy = 0, tip = null, best = -1;
-  for (let y = 2; y < N; y += 5)
-    for (let x = 2; x < N; x += 5) {
-      if (ed.pick(x, y) !== slot) continue;
-      n++; cx += x; cy += y;
-      /* The tip is the part's pixel furthest from the middle of the frame.
-       * The camera fits the body, so the middle of the frame is the middle of
-       * the animal, and furthest-from-it is the end you would pull on. */
-      const d = (x - N / 2) ** 2 + (y - N / 2) ** 2;
-      if (d > best) { best = d; tip = [x, y]; }
-    }
-  if (!n) return null;
-  cx /= n; cy /= n;
-  return { cx, cy, tip, n };
+  const h = slot === null ? null : ed.extent(slot);
+  /* On a blob - an eye, a plate - the far end is the middle, and two handles
+   * on the same pixel means the top one wins every press. Below that gap
+   * there is nothing to pull on, so there is one handle. */
+  if (h && (h.tip[0] - h.cx) ** 2 + (h.tip[1] - h.cy) ** 2 < (HANDLE_R * 2) ** 2)
+    h.tip = null;
+  return h;
 }
 
 function handleAt(x, y) {
@@ -327,12 +396,14 @@ cv.addEventListener('pointerdown', e => {
   if (slot !== null) {
     select(slot); drag = { kind: 'part', slot };
     hint(`moving <b>${ed.parts().find(p => p.slot === slot).name}</b>`);
-    draw(false);
+    /* A press moves nothing. Redraw the handles, not the animal - and leave
+     * the settle timer alone so a press during the climb does not restart it. */
+    overlay(); refresh();
     return;
   }
   select(null);
   drag = { kind: 'orbit', x, y };
-  draw(false);
+  overlay();
 });
 
 cv.addEventListener('pointermove', e => {
@@ -355,7 +426,7 @@ cv.addEventListener('pointermove', e => {
     ed.spineDrag(drag.vert, x, y);
     ed.spineGirth(drag.vert, (x - drag.x) * 0.006);
     drag.x = x;
-  } else {
+  } else if (handles) {
     /* Pull away from the part's middle to grow it. Distance rather than a
      * raw axis, so it works whichever way round the camera is. */
     const d0 = Math.hypot(drag.x - handles.cx, drag.y - handles.cy);
@@ -514,6 +585,12 @@ buildPanels();
 draw(false);
 $('boot').remove();
 
+/* The module's insides, for a harness outside it. The editor is an ES module,
+ * so a test driving it from the page has no other way in - and a test that has
+ * to be written inside the thing it tests can only ever check what the author
+ * remembered to expose. */
+window.cpore = { ed, get quality() { return settleQ; }, get selected() { return selected; } };
+
 /* A scripted session, for the harness: ?selftest=1 drives the model the way
  * the pointer handlers do, then dispatches real PointerEvents so the wiring
  * between them is tested too - an API that works behind a UI that does not
@@ -640,6 +717,30 @@ if (new URLSearchParams(location.search).has('selftest')) {
     clientX: cv.getBoundingClientRect().left + hx,
     clientY: cv.getBoundingClientRect().top + hy, bubbles: true, cancelable: true }));
   ok(ed.parts().length < nAfter, 'right-click removes the part under the pointer');
+
+  /* How long the page is unable to respond, over one whole drag.
+   *
+   * This is a check on the thing users actually complain about, and it is here
+   * because it is the thing that regressed: pressing on a part used to run a
+   * full-resolution frame inside the pointerdown handler and a grid of ten
+   * thousand ray-marched picks after it, so a twelve-move drag blocked the
+   * main thread for two seconds. Measured, it was 1973ms; it is now around
+   * 120. The bar is set at a quarter of the old number so it catches the
+   * mistake coming back without failing on a slow machine.
+   */
+  ed.loadStyle('grazer');
+  select(null);
+  let onPart = null;
+  for (let y = 40; y < N - 40 && !onPart; y += 6)
+    for (let x = 40; x < N - 40; x += 6) if (ed.pick(x, y) !== null) { onPart = [x, y]; break; }
+  if (onPart) {
+    const t0 = performance.now();
+    evt('pointerdown', onPart[0], onPart[1]);
+    for (let i = 0; i < 12; i++) evt('pointermove', onPart[0] + i * 2, onPart[1] + i);
+    evt('pointerup', onPart[0] + 24, onPart[1] + 12);
+    const blocked = performance.now() - t0;
+    ok(blocked < 500, `a 12-move drag blocks for ${blocked.toFixed(0)}ms`);
+  }
 
   select(null);
   draw(false);

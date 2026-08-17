@@ -1317,6 +1317,40 @@ int main(void)
             CHECK(same * 2 >= placed,
                   "editor: a dropped part is under the pixel it was dropped on");
 
+            /* Where a part is, projected, agrees with where the picker finds
+             * it. The front end hangs its drag handles off cp4_studio_extent
+             * instead of scanning the picker over a grid, so the two have to
+             * mean the same thing - a handle that sits off the part is the one
+             * failure a user notices before anything else. */
+            {
+                int32_t ex[5];
+                int checked = 0, agreed = 0;
+                for (int slot = 0; slot < CP4_MAX_PARTS; slot++) {
+                    if (g.part[slot].type == CP4_NONE) continue;
+                    if (!cp4_studio_extent(st, &g, &v, slot, ex)) continue;
+                    int lo_x = 1 << 20, hi_x = -1, lo_y = 1 << 20, hi_y = -1;
+                    for (int y = 0; y < N; y += 3)
+                        for (int x = 0; x < N; x += 3) {
+                            if (cp4_studio_pick(st, &g, &v, x, y) != slot) continue;
+                            if (x < lo_x) lo_x = x;
+                            if (x > hi_x) hi_x = x;
+                            if (y < lo_y) lo_y = y;
+                            if (y > hi_y) hi_y = y;
+                        }
+                    if (hi_x < 0) continue;          /* wholly hidden */
+                    checked++;
+                    int pad = 6;
+                    if (ex[0] >= lo_x - pad && ex[0] <= hi_x + pad
+                        && ex[1] >= lo_y - pad && ex[1] <= hi_y + pad)
+                        agreed++;
+                }
+                CHECK(checked > 0, "editor: parts have a screen extent");
+                CHECK(agreed == checked,
+                      "editor: a part's projected centre is where it is drawn");
+                CHECK(!cp4_studio_extent(st, &g, &v, CP4_MAX_PARTS, ex),
+                      "editor: an empty slot has no extent");
+            }
+
             /* the budget holds, and says no before anything moves */
             int n = 0;
             while (cp4_genome_place(&g, CP4_HORN, 0, 64, 0, 1, BUDGET) >= 0) n++;

@@ -953,20 +953,56 @@ mouse is moving and settle when it stops. On this machine, one predator at
 
 | quality | what it does | time | rate |
 | --- | --- | --- | --- |
-| 0 | quarter res, flat shading | 17 ms | 60 fps |
-| 1 | half res, ambient occlusion | 51 ms | 20 fps |
-| 2 | full res, occlusion + shadows | 0.70 s | — |
-| 3 | 2x supersampled, everything | 2.9 s | — |
+| 0 | quarter res, flat shading, contact shadow | 21 ms | 48 fps |
+| 1 | half res, ambient occlusion, transmission | 68 ms | 15 fps |
+| 2 | full res, bloom | 0.23 s | — |
+| 3 | 2x supersampled, self-shadow | 0.95 s | — |
 
 That ladder is what makes direct manipulation feasible without a GPU: drag
-against 0 or 1, settle to 2, export at 3.
+against 0, settle through 1 to 2, export at 3.
+
+Two of those rungs used to be much worse — 0.56 s and 2.2 s — and both for the
+same reason, which is worth stating because it is the mistake this codebase
+keeps almost making. The contact shadow was traced per screen pixel, twelve
+distance-field samples deep, over a disc wider than the animal: about a third
+of the frame, four hundred milliseconds, and growing with the square of the
+output resolution so the export paid four times again. But a contact shadow is
+a smooth function of two variables, x and z on the floor. Sampling it at the
+frequency of the screen — and re-sampling it whenever the screen gets bigger —
+is exactly what the pixel-path terrain marcher was doing to `cp4_height`. It is
+a world-space grid now, 32 to 96 cells across the body by quality, built once a
+frame and bilinear-sampled per pixel, and its cost no longer depends on the
+resolution at all. Which then pays twice: a shadow that costs the same at every
+quality can be on at *every* quality, so the drag frame has one too and a
+creature no longer levitates for a fifth of a second whenever you move it.
+
+The other rung was the creature's own self-shadow, twenty evaluations per lit
+pixel, which used to switch on at the same moment the resolution quadrupled.
+Detail and resolution are separate ladders now; occlusion and transmission do
+most of the reading of a shape, so they land early and stay, and the
+self-shadow waits for the export.
 
 The other half is `cp4_studio_pick`, which answers *which genome slot is under
-this pixel* in about ten microseconds. It runs the same march the renderer
+this pixel* in about five microseconds. It runs the same march the renderer
 does and stops at the first hit, so picking cannot disagree with what is on
 screen — which is the usual failure of a separate picking representation, and
 the one a user notices immediately. `Prim` carries the genome slot that pushed
 it, stamped by the builder, so a pixel maps back to the gene that drew it.
+
+`cp4_studio_extent` is the same question asked the other way round: *where is
+this slot on screen*, as a centre, a tip and a radius in pixels. The front end
+hangs its drag handles off it. It used to derive them by calling the picker
+over a five-pixel grid and averaging the hits, which is ten thousand ray
+marches — 55 ms — for two points that were already in the primitive list;
+projecting a few dozen endpoints gives the same answer in four microseconds.
+Two details make the answer the right one rather than merely a fast one. Only
+the span of the part that is *outside* the trunk counts, because a part is
+rooted six tenths of a body radius inside it and that buried root is both the
+thickest piece of it and invisible — averaged in, it put the handle a dozen
+pixels inside the flank. And a mirrored part is two pieces of geometry under
+one slot, so the sides are separated and the near one answers; the mean of a
+left horn and a right horn is a point in the middle of the skull where there is
+no horn at all.
 
 ### Editing
 
@@ -1039,7 +1075,7 @@ survive a removal.
 ![the editor](docs/editor_web.png)
 
 ```
-make wasm      # 57KB of WebAssembly
+make wasm      # 59KB of WebAssembly
 make serve     # http://127.0.0.1:8731/editor.html
 ```
 
@@ -1059,11 +1095,10 @@ has to hold that the screen is not showing them, and the first version of this
 page had one: you armed a part in the palette and then clicked the body. It
 worked and it was wrong, because it is not how the thing it imitates behaves.
 
-The handles are placed from what the picker reports rather than from a second
-projection of the geometry — a handle that sits where the part is not is worse
-than no handle. The DNA meter and the stat block update as you go, and a part
-you cannot afford is greyed out in the palette rather than refused after the
-fact.
+The handles come from `cp4_studio_extent`, which projects the selected slot's
+own geometry — so a handle cannot sit where the part is not. The DNA meter and
+the stat block update as you go, and a part you cannot afford is greyed out in
+the palette rather than refused after the fact.
 
 **There is no Emscripten.** clang has had a wasm32 target for years and
 `wasm-ld` ships with lld, so the only thing missing was a C runtime — and the
@@ -1072,7 +1107,7 @@ transcendentals. `wasm/shim.c` is the first two, in about two hundred lines;
 the third are left undefined on purpose so the linker turns them into imports
 and the browser's own `Math` supplies them. Taking on a toolchain that brings
 its own libc, in order to demonstrate that the project does not need one, would
-have been a strange trade. The result is **57KB with six imports and no
+have been a strange trade. The result is **59KB with six imports and no
 runtime**.
 
 The one hazard in the JS is that growing WebAssembly's linear memory *detaches*
@@ -1081,11 +1116,34 @@ session opens or a frame allocates. So nothing in `cpore-edit.js` caches a
 view: it remakes one on demand, and every call into C is assumed to have
 invalidated whatever was held before it.
 
-Rendering uses the same quality ladder the studio exposes — quarter resolution
-and flat shading while the pointer is down, a proper frame 160 ms after it
-stops. In the browser that measured **34 ms coarse and 64 ms mid** at 512x512
-against 17 and 51 natively, which is the WebAssembly tax and is well inside
-what dragging needs.
+Rendering climbs the studio's quality ladder one rung at a time: quarter
+resolution while the pointer is down, half a heartbeat after it stops, full a
+third of a second after that. Each rung is scheduled rather than run inline, so
+a press during the climb cancels what has not been drawn yet instead of
+queueing behind it, and drag frames are coalesced onto `requestAnimationFrame`
+so the editor draws where the cursor *is* rather than building a queue of
+frames for places it has already left.
+
+That climb replaced a two-rung version that went straight from the drag frame
+to the full one, and the difference is the whole of what "slow" meant here.
+Driving real `PointerEvent`s through the real handlers in headless Chromium, a
+press followed by twelve moves and a release:
+
+| | before | after |
+| --- | --- | --- |
+| `pointerdown` on a part | 845 ms | 1.7 ms |
+| each `pointermove` | 25 ms | 0.2 ms |
+| `pointerup` | 824 ms | 97 ms |
+| **main thread blocked, whole drag** | **1973 ms** | **123 ms** |
+
+Almost none of that was the ray marching. Pressing on a part ran a full
+settle frame *inside the pointerdown handler* and then a grid of ten thousand
+picks to find the handles — for an event that changes no geometry at all and
+needed nothing but the overlay redrawn. The renderer got about three times
+faster; the interaction got sixteen times more responsive, and the gap between
+those two numbers is the point.
+
+The self-test asserts that budget, so the mistake cannot come back quietly.
 
 `editor.html?selftest=1` drives the model the way the pointer handlers do, then
 dispatches real `PointerEvent`s through those handlers — including the whole
@@ -1096,7 +1154,7 @@ show. It prints its results onto the page, which is how the one above was
 verified.
 
 `python3 wasm/build_standalone.py` folds the module and the WebAssembly into a
-single 103KB document that runs from a `file://` URL with no server and makes
+single 120KB document that runs from a `file://` URL with no server and makes
 no outbound request — for handing to someone, or for hosting anywhere with a
 content policy that blocks everything.
 

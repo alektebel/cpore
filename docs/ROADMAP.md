@@ -107,6 +107,19 @@ up to hump and sideways to fatten. No click-then-click mode anywhere.
 `?selftest=1` drives the whole palette drag through the real pointer handlers,
 so the wiring is checked rather than assumed.
 
+And it is responsive now, which it was not. A press, twelve moves and a
+release blocked the main thread for 1973ms; it is 123ms. Most of that was not
+the marcher: pressing on a part ran a full settle frame inside the pointerdown
+handler and then ten thousand ray-marched picks to find its drag handles, for
+an event that changes no geometry. Handles are projected from the primitives
+now (`cp4_studio_extent`, four microseconds), the ladder climbs one rung at a
+time on a timer instead of jumping, and drag frames are coalesced onto the
+animation frame. The renderer itself got about three times faster as well: the
+contact shadow is a world-space grid rather than a per-screen-pixel trace, so
+it stopped costing the square of the resolution, and the creature self-shadow
+waits for the export instead of switching on at the same moment the resolution
+quadruples. The self-test asserts the drag budget so it cannot quietly return.
+
 Still open on the RL side: `cp4_genome_from_action` sets parts, nseg and girth
 and nothing else, so colour, pattern and the spine genes remain unreachable
 from the action space and every animal an agent designs is the same beige with

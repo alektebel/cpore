@@ -2100,6 +2100,121 @@ static void studio_light(Land *c)
     c->seed = 0x5C0AEu;
 }
 
+/* The contact shadow, traced on the floor rather than through the frame.
+ *
+ * This was the single most expensive thing in the studio: a twelve-step soft
+ * shadow evaluated per screen pixel over a disc wider than the animal, which
+ * came to four hundred milliseconds - more than half the settle frame - and
+ * grew with the square of the output resolution, so the supersampled export
+ * paid four times again.
+ *
+ * All of that was the wrong domain. A contact shadow is a function of two
+ * variables, x and z on the floor, and it is a *smooth* function of them - the
+ * softness is the whole point of it. Sampling a low-frequency function of two
+ * variables at the resolution of the screen, and re-sampling it every time the
+ * screen gets bigger, is the same mistake the terrain marcher made against
+ * cp_height. So it is a grid now, in world space, sized to the shadow and not
+ * to the frame: build it once per frame, bilinear it per pixel, and its cost
+ * stops depending on the resolution entirely.
+ *
+ * Which then pays for itself twice, because a shadow that costs the same at
+ * every quality can be on at every quality - the drag frame has one too, and
+ * a creature does not levitate for a fifth of a second every time you move it.
+ */
+#define SHADOW_G 96
+
+typedef struct {
+    float x0, x1, z0, z1;
+    int   g;                              /* cells per side, this frame */
+    float m[SHADOW_G * SHADOW_G];
+} Contact;
+
+/* The grid is sized by quality like everything else, but on its own axis: it
+ * is not a fraction of the frame, it is a count of samples over the body. 32
+ * across an animal is a shadow soft enough to read as one and cheap enough to
+ * drag against; 96 is where the foot contacts get their edges back. */
+static void contact_build(Contact *k, Land *c, const Prim *pr, int n,
+                          float bound, int quality)
+{
+    int G = quality >= 2 ? SHADOW_G : (quality >= 1 ? 64 : 32);
+    k->g = G;
+    /* Where the shadow can possibly fall: the body's box, swept along the sun
+     * onto y = 0. Everything outside is lit, exactly. */
+    float bx0 = 1e9f, bx1 = -1e9f, bz0 = 1e9f, bz1 = -1e9f;
+    float by0 = 1e9f, by1 = -1e9f;
+    for (int i = 0; i < n; i++)
+        for (int e = 0; e < 2; e++) {
+            V3 p = e ? pr[i].b : pr[i].a;
+            float r = (e ? pr[i].rb : pr[i].ra) + pr[i].k;
+            if (p.x - r < bx0) bx0 = p.x - r;
+            if (p.x + r > bx1) bx1 = p.x + r;
+            if (p.y - r < by0) by0 = p.y - r;
+            if (p.y + r > by1) by1 = p.y + r;
+            if (p.z - r < bz0) bz0 = p.z - r;
+            if (p.z + r > bz1) bz1 = p.z + r;
+        }
+    /* +y is down, so a point at height y reaches the floor after -y/sun.y
+     * along the sun. The high and low ends of the body give the two offsets
+     * the box slides between. */
+    float sy = c->sun.y > 0.05f ? c->sun.y : 0.05f;
+    float t0 = -by1 / sy, t1 = -by0 / sy;
+    float ox0 = c->sun.x * t0, ox1 = c->sun.x * t1;
+    float oz0 = c->sun.z * t0, oz1 = c->sun.z * t1;
+    /* A margin wide enough that the outermost ring of cells is always fully
+     * lit, which is what makes clamping at the edge the correct answer rather
+     * than merely a safe one. */
+    float pen = bound * 0.12f + 1.0f;
+    k->x0 = bx0 + (ox0 < ox1 ? ox0 : ox1) - pen;
+    k->x1 = bx1 + (ox0 > ox1 ? ox0 : ox1) + pen;
+    k->z0 = bz0 + (oz0 < oz1 ? oz0 : oz1) - pen;
+    k->z1 = bz1 + (oz0 > oz1 ? oz0 : oz1) + pen;
+
+    V3 tosun = mul(c->sun, -1.0f);
+    float reach = bound * 1.6f;
+    for (int j = 0; j < G; j++) {
+        float hz = k->z0 + (k->z1 - k->z0) * ((float)j + 0.5f) / (float)G;
+        for (int i = 0; i < G; i++) {
+            float hx = k->x0 + (k->x1 - k->x0) * ((float)i + 0.5f) / (float)G;
+            V3 h = v3(hx, 0.0f, hz);
+            float res = 1.0f, tt = 0.6f;
+            for (int s = 0; s < 12 && tt < reach; s++) {
+                float dd = creature_sdf(pr, n, add(h, mul(tosun, tt)),
+                                        NULL, NULL, NULL);
+                if (dd < 0.04f) { res = 0.0f; break; }
+                /* Nothing left to hit: the field says the body is further off
+                 * than the ray has left to travel. The same early-out the
+                 * creature marcher uses, and it earns its keep here for the
+                 * same reason - most of the grid is outside the silhouette. */
+                if (dd > reach - tt) break;
+                float kk = 6.0f * dd / tt;
+                if (kk < res) res = kk;
+                tt += clampf(dd, 0.5f, 3.5f);
+            }
+            k->m[j * G + i] = sstep(0.0f, 1.0f, clampf(res, 0.0f, 1.0f));
+        }
+    }
+}
+
+static float contact_at(const Contact *k, float x, float z)
+{
+    int G = k->g;
+    float u = (x - k->x0) / (k->x1 - k->x0) * (float)G - 0.5f;
+    float w = (z - k->z0) / (k->z1 - k->z0) * (float)G - 0.5f;
+    if (u < -1.0f || w < -1.0f || u > (float)G || w > (float)G) return 1.0f;
+    int i0 = (int)floorf(u), j0 = (int)floorf(w);
+    float tu = u - (float)i0, tw = w - (float)j0;
+    int i1 = i0 + 1, j1 = j0 + 1;
+    if (i0 < 0) i0 = 0;
+    if (j0 < 0) j0 = 0;
+    if (i1 > G - 1) i1 = G - 1;
+    if (j1 > G - 1) j1 = G - 1;
+    if (i0 > G - 1) i0 = G - 1;
+    if (j0 > G - 1) j0 = G - 1;
+    float a = k->m[j0 * G + i0], b = k->m[j0 * G + i1];
+    float e = k->m[j1 * G + i0], f = k->m[j1 * G + i1];
+    return mixf(mixf(a, b, tu), mixf(e, f, tu), tw);
+}
+
 /* Backdrop and floor.
  *
  * A cyclorama rather than a gradient: dark, cool, falling off toward the
@@ -2109,10 +2224,10 @@ static void studio_light(Land *c)
  * landscape, and this is deliberately not one.
  */
 static void studio_ground(Land *c, const Prim *pr, int n, float bound,
-                          int quality)
+                          const Contact *shadow)
 {
-    V3 tosun = mul(c->sun, -1.0f);
     float R = bound * 2.6f;
+
     for (int y = 0; y < c->H; y++) {
         for (int x = 0; x < c->W; x++) {
             float px = ((float)x + 0.5f - c->W * 0.5f) / c->focal;
@@ -2140,29 +2255,12 @@ static void studio_ground(Land *c, const Prim *pr, int n, float bound,
             float grain = 0.90f + 0.20f * rnoise(0x77u, h.x * 0.32f, h.z * 0.32f);
             V3 alb = mul(v3(0.105f, 0.112f, 0.108f), grain);
 
-            /* The contact shadow is the whole reason there is a floor. An
-             * animal without one floats, and floating hides exactly the thing
-             * the leg rig exists to show. Traced against the real body, so it
-             * is the shadow of this creature and not a blob. */
             /* The contact shadow is the whole reason there is a floor: an
              * animal without one floats, and floating hides exactly what the
-             * leg rig exists to show. It is also, unguarded, about half the
-             * frame - so it is traced only where a body could plausibly be
-             * over, only at the settled qualities, and with a tenth of the
-             * reach a general soft shadow needs. */
-            float sh = 1.0f;
-            if (quality >= 2 && r < bound * 1.45f) {
-                float res = 1.0f, tt = 0.6f;
-                for (int k = 0; k < 12 && tt < bound * 1.6f; k++) {
-                    float dd = creature_sdf(pr, n, add(h, mul(tosun, tt)),
-                                            NULL, NULL, NULL);
-                    if (dd < 0.04f) { res = 0.0f; break; }
-                    float kk = 6.0f * dd / tt;
-                    if (kk < res) res = kk;
-                    tt += clampf(dd, 0.5f, 3.5f);
-                }
-                sh = sstep(0.0f, 1.0f, clampf(res, 0.0f, 1.0f));
-            }
+             * leg rig exists to show. Read out of the grid above, so it is
+             * still the shadow of this creature traced against its real field
+             * and not a blob - just asked for at the frequency it has. */
+            float sh = contact_at(shadow, h.x, h.z);
 
             V3 col = shade(c, alb, v3(0.0f, -1.0f, 0.0f), ray,
                            0.55f + 0.45f * sstep(bound * 2.4f, bound * 0.6f, r),
@@ -2198,10 +2296,23 @@ void cp4_studio_render(Cp4Studio *s, const Cp4Genome *g, const Cp4View *v,
     c->h.ui = 1.0f;
     c->h.step = 0;
     studio_light(c);
-    c->detail = q >= 2 ? 2 : (q >= 1 ? 1 : 0);
+    /* Detail is not the same ladder as resolution, and tying them together is
+     * what made the settle frame cost eight hundred milliseconds. Going from
+     * q1 to q2 already quadruples the pixel count; adding a twenty-evaluation
+     * self-shadow to each of those pixels at the same time multiplies it
+     * again, and the result was a frame that arrives a second after you let go
+     * of the mouse - which is not a settle, it is a stall.
+     *
+     * So the self-shadow, the most expensive term and the least legible one on
+     * a body already carrying ambient occlusion, is held back for the
+     * supersampled export. Occlusion and transmission - the two that do most
+     * of the reading of the shape - land at q1 and stay. */
+    c->detail = q >= 3 ? 2 : (q >= 1 ? 1 : 0);
     studio_camera(c, v, pr, n, centre, bound, iw, ih);
 
-    studio_ground(c, pr, n, bound, q);
+    static Contact shadow;
+    contact_build(&shadow, c, pr, n, bound, q);
+    studio_ground(c, pr, n, bound, &shadow);
     march_creature(c, pr, n, centre, bound, &sk);
 
     if (q >= 2) bloom(&c->h, 1.15f, 0.24f);
@@ -2319,6 +2430,140 @@ int cp4_studio_pick(Cp4Studio *s, const Cp4Genome *g, const Cp4View *v,
         t += d * 0.9f;
     }
     return -1;
+}
+
+/* Where on screen a part is, without asking pixel by pixel.
+ *
+ * The front end needs this for drag handles, and its first version got it by
+ * calling cp4_studio_pick over a grid and averaging the hits - ten thousand
+ * ray marches to find two points, which is a fifth of a second every time the
+ * selection changes. The information was never in the pixels though: the parts
+ * a slot pushed are right there in the prim list with the slot stamped on
+ * them, and projecting a few dozen endpoints is the same answer for a
+ * millionth of the work.
+ *
+ * out is cx, cy, tip x, tip y, radius - all in output pixels. The tip is the
+ * endpoint furthest from the middle of the frame, which is the middle of the
+ * animal because that is what the camera fits, so it is the end you would pull
+ * on. Returns 0 when the slot pushed nothing.
+ *
+ * A projected centre can lie under geometry that is not this part - a hidden
+ * leg still reports where it is. That is deliberate: a handle you can reach
+ * for a part you can half-see beats no handle at all, and the alternative
+ * costs the grid this exists to remove.
+ *
+ * The one thing that cannot be averaged is mirroring. A mirrored part is two
+ * pieces of geometry under one slot, and the mean of a left horn and a right
+ * horn is a point in the middle of the skull where there is no horn at all -
+ * so the sides are separated and the near one answers. */
+int cp4_studio_extent(Cp4Studio *s, const Cp4Genome *g, const Cp4View *v,
+                      int slot, int32_t *out /* 5 */)
+{
+    if (!s || !g || !v || !out) return 0;
+    if (slot < 0 || slot >= CP4_MAX_PARTS) return 0;
+    if (g->part[slot].type == CP4_NONE) return 0;
+
+    static Prim pr[MAX_PRIM];
+    V3 centre;
+    float bound;
+    Skin sk;
+    int n = studio_build(g, v->phase, pr, &centre, &bound, &sk);
+    if (n <= 0) return 0;
+
+    Land *c = &s->land;
+    studio_light(c);
+    c->detail = 0;
+    studio_camera(c, v, pr, n, centre, bound, s->W, s->H);
+
+    /* The body's own right, so a prim can be told which copy it is. Built the
+     * same way the renderer builds it, from the same genome. */
+    Cp4Beast bb;
+    memset(&bb, 0, sizeof(bb));
+    bb.g = *g;
+    cp4_genome_stats(&bb.g, &bb.s);
+    bb.p.x = 0.0f; bb.p.y = -bb.s.stand; bb.p.z = 0.0f;
+    bb.phase = v->phase;
+    LandSpine sp;
+    land_spine(&bb, &sp);
+    V3 org = v3(bb.p.x, bb.p.y, bb.p.z);
+    int split = g->part[slot].mirror ? 1 : 0;
+
+    struct { float ax, ay, aw, az, tx, ty, far, rad; } side[2];
+    for (int k = 0; k < 2; k++) {
+        side[k].ax = side[k].ay = side[k].aw = side[k].az = 0.0f;
+        side[k].tx = side[k].ty = side[k].rad = 0.0f;
+        side[k].far = -1.0f;
+    }
+
+    /* Sampled along each prim rather than at its two ends, and only where the
+     * prim is outside the trunk.
+     *
+     * A part is rooted inside the body - build_prims4 starts it six tenths of
+     * a body radius in from the surface so the smooth union has something to
+     * bite on - and that buried root is both the thickest part of it and
+     * invisible. Averaging the endpoints put the handle a dozen pixels inside
+     * the flank, off the horn it was supposed to be a handle for. What the
+     * user can see and grab is the exposed span, so that is what is averaged.
+     */
+    const int NS = 8;
+    for (int pass = 0; pass < 2; pass++) {
+        for (int i = 0; i < n; i++) {
+            if (pr[i].part != slot) continue;
+            int k = 0;
+            if (split) {
+                V3 mid = mul(add(pr[i].a, pr[i].b), 0.5f);
+                k = dot(sub(mid, org), sp.right) < 0.0f ? 1 : 0;
+            }
+            for (int j = 0; j < NS; j++) {
+                float u = ((float)j + 0.5f) / (float)NS;
+                float r = pr[i].ra + (pr[i].rb - pr[i].ra) * u;
+                V3 p = add(pr[i].a, mul(sub(pr[i].b, pr[i].a), u));
+
+                if (pass == 0) {
+                    /* clear of every vertebra, so it is skin not filling */
+                    float depth = 1e9f;
+                    for (int t2 = 0; t2 < sp.n; t2++) {
+                        V3 d2 = sub(p, sp.pos[t2]);
+                        float e2 = sqrtf(dot(d2, d2)) - sp.rad[t2];
+                        if (e2 < depth) depth = e2;
+                    }
+                    if (depth < 0.0f) continue;
+                }
+
+                float ex, ey, ez;
+                if (!project(c, p, &ex, &ey, &ez)) continue;
+                float w = (r + 0.05f) / (float)NS;
+                side[k].ax += ex * w; side[k].ay += ey * w;
+                side[k].az += ez * w; side[k].aw += w;
+                float rp = r / ez * c->focal;
+                if (rp > side[k].rad) side[k].rad = rp;
+                float d = (ex - s->W * 0.5f) * (ex - s->W * 0.5f)
+                        + (ey - s->H * 0.5f) * (ey - s->H * 0.5f);
+                if (d > side[k].far) { side[k].far = d; side[k].tx = ex; side[k].ty = ey; }
+            }
+        }
+        /* A part small enough or set deep enough to be swallowed by the trunk
+         * has no exposed span at all, and the first pass then finds nothing.
+         * Returning "no extent" for it means the front end draws no handle,
+         * which is how a part that is merely half-buried became a part you
+         * cannot select. Second pass, no filter: a handle over the place the
+         * part is, is worth more than no handle. */
+        if (side[0].aw > 0.0f || side[1].aw > 0.0f) break;
+    }
+
+    /* The near copy, because that is the one the pointer can reach. */
+    int use = 0;
+    if (side[0].aw <= 0.0f) use = 1;
+    else if (side[1].aw > 0.0f
+             && side[1].az / side[1].aw < side[0].az / side[0].aw) use = 1;
+    if (side[use].aw <= 0.0f) return 0;
+
+    out[0] = (int32_t)(side[use].ax / side[use].aw + 0.5f);
+    out[1] = (int32_t)(side[use].ay / side[use].aw + 0.5f);
+    out[2] = (int32_t)(side[use].tx + 0.5f);
+    out[3] = (int32_t)(side[use].ty + 0.5f);
+    out[4] = (int32_t)(side[use].rad + 0.5f);
+    return 1;
 }
 
 /* ------------------------------------------------------------------ *

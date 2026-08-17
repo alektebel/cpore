@@ -141,6 +141,17 @@ export class CreatureEditor {
     return s < 0 ? null : s;
   }
 
+  /* Where a slot sits on screen, for hanging drag handles off. Projected from
+   * the primitives rather than gathered by picking pixel by pixel, which is
+   * the difference between a call you can make on every frame and one that
+   * costs a fifth of a second. */
+  extent(slot) {
+    if (slot === null || !this.x.cp4_edit_extent(this.handle, slot | 0, this.i32Ptr))
+      return null;
+    const m = this.i32(), b = this.i32Ptr >> 2;
+    return { cx: m[b], cy: m[b + 1], tip: [m[b + 2], m[b + 3]], r: m[b + 4] };
+  }
+
   /* Returns the slot, or null if the pointer was off the body, no slot was
    * free, or the budget refused - and in every one of those nothing changed,
    * so a caller can simply try and report. */

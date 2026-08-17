@@ -428,6 +428,13 @@ int        cp4_studio_pick(Cp4Studio *s, const Cp4Genome *g,
 int        cp4_studio_surface(Cp4Studio *s, const Cp4Genome *g,
                               const Cp4View *v, int px, int py,
                               int32_t *seg, int32_t *yaw, int32_t *pitch);
+/* Where a slot's part sits on screen: centre x, centre y, tip x, tip y and
+ * radius, all in output pixels. 0 if the slot pushed no geometry. This is what
+ * a front end hangs drag handles off, and it exists because the alternative -
+ * asking cp4_studio_pick over a grid - is thousands of ray marches for two
+ * points that were already in the primitive list. */
+int        cp4_studio_extent(Cp4Studio *s, const Cp4Genome *g,
+                             const Cp4View *v, int slot, int32_t *out /* 5 */);
 /* Spine handles. The pick does not require hitting the body, because a handle
  * is grabbable from just outside the silhouette. */
 int        cp4_studio_spine_pick(Cp4Studio *s, const Cp4Genome *g,
@@ -511,6 +518,9 @@ void     cp4_edit_render(Cp4Edit *e, uint8_t *rgba, int32_t quality);
  * with no way to ask. out takes seg, yaw, pitch. */
 int32_t  cp4_edit_surface(Cp4Edit *e, int32_t x, int32_t y, int32_t *out /* 3 */);
 int32_t  cp4_edit_pick(Cp4Edit *e, int32_t x, int32_t y);
+/* Where a slot is on screen, for hanging handles off: cx, cy, tip x, tip y,
+ * radius in pixels. 0 if the slot is empty. */
+int32_t  cp4_edit_extent(Cp4Edit *e, int32_t slot, int32_t *out /* 5 */);
 int32_t  cp4_edit_drop(Cp4Edit *e, int32_t x, int32_t y, int32_t type, int32_t mirror);
 int32_t  cp4_edit_move(Cp4Edit *e, int32_t slot, int32_t x, int32_t y);
 int32_t  cp4_edit_remove(Cp4Edit *e, int32_t slot);

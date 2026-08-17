@@ -167,6 +167,12 @@ int32_t cp4_edit_pick(Cp4Edit *e, int32_t x, int32_t y)
     return cp4_studio_pick(e->studio, &e->g, &e->view, (int)x, (int)y);
 }
 
+int32_t cp4_edit_extent(Cp4Edit *e, int32_t slot, int32_t *out /* 5 */)
+{
+    if (!e) return 0;
+    return cp4_studio_extent(e->studio, &e->g, &e->view, (int)slot, out);
+}
+
 /* Drop a new part where the pointer is. Returns the slot it went into, or -1
  * if the pointer was not over the body, there was no slot free, or the budget
  * could not take it - and in every one of those cases nothing has changed,

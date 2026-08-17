@@ -573,6 +573,8 @@ def _bind_edit(lib):
     lib.cp4_edit_surface.restype = c_int32
     lib.cp4_edit_pick.argtypes = [c_void_p, c_int32, c_int32]
     lib.cp4_edit_pick.restype = c_int32
+    lib.cp4_edit_extent.argtypes = [c_void_p, c_int32, POINTER(c_int32)]
+    lib.cp4_edit_extent.restype = c_int32
     lib.cp4_edit_remove.argtypes = [c_void_p, c_int32]
     lib.cp4_edit_remove.restype = c_int32
     lib.cp4_edit_drop.argtypes = [c_void_p, c_int32, c_int32, c_int32, c_int32]
@@ -719,6 +721,15 @@ class CreatureEditor:
         """Which part slot is under a pixel, or None."""
         s = self._lib.cp4_edit_pick(self._h, int(x), int(y))
         return None if s < 0 else s
+
+    def extent(self, slot):
+        """Where a part sits on screen: (cx, cy, tip_x, tip_y, radius) in
+        pixels, or None if the slot is empty. Projected from the geometry, so
+        it costs nothing next to a pick - which is what makes it usable for
+        drag handles that follow the part every frame."""
+        if not self._lib.cp4_edit_extent(self._h, int(slot), self._parts):
+            return None
+        return tuple(self._parts[i] for i in range(5))
 
     def drop(self, x, y, part, mirror=-1):
         """Place a part where the pointer is. Returns the slot, or None if it
