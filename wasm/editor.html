@@ -578,8 +578,27 @@ function buildPanels() {
   live('pattern2', v => ed.coats({ pattern2: v }));
 }
 
-/* ---- boot ---- */
-ed = await CreatureEditor.create('./cpore.wasm', { width: N, height: N, budget: 248 });
+/* ---- boot ----
+ *
+ * The failure worth handling here is a host that will not compile
+ * WebAssembly. A content policy without `wasm-unsafe-eval` refuses
+ * instantiation, and an unhandled rejection in a top-level await leaves the
+ * page sitting on "loading" forever with the reason only in a console the
+ * reader is unlikely to open. Say what happened instead. */
+try {
+  ed = await CreatureEditor.create('./cpore.wasm', { width: N, height: N, budget: 248 });
+} catch (err) {
+  $('boot').innerHTML =
+    `<div style="max-width:44ch;text-align:center;line-height:1.6">
+       <b style="color:var(--warn)">This page could not start its renderer.</b><br>
+       The creature is drawn by a WebAssembly module, and this page is not
+       allowed to compile one here.<br><br>
+       <span style="font-family:var(--mono);font-size:11px">${String(err)}</span><br><br>
+       Opening the same file directly, or serving it from any static host,
+       will run it.
+     </div>`;
+  throw err;
+}
 ed.loadStyle('predator');
 buildPanels();
 draw(false);
