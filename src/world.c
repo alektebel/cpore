@@ -262,6 +262,59 @@ void cp_world_reset(CpWorld *w, uint32_t seed, const CpGenome *genome)
     w->status = CP_RUN;
 }
 
+/* ---------------- coming back ---------------- */
+
+int cp_world_tier(const CpWorld *w)
+{
+    float t = w->dna / CP_DNA_GOAL;
+    int   k = (int)(t * (float)CP_TIERS);
+    return k < 0 ? 0 : (k > CP_TIERS - 1 ? CP_TIERS - 1 : k);
+}
+
+float cp_world_respawn(CpWorld *w)
+{
+    /* A tier's worth of meter, which is what makes the loss legible: you drop
+     * back to roughly where the last size step began rather than to nothing.
+     * Zeroing it would make one unlucky collision undo an entire run, and
+     * charging nothing would make the predators scenery. */
+    float seg  = CP_DNA_GOAL / (float)CP_TIERS;
+    float lost = seg * 0.45f;
+    if (lost > w->dna) lost = w->dna;
+    w->dna -= lost;
+
+    CpCell *p = &w->player;
+    p->hp   = w->stats.hp_max;
+    p->alive = 1;
+    p->vx = p->vy = 0.0f;
+    p->r = w->stats.radius0 * (1.0f + 0.55f * (w->dna / CP_DNA_GOAL));
+
+    /* Somewhere else, and away from whatever just ate you. Eight tries, then
+     * take what we are given - a respawn that can fail is a respawn that will,
+     * on the one frame the world happens to be crowded. */
+    for (int tries = 0; tries < 8; tries++) {
+        float x = cp_rng_range(&w->rng, 80.0f, CP_WORLD_W - 80.0f);
+        float y = cp_rng_range(&w->rng, 80.0f, CP_WORLD_H - 80.0f);
+        float near = 0.0f;
+        for (int i = 0; i < CP_MAX_CELLS; i++) {
+            const CpCell *c = &w->cells[i];
+            if (!c->alive || c->r < p->r) continue;
+            if (len2(x - c->x, y - c->y) < 260.0f) { near = 1.0f; break; }
+        }
+        if (!near || tries == 7) { p->x = x; p->y = y; break; }
+    }
+
+    /* The generation counter follows the meter back down, so the editor opens
+     * again on the way up rather than being spent. */
+    float gseg = CP_DNA_GOAL / (float)CP_GENERATIONS;
+    int   gen  = (int)(w->dna / gseg);
+    if (gen > CP_GENERATIONS - 1) gen = CP_GENERATIONS - 1;
+    if (gen < w->generation) w->generation = gen;
+
+    w->deaths++;
+    w->status = CP_RUN;
+    return lost;
+}
+
 /* ---------------- npc steering ---------------- */
 
 static void cell_think(CpWorld *w, CpCell *c, int idx, float *out_ax, float *out_ay)

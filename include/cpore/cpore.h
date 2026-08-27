@@ -185,7 +185,7 @@ typedef struct {
     /* episode bookkeeping */
     float    reward;
     int32_t  status;            /* CP_RUN / CP_DEAD / ... */
-    int32_t  ate_plant, ate_meat, kills, hits_taken, discharges;
+    int32_t  ate_plant, ate_meat, kills, hits_taken, discharges, deaths;
     float    dmg_dealt, dmg_taken;   /* higher-resolution than kill counts */
     int32_t  design_events;     /* how many times the design head was applied */
     float    dist_travelled;
@@ -194,6 +194,26 @@ typedef struct {
 void  cp_world_reset(CpWorld *w, uint32_t seed, const CpGenome *genome);
 void  cp_world_step(CpWorld *w, const float act[CP_ACT_DIM]);
 void  cp_world_observe(const CpWorld *w, float *obs /* CP_OBS_DIM */);
+
+/* Come back from being eaten.
+ *
+ * Dying in a cell stage is a setback, not an ending: you keep the body you
+ * designed, you lose ground on the meter, and you are put back in the water
+ * somewhere else. cp_world_step still reports CP_DEAD - a caller that wants
+ * the episode to end there can have it - but a caller that wants the stage
+ * the way it is actually played calls this and carries on.
+ *
+ * Returns the DNA it cost. */
+float cp_world_respawn(CpWorld *w);
+
+/* How far up the size ladder the player is: 0, 1 or 2.
+ *
+ * The cell stage is played three times over at three scales - what ate you in
+ * the first is food in the third - and the tier is what the camera, the spawn
+ * table and the difficulty ramp all read. It is a pure function of the meter,
+ * so it needs no state of its own. */
+int   cp_world_tier(const CpWorld *w);
+#define CP_TIERS 3
 
 /* scripted baseline: fills the whole action vector, design head included. */
 void  cp_policy_greedy(const CpWorld *w, float act[CP_ACT_DIM]);
