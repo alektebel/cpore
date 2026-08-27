@@ -2,6 +2,7 @@
 #include "cpore/aqua.h"
 #include "cpore/land.h"
 #include "cpore/civ.h"
+#include "cpore/lineage.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1262,6 +1263,74 @@ int main(void)
         CHECK(ended == trials, "civ: every episode reaches a terminal state");
         CHECK(consistent, "civ: the city ledger matches the cities on the map");
         free(w);
+    }
+
+    /* ---- the lineage: one creature across four stages ----
+     *
+     * The campaign's whole claim is that the animal you finish with is the one
+     * you started, so what is tested is not that the conversions run but that
+     * an identity survives them. Two opposite lineages are pushed through
+     * cell, water and land and then read back; if the pipeline ever starts
+     * averaging creatures toward the middle, these separate immediately. */
+    {
+        CpRng lr;
+        cp_rng_seed(&lr, 4242u);
+
+        CpLineage fight, charm;
+        cp_lineage_default(&fight);
+        fight.carn = 240; fight.herb = 20; fight.weapon = 230; fight.armour = 180;
+        fight.sense = 60; fight.social = 10;
+        fight.hue = 12; fight.sat = 230; fight.pattern = 4;
+
+        cp_lineage_default(&charm);
+        charm.carn = 15; charm.herb = 235; charm.weapon = 10; charm.armour = 40;
+        charm.sense = 200; charm.social = 245;
+        charm.hue = 150; charm.sat = 200; charm.pattern = 2;
+
+        uint8_t hue0 = fight.hue, sat0 = fight.sat, pat0 = fight.pattern;
+
+        CpLineage *ls[2] = { &fight, &charm };
+        int ok_budget = 1;
+        for (int k = 0; k < 2; k++) {
+            CpGenome c;
+            cp_lineage_to_cell(ls[k], &c, CP_GEN_BUDGET[CP_GENERATIONS - 1], &lr);
+            if (cp_genome_cost(&c) > CP_GEN_BUDGET[CP_GENERATIONS - 1]) ok_budget = 0;
+            cp_lineage_from_cell(ls[k], &c);
+
+            Cp3Genome a;
+            cp_lineage_to_aqua(ls[k], &a, 120, &lr);
+            if (cp3_genome_cost(&a) > 120) ok_budget = 0;
+            cp_lineage_from_aqua(ls[k], &a);
+
+            Cp4Genome g;
+            cp_lineage_to_land(ls[k], &g, CP4_GEN_BUDGET[CP4_GENERATIONS - 1], &lr);
+            if (cp4_genome_cost(&g) > CP4_GEN_BUDGET[CP4_GENERATIONS - 1]) ok_budget = 0;
+            cp_lineage_from_land(ls[k], &g);
+        }
+
+        CHECK(ok_budget, "lineage: every stage it writes is inside that stage's budget");
+        CHECK(fight.carn > fight.herb && charm.herb > charm.carn,
+              "lineage: diet survives three changes of medium");
+        CHECK(fight.weapon > charm.weapon && charm.social > fight.social,
+              "lineage: what a creature was good at is still what it is good at");
+        /* A cell has no colour genes and a fish has no third coat, so neither
+         * can repaint you. If this fails, some stage started writing back a
+         * field it has no opinion about. */
+        CHECK(fight.hue == hue0 && fight.sat == sat0 && fight.pattern == pat0,
+              "lineage: no stage repaints a colour it cannot see");
+
+        Cp5Legacy lgf, lgc;
+        cp_lineage_to_legacy(&fight, &lgf);
+        cp_lineage_to_legacy(&charm, &lgc);
+        CHECK(lgf.bonus[CP5_MIL] > lgf.bonus[CP5_REL]
+              && lgc.bonus[CP5_REL] > lgc.bonus[CP5_MIL],
+              "lineage: a body becomes the doctrine it earned");
+        int in_range = 1;
+        for (int i = 0; i < CP5_APPROACH_COUNT; i++) {
+            if (lgf.bonus[i] < 0.80f || lgf.bonus[i] > 1.60f) in_range = 0;
+            if (lgc.bonus[i] < 0.80f || lgc.bonus[i] > 1.60f) in_range = 0;
+        }
+        CHECK(in_range, "lineage: legacy lands in the same range civ already accepts");
     }
 
     /* ---- the creature editor ----
