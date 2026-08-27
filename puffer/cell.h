@@ -50,6 +50,8 @@ typedef struct {
     float plants;
     float meat;
     float kills;
+    float gulps;         /* cells swallowed whole                         */
+    float gulped;        /* times swallowed whole                         */
     float deaths;
     float evolved;       /* 1 if the stage was completed                  */
     float length;
@@ -103,6 +105,8 @@ static void c_finish(CellEnv *env, float evolved)
     env->log.plants     += (float)w->ate_plant;
     env->log.meat       += (float)w->ate_meat;
     env->log.kills      += (float)w->kills;
+    env->log.gulps      += (float)w->gulps;
+    env->log.gulped     += (float)w->gulped;
     env->log.deaths     += (float)w->deaths;
     env->log.evolved    += evolved;
     env->log.length     += (float)w->step;

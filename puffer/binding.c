@@ -66,6 +66,8 @@ static int my_log(PyObject *dict, Log *log)
     assign_to_dict(dict, "plants",     log->plants);
     assign_to_dict(dict, "meat",       log->meat);
     assign_to_dict(dict, "kills",      log->kills);
+    assign_to_dict(dict, "gulps",      log->gulps);
+    assign_to_dict(dict, "gulped",     log->gulped);
     assign_to_dict(dict, "deaths",     log->deaths);
     assign_to_dict(dict, "evolved",    log->evolved);
     assign_to_dict(dict, "length",     log->length);

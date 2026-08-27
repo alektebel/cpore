@@ -977,6 +977,23 @@ static C3 part_hue(int t)
     }
 }
 
+/* A scrim, so a readout stays readable over a bright cell.
+ *
+ * The HUD is drawn last and still lost against the animal: it is thin
+ * additive dot matrix, and adding light to something already near the top of
+ * the tonemapping curve moves it almost nowhere. Drawing it brighter is not
+ * the fix - there is no headroom left up there, which is exactly the problem -
+ * so what the text needs is somewhere darker to sit. This multiplies the
+ * frame down along the line before the glyphs are added on top of it, which
+ * costs nothing when the background is already dark and rescues the case
+ * where it is not. */
+static void hud_scrim(Hdr *h, float x, float y, float w, float glyph)
+{
+    float r = glyph * 0.95f;
+    d_fil_occ(h, x - r * 0.6f, y + glyph * 0.5f, x + w, y + glyph * 0.5f,
+              r, r, 0.20f, r * 0.9f);
+}
+
 static void draw_hud(Plate *p, const CpWorld *w, float viewW, float viewH,
                      float psx, float psy, float prad)
 {
@@ -991,6 +1008,8 @@ static void draw_hud(Plate *p, const CpWorld *w, float viewW, float viewH,
     hud_minimap(p, w, viewW, viewH);
 
     /* top left: where we are in the run */
+    hud_scrim(&p->h, M, M, 132.0f * u, 3.0f * u * 5.0f);
+    hud_scrim(&p->h, M, M + 33.0f * u, 132.0f * u, 2.0f * u * 5.0f);
     d_text(&p->h, M, M, 3.0f * u, "CELL STAGE", UI, L_SKIN * 0.95f);
     hud_rule(&p->h, M, M + 25.0f * u, 118.0f * u, u, UI_DIM, L_MID * 1.5f);
     snprintf(buf, sizeof(buf), "GEN %d/%d   T%d", w->generation + 1, CP_GENERATIONS, w->step);
@@ -1000,6 +1019,8 @@ static void draw_hud(Plate *p, const CpWorld *w, float viewW, float viewH,
     {
         float y = (float)p->h.H - M - 34.0f * u;
         snprintf(buf, sizeof(buf), "%d DNA   %d PARTS", (int)w->stats.cost, w->stats.n_parts);
+        hud_scrim(&p->h, M, y, 142.0f * u, 2.0f * u * 5.0f);
+        hud_scrim(&p->h, M, y + 25.0f * u, 142.0f * u, 2.0f * u * 5.0f);
         d_text(&p->h, M, y, 2.0f * u, buf, UI, L_SKIN * 0.85f);
         hud_rule(&p->h, M, y + 19.0f * u, 128.0f * u, u, UI_DIM, L_MID * 1.5f);
         float x = M;
@@ -1076,7 +1097,23 @@ void cp_render_drop(const CpWorld *w, uint8_t *rgba, int W, int H)
     p.h.px = (float *)malloc(sizeof(float) * (size_t)W * H * 3);
     if (!p.h.px) return;
     p.h.W = W; p.h.H = H;
-    p.scale = DROP_SCALE_REF * (float)W / 1280.0f;
+    /* The camera pulls back as the cell grows.
+     *
+     * A fixed scale hides the one thing this stage is about. You spend an
+     * hour becoming four times the size you started at, and at a fixed scale
+     * the only evidence is that the sprite got fatter - the pond looks the
+     * same, so the growth reads as a number on the meter rather than as
+     * something that happened to you.
+     *
+     * The exponent is the whole decision. At 1.0 the player holds a constant
+     * fraction of the frame, which is correct and feels like nothing at all:
+     * you never appear to grow, the world merely shrinks, and the two cancel.
+     * Below 1.0 the cancellation is deliberately incomplete - you gain on
+     * screen while the water opens up around you - and 0.72 is where being
+     * bigger is legible without the far edge of the pond arriving too soon. */
+    float grow = w->stats.radius0 > 0.01f ? w->player.r / w->stats.radius0 : 1.0f;
+    if (grow < 1.0f) grow = 1.0f;
+    p.scale = DROP_SCALE_REF * (float)W / 1280.0f / powf(grow, 0.72f);
     p.h.expo = DROP_EXPOSURE;
     p.h.ui = (float)W / 1280.0f;
     if (p.h.ui < 0.5f) p.h.ui = 0.5f;      /* below this the font stops resolving */

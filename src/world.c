@@ -154,10 +154,20 @@ static void spawn_cell(CpWorld *w, int i, float px, float py, float difficulty)
     float roll = cp_rng_f(&w->rng);
     c->diet = (uint8_t)(roll < 0.45f ? CP_DIET_HERB : (roll < 0.80f ? CP_DIET_CARN : CP_DIET_OMNI));
 
-    /* a spread of sizes: mostly prey, a few things that hunt you */
+    /* A spread of sizes whose *both* ends rise with you.
+     *
+     * The stage is played three times over at three scales, and what makes
+     * that read as a ladder rather than as a difficulty slider is that the
+     * pond keeps its shape around you: there is always something small enough
+     * to swallow and always something big enough to swallow you, and both are
+     * bigger than they were an hour ago. Raising only the top end would turn
+     * growth into a treadmill; raising only the bottom would run the threats
+     * out. Squaring the roll keeps the population mostly prey. */
     float t = cp_rng_f(&w->rng);
     t = t * t;
-    float scale = 0.45f + 1.95f * t + 0.55f * difficulty * t;
+    float lo = 0.45f + 0.55f * difficulty;
+    float hi = 2.40f + 1.60f * difficulty;
+    float scale = lo + (hi - lo) * t;
 
     c->r      = 13.0f * scale;
     c->hp_max = 26.0f * scale * scale;
@@ -602,6 +612,7 @@ void cp_world_step(CpWorld *w, const float act[CP_ACT_DIM])
     p->r = st->radius0 * (1.0f + 0.55f * (w->dna / CP_DNA_GOAL));
 
     /* ---- player vs npc contact ---- */
+    int held = 0;               /* is a mouth too big to fight on us right now */
     for (int i = 0; i < CP_MAX_CELLS; i++) {
         CpCell *c = &w->cells[i];
         if (!c->alive) continue;
@@ -610,6 +621,40 @@ void cp_world_step(CpWorld *w, const float act[CP_ACT_DIM])
         float rr = p->r + c->r;
         if (d2 > rr * rr || d2 < 1e-8f) continue;
         float d = sqrtf(d2);
+
+        /* ---- swallowing, before anything else ----
+         *
+         * Resolved first because it is not a kind of damage, it is a
+         * different outcome: nothing about armour, spikes or facing applies
+         * to a cell that is simply too big to argue with. The centre test is
+         * what gives the rule its grace - brushing past something enormous is
+         * survivable, swimming into it is not - and it is the same test in
+         * both directions, so what the player can do to a smaller cell is
+         * exactly what a larger one can do to the player. */
+        if (c->r > p->r * CP_GULP && c->diet != CP_DIET_HERB) {
+            /* Held, not touched. The mouth has to stay on you: break contact
+             * inside the window and you got away with it, which is the whole
+             * counterplay this rule has and the reason a fast build is worth
+             * paying for. */
+            held = 1;
+            if (w->gulp_hold >= CP_GULP_HOLD) {
+                p->hp = 0.0f;
+                w->gulped++;
+                w->dmg_taken += p->hp_max;
+                break;                  /* the loop's other business is moot */
+            }
+        }
+        if (p->r > c->r * CP_GULP && st->carn_eff > 0.0f) {
+            /* Worth more than the meat it would have dropped, because
+             * swallowing something whole is the reward for having grown. */
+            w->dna += 3.2f * st->carn_eff;
+            p->hp = clampf(p->hp + 6.0f, 0.0f, p->hp_max);
+            c->alive = 0;               /* eaten, so no corpse to scavenge */
+            w->gulps++;
+            w->kills++;
+            reward += 1.2f;
+            continue;
+        }
 
         float nx = dx / d, ny = dy / d;
         float push = (rr - d) * 0.5f;
@@ -634,8 +679,10 @@ void cp_world_step(CpWorld *w, const float act[CP_ACT_DIM])
             }
         }
         if (c->attack > 0.0f && c->r >= p->r * 0.70f) {
+            /* No swallow multiplier here any more: anything big enough to
+             * swallow you already did, above. What is left is a fight between
+             * cells of comparable size, which is what damage is for. */
             float take = c->attack * (1.0f - def) * dt * 3.0f;
-            if (c->r > p->r * 1.6f && c->diet != CP_DIET_HERB) take *= 2.4f;  /* swallowed */
             p->hp -= take;
             w->dmg_taken += take;
             w->hits_taken++;
@@ -648,6 +695,11 @@ void cp_world_step(CpWorld *w, const float act[CP_ACT_DIM])
         /* their poison works the same way against us */
         if (c->poison > 0.0f && dmg > 0.0f) p->hp -= c->poison * dt * 3.0f;
     }
+
+    /* The hold decays to nothing the instant you are clear, rather than
+     * draining: escaping a mouth should reset the count, not leave you part
+     * way into the next one. */
+    w->gulp_hold = held ? w->gulp_hold + dt : 0.0f;
 
     /* ---- npc vs npc and npc feeding (keeps the pool churning) ---- */
     for (int i = 0; i < CP_MAX_CELLS; i++) {

@@ -37,6 +37,25 @@ extern "C" {
 #define CP_DNA_GOAL    100.0f
 #define CP_GENERATIONS 4          /* redesigns at 25/50/75 DNA, then evolve */
 
+/* The size rule, which is the whole stage in one number.
+ *
+ * Attrition by contact damage makes size a modifier. Swallowing makes it the
+ * question you are always answering: a cell this much bigger than you eats you
+ * whole, a cell this much smaller is lunch, and everything between the two is
+ * a fight. That single threshold is why you count your own growth, why some
+ * shapes are worth fleeing on sight, and why the meter reads as a ladder
+ * rather than a score.
+ *
+ * The two directions are deliberately not symmetric. Swimming into something
+ * small enough swallows it at once, which is what makes growing feel like
+ * anything; being swallowed takes a fraction of a second of continuous
+ * contact, so a predator has to actually hold onto you. Symmetry would be
+ * tidier and worse: a cell that kills you on the frame it grazes you is
+ * unreadable, and the only lesson available from it is to never touch
+ * anything. */
+#define CP_GULP        1.55f
+#define CP_GULP_HOLD   0.28f      /* seconds in a bigger mouth before it closes */
+
 /* ------------------------------------------------------------------ *
  * Parts - the cell stage roster.
  *
@@ -170,6 +189,7 @@ typedef struct {
     float    dna;
     int32_t  generation;
     float    boost_cd, elec_cd, elec_flash;
+    float    gulp_hold;         /* seconds held inside something bigger */
 
     CpFood   food[CP_MAX_FOOD];
     int32_t  n_food;
@@ -186,6 +206,7 @@ typedef struct {
     float    reward;
     int32_t  status;            /* CP_RUN / CP_DEAD / ... */
     int32_t  ate_plant, ate_meat, kills, hits_taken, discharges, deaths;
+    int32_t  gulps, gulped;     /* cells swallowed whole, and times swallowed */
     float    dmg_dealt, dmg_taken;   /* higher-resolution than kill counts */
     int32_t  design_events;     /* how many times the design head was applied */
     float    dist_travelled;
