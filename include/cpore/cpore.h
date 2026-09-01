@@ -309,6 +309,28 @@ void cp_px_text(uint8_t *fb, int32_t W, int32_t H, int32_t x, int32_t y,
 int32_t cp_px_text_w(const char *s, int32_t sc);
 int  cp_png_write(const char *path, const uint8_t *rgba, int width, int height);
 
+/* ---- playing it by hand ----
+ *
+ * The same nine directions, boost and discharge the PufferLib environment
+ * uses, because a key press and an action index being the same number is what
+ * makes a person and a policy players of one game rather than two. Flat ABI -
+ * a handle, ints, one byte buffer - so ctypes and WebAssembly both call it
+ * without a binding layer. */
+typedef struct CpPlay CpPlay;
+CpPlay *cp_play_create(int32_t w, int32_t h, uint32_t seed);
+void    cp_play_free(CpPlay *p);
+void    cp_play_reset(CpPlay *p, uint32_t seed);
+void    cp_play_style(CpPlay *p, int32_t style);
+/* move 0..8 (0 drifts, 1..8 are the compass from N clockwise), boost, zap.
+ * Returns the world status. Death respawns rather than ending the run. */
+int32_t cp_play_step(CpPlay *p, int32_t move, int32_t boost, int32_t zap);
+void    cp_play_render(CpPlay *p, uint8_t *rgba);
+int32_t cp_play_stat_count(void);
+/* dna, goal, tier, generation, hp%, parts, plants, meat, kills, deaths,
+ * step, status */
+void    cp_play_stats(const CpPlay *p, int32_t *out);
+const CpWorld *cp_play_world(const CpPlay *p);
+
 #ifdef __cplusplus
 }
 #endif

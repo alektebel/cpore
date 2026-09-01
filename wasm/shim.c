@@ -207,11 +207,132 @@ void *realloc(void *p, size_t n)
  * rather than as a link error six months from now.
  * ------------------------------------------------------------------ */
 
+/* Enough snprintf to draw a HUD.
+ *
+ * This started life as a stub that wrote an empty string, on the reasoning
+ * that the editor's viewport draws no HUD and --gc-sections would drop the
+ * callers. That stopped being true the moment the cell stage became playable
+ * in a browser: every readout on screen is formatted through here, and a stub
+ * turns them all into blank space with no error anywhere.
+ *
+ * %d, %u, %s, %c, %% and a fixed-point %f are the whole set the HUDs use.
+ * Width and precision are supported only in the forms they actually appear in.
+ * Everything unrecognised is copied through literally, which makes a missing
+ * conversion visible in the output instead of silent.
+ */
+static char *fmt_u(char *p, unsigned long v)
+{
+    char tmp[24];
+    int n = 0;
+    do { tmp[n++] = (char)('0' + (v % 10u)); v /= 10u; } while (v);
+    while (n) *p++ = tmp[--n];
+    return p;
+}
+
+int vsnprintf_(char *buf, size_t n, const char *fmt, __builtin_va_list ap)
+{
+    /* Formatted into a local buffer and copied, so the width logic never has
+     * to think about the caller's bound. The HUD strings are short and the
+     * bound is checked once, at the end. */
+    char out[512];
+    char *p = out;
+    char *end = out + sizeof(out) - 1;
+
+    for (; *fmt && p < end; fmt++) {
+        if (*fmt != '%') { *p++ = *fmt; continue; }
+        fmt++;
+        if (*fmt == '%') { *p++ = '%'; continue; }
+
+        /* flags and width, of which only zero-padding and a plain field width
+         * are ever asked for */
+        int zero = 0, width = 0, prec = -1;
+        if (*fmt == '-') fmt++;                 /* left-align: ignored */
+        if (*fmt == '0') { zero = 1; fmt++; }
+        while (*fmt >= '0' && *fmt <= '9') { width = width * 10 + (*fmt - '0'); fmt++; }
+        if (*fmt == '.') {
+            fmt++;
+            prec = 0;
+            while (*fmt >= '0' && *fmt <= '9') { prec = prec * 10 + (*fmt - '0'); fmt++; }
+        }
+        while (*fmt == 'l') fmt++;
+
+        char field[64];
+        char *q = field;
+        switch (*fmt) {
+        case 'd': case 'i': {
+            long v = __builtin_va_arg(ap, int);
+            if (v < 0) { *q++ = '-'; v = -v; }
+            q = fmt_u(q, (unsigned long)v);
+            break;
+        }
+        case 'u':
+            q = fmt_u(q, (unsigned long)__builtin_va_arg(ap, unsigned int));
+            break;
+        case 'c':
+            *q++ = (char)__builtin_va_arg(ap, int);
+            break;
+        case 's': {
+            const char *s = __builtin_va_arg(ap, const char *);
+            if (!s) s = "(null)";
+            while (*s && q < field + sizeof(field) - 1) *q++ = *s++;
+            break;
+        }
+        case 'f': case 'F': {
+            /* Fixed point, because a HUD never needs an exponent and doing
+             * this properly would be more code than the rest of the file. */
+            double v = __builtin_va_arg(ap, double);
+            if (prec < 0) prec = 6;
+            if (prec > 9) prec = 9;
+            if (v < 0.0) { *q++ = '-'; v = -v; }
+            unsigned long scale = 1;
+            for (int i = 0; i < prec; i++) scale *= 10u;
+            /* Round half away from zero, then split, so 0.95 at one place is
+             * 1.0 rather than 0.9. */
+            unsigned long whole = (unsigned long)v;
+            double frac = v - (double)whole;
+            unsigned long f = (unsigned long)(frac * (double)scale + 0.5);
+            if (f >= scale) { whole++; f -= scale; }
+            q = fmt_u(q, whole);
+            if (prec > 0) {
+                *q++ = '.';
+                for (int i = prec - 1; i >= 0; i--) {
+                    unsigned long d = f;
+                    for (int k = 0; k < i; k++) d /= 10u;
+                    *q++ = (char)('0' + (d % 10u));
+                }
+            }
+            break;
+        }
+        default:
+            /* Unknown conversion: show it, do not swallow it. */
+            *q++ = '%';
+            *q++ = *fmt ? *fmt : '?';
+            break;
+        }
+
+        int len = (int)(q - field);
+        for (int i = len; i < width && p < end; i++) *p++ = zero ? '0' : ' ';
+        for (int i = 0; i < len && p < end; i++) *p++ = field[i];
+        if (!*fmt) break;
+    }
+    *p = '\0';
+
+    int total = (int)(p - out);
+    if (buf && n) {
+        size_t copy = (size_t)total < n - 1 ? (size_t)total : n - 1;
+        memcpy(buf, out, copy);
+        buf[copy] = '\0';
+    }
+    return total;
+}
+
 int snprintf(char *buf, size_t n, const char *fmt, ...)
 {
-    (void)fmt;
-    if (buf && n) buf[0] = '\0';
-    return 0;
+    __builtin_va_list ap;
+    __builtin_va_start(ap, fmt);
+    int r = vsnprintf_(buf, n, fmt, ap);
+    __builtin_va_end(ap);
+    return r;
 }
 
 int printf(const char *fmt, ...) { (void)fmt; return 0; }

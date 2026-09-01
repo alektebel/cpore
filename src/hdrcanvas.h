@@ -298,6 +298,50 @@ static inline void d_fil_over(Hdr *p, float ax, float ay, float bx, float by,
     }
 }
 
+/* An opaque annulus, in one pass.
+ *
+ * Drawing a ring as a fan of short strokes is the obvious thing and it is
+ * quadratically wasteful: each stroke scans its own bounding box, those boxes
+ * overlap almost completely near the centre of the ring, and a 26-segment ring
+ * ends up touching every pixel of the enclosing disc twenty-odd times. One
+ * pass over the annulus does the same work once.
+ *
+ * `key` lets the brightness vary around the circumference, which is what makes
+ * a bubble wall read as a sphere - it is brightest where you are looking
+ * through the most of it. Pass (0,0) for a flat ring.
+ */
+static inline void d_ring_over(Hdr *p, float cx, float cy, float rad, float th,
+                               C3 col, float alpha, float kx, float ky, float kamt)
+{
+    if (rad <= 0.0f || th <= 0.0f || alpha <= 0.0f) return;
+    float ro = rad + th * 0.5f, ri = rad - th * 0.5f;
+    if (ri < 0.0f) ri = 0.0f;
+    float ext = ro + 1.0f;
+    int x0 = (int)floorf(cx - ext), x1 = (int)ceilf(cx + ext);
+    int y0 = (int)floorf(cy - ext), y1 = (int)ceilf(cy + ext);
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 >= p->W) x1 = p->W - 1;
+    if (y1 >= p->H) y1 = p->H - 1;
+    float inv = rad > 0.001f ? 1.0f / rad : 0.0f;
+    for (int y = y0; y <= y1; y++) {
+        float dy = (float)y + 0.5f - cy;
+        for (int x = x0; x <= x1; x++) {
+            float dx = (float)x + 0.5f - cx;
+            float d = sqrtf(dx * dx + dy * dy);
+            if (d > ro + 1.0f || d < ri - 1.0f) continue;
+            float c = sat(ro - d + 0.5f) * sat(d - ri + 0.5f);
+            if (c <= 0.0f) continue;
+            float a = alpha;
+            if (kamt > 0.0f && d > 0.001f) {
+                float lam = 0.5f - 0.5f * ((dx * inv) * kx + (dy * inv) * ky);
+                a *= 1.0f - kamt + kamt * lam * 2.0f;
+            }
+            hdr_over(p, x, y, col, c * a);
+        }
+    }
+}
+
 /* Occlusion.
  *
  * An additive buffer can only ever make the frame brighter, so a shape that

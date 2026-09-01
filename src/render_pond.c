@@ -131,9 +131,29 @@ static C3 fade(const Pond *p, C3 col, float k)
  * the water
  * ------------------------------------------------------------------ */
 
+/* The water's cloudiness, on a coarse grid.
+ *
+ * It is two octaves of noise at a world scale of 0.0026, which is to say a
+ * feature every four hundred world units - a signal with nothing in it above a
+ * few cycles per screen. Evaluating that per pixel is half a million noise
+ * lookups to reconstruct something a 16-pixel grid captures exactly, which is
+ * the same mistake the contact shadow made in the studio and the terrain
+ * marcher made before that. Sampled coarse and bilinear-filtered it is
+ * indistinguishable and costs a four-hundredth as much. */
+#define WGRID 16
+
 static void draw_water(Pond *p)
 {
     const int W = p->h.W, H = p->h.H;
+    const int gw = W / WGRID + 2, gh = H / WGRID + 2;
+    float *ng = (float *)malloc(sizeof(float) * (size_t)gw * gh);
+    if (!ng) return;
+    for (int j = 0; j < gh; j++)
+        for (int i = 0; i < gw; i++) {
+            float wx = (p->camx + (float)(i * WGRID) / p->scale) * 0.0026f;
+            float wy = (p->camy + (float)(j * WGRID) / p->scale) * 0.0026f;
+            ng[j * gw + i] = dfbm(p->seed ^ 0x51EDu, wx, wy);
+        }
     /* World-space y of the substrate, so the floor stays put when the camera
      * moves rather than sliding with it. */
     float floor_y = psy(p, CP_WORLD_H + 40.0f);
@@ -142,12 +162,12 @@ static void draw_water(Pond *p)
         float v = (float)y / (float)(H - 1);
         C3 base = clerp(p->wtop, p->wbot, v * v * 0.85f + v * 0.15f);
         for (int x = 0; x < W; x++) {
-            /* Two octaves of very low-frequency noise in world space: the
-             * cloudiness of water with things suspended in it. Anchored to the
-             * camera so it belongs to the pond and not to the screen. */
-            float wx = (p->camx + (float)x / p->scale) * 0.0026f;
-            float wy = (p->camy + (float)y / p->scale) * 0.0026f;
-            float m = dfbm(p->seed ^ 0x51EDu, wx, wy);
+            int gi = x / WGRID, gj = y / WGRID;
+            float fx = (float)(x - gi * WGRID) / WGRID;
+            float fy = (float)(y - gj * WGRID) / WGRID;
+            float n00 = ng[gj * gw + gi],       n10 = ng[gj * gw + gi + 1];
+            float n01 = ng[(gj + 1) * gw + gi], n11 = ng[(gj + 1) * gw + gi + 1];
+            float m = dmixf(dmixf(n00, n10, fx), dmixf(n01, n11, fx), fy);
             C3 c = cscl(base, 0.88f + 0.30f * m);
 
             /* The substrate, when it is in frame. Horizontal striations
@@ -164,6 +184,7 @@ static void draw_water(Pond *p)
             hdr_set(&p->h, x, y, c);
         }
     }
+    free(ng);
 }
 
 /* Out-of-focus bodies drifting behind everything.
@@ -254,19 +275,9 @@ static void draw_bubbles(Pond *p)
         /* The wall, as a ring: bright where it is edge-on, which is the entire
          * reason a bubble reads as a sphere rather than as a disc. Drawn as two
          * concentric strokes so the outer edge can be brighter than the inner. */
-        for (int k = 0; k < 26; k++) {
-            float a0 = (float)k / 26.0f * 6.2832f;
-            float a1 = (float)(k + 1) / 26.0f * 6.2832f;
-            /* Brighter on the side away from the key: the far wall is what you
-             * see through the most glass. */
-            float lam = 0.5f - 0.5f * (cosf(a0) * KEY_X + sinf(a0) * KEY_Y);
-            float br = 0.42f + 0.48f * lam;
-            d_fil_over(&p->h,
-                       sx + cosf(a0) * rad * 0.88f, sy + sinf(a0) * rad * 0.88f,
-                       sx + cosf(a1) * rad * 0.88f, sy + sinf(a1) * rad * 0.88f,
-                       rad * 0.11f, rad * 0.11f,
-                       c3(0.95f, 0.99f, 1.0f), br * 0.46f, 0.5f);
-        }
+        d_ring_over(&p->h, sx, sy, rad * 0.88f, rad * 0.22f,
+                    c3(0.95f, 0.99f, 1.0f), 0.46f, KEY_X, KEY_Y, 0.55f);
+
         /* A thin darker line just outside it, which is what separates a pale
          * bubble from pale water. Without it a big one dissolves. */
         d_occ(&p->h, sx, sy, rad * 1.02f, 0.95f, rad * 0.06f);
@@ -709,9 +720,15 @@ void cp_render_pond(const CpWorld *w, uint8_t *rgba, int W, int H)
     draw_player(&p, w);
     draw_bubbles(&p);          /* in front: bubbles drift between you and it */
 
-    /* A light bloom only. Brightfield has no dark surround for a big halo to
-     * live in, and pushing it turns clear water into fog. */
-    bloom(&p.h, 1.35f, 0.10f);
+    /* No bloom.
+     *
+     * It was 41ms of a 64ms frame - two thirds of the cost of the picture -
+     * and measuring it only confirmed what the strength constant had already
+     * admitted: it was set to 0.10 because anything more turned clear water
+     * into fog. Brightfield has no dark surround for a halo to live in, so a
+     * four-octave gather was buying a difference that had to be squinted at
+     * and paying two thirds of the frame for it. The darkfield renderer keeps
+     * its bloom, because there the glow *is* the picture. */
     pond_hud(&p, w);
     resolve(&p.h, rgba);
     free(p.h.px);

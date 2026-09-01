@@ -10,7 +10,7 @@ LIB_SRC := src/rng.c src/genome.c src/world.c src/policy.c src/env.c \
            src/civ.c src/civ_env.c src/lineage.c
 # The editor session lives here and not in LIB_SRC: it drives the studio,
 # so it belongs to the half of the project a training build drops.
-VIS_SRC := src/render.c src/render_cell.c src/render_pond.c src/render3d.c src/render_land.c \
+VIS_SRC := src/render.c src/render_cell.c src/render_pond.c src/play.c src/render3d.c src/render_land.c \
            src/render_terra.c src/render_civ.c src/land_edit.c src/png.c
 LIB_OBJ := $(LIB_SRC:%.c=$(BUILD)/%.o)
 VIS_OBJ := $(VIS_SRC:%.c=$(BUILD)/%.o)
@@ -87,9 +87,26 @@ wasm/cpore.wasm: $(WASM_OBJ)
 	  $(WASM_EXPORTS) -o $@ $(WASM_OBJ)
 	@ls -l $@ | awk '{print "  " $$5 " bytes"}'
 
-.PHONY: wasm serve
-wasm: wasm/cpore.wasm
+# The playable cell stage. Same toolchain, a different set of objects: the
+# stage-1 simulation and both of its continuous-tone renderers, behind the flat
+# play ABI. Nothing here is shared with the editor build except the shim.
+CELL_WASM_SRC := src/rng.c src/genome.c src/world.c src/render.c \
+                 src/render_cell.c src/render_pond.c src/play.c wasm/shim.c
+CELL_WASM_OBJ := $(CELL_WASM_SRC:%.c=$(BUILD)/wasm/%.o)
+CELL_EXPORTS  := $(shell grep -oE '\bcp_play_[a-z_]+' include/cpore/cpore.h \
+                         | sort -u | sed 's/^/--export=/')
+
+wasm/cell.wasm: $(CELL_WASM_OBJ)
+	wasm-ld --no-entry --gc-sections --import-undefined \
+	  --export=cp_wasm_alloc --export=cp_wasm_free --export=__heap_base \
+	  --initial-memory=33554432 --max-memory=536870912 \
+	  $(CELL_EXPORTS) -o $@ $(CELL_WASM_OBJ)
+	@ls -l $@ | awk '{print "  " $$5 " bytes"}'
+
+.PHONY: wasm serve play
+wasm: wasm/cpore.wasm wasm/cell.wasm
+play: wasm/cell.wasm ; @echo "http://127.0.0.1:8732/play.html" && cd wasm && python3 -m http.server 8732
 # the page is ES modules and fetches the .wasm, so it needs an origin
 serve: wasm ; @echo "http://127.0.0.1:8731/editor.html" && cd wasm && python3 -m http.server 8731
 
-clean: ; rm -rf $(BUILD) wasm/cpore.wasm
+clean: ; rm -rf $(BUILD) wasm/cpore.wasm wasm/cell.wasm
