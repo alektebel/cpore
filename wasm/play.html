@@ -67,7 +67,8 @@
   <kbd>shift</kbd> burst &middot;
   <kbd>space</kbd> discharge &middot;
   <kbd>R</kbd> new pond &middot;
-  <kbd>V</kbd> switch renderer
+  <kbd>V</kbd> switch renderer &middot;
+  <kbd>H</kbd> let the baseline play
 </div>
 
 <script type="module">
@@ -110,7 +111,12 @@ if (!handle) throw new Error('cp_play_create failed');
 const fb = X.cp_wasm_alloc(W * H * 4);
 const statsPtr = X.cp_wasm_alloc(X.cp_play_stat_count() * 4);
 const img = new ImageData(new Uint8ClampedArray(W * H * 4), W, H);
+const auxPtr = X.cp_wasm_alloc(4);
 let styleIdx = 0;
+/* Attract mode: the scripted baseline pressing the player's own keys. Not a
+ * demo with privileged control - it goes through the same nine directions,
+ * which is what makes it worth watching and worth trusting. */
+let demo = new URLSearchParams(location.search).has('demo');
 
 /* ---- input ----
  *
@@ -142,6 +148,7 @@ addEventListener('keydown', e => {
   const k = CODE[e.code];
   if (k) { held.add(k); e.preventDefault(); }
   if (e.code === 'KeyR') { X.cp_play_reset(handle, (Math.random() * 1e9) | 0); }
+  if (e.code === 'KeyH') { demo = !demo; held.clear(); }
   if (e.code === 'KeyV') {
     styleIdx = (styleIdx + 1) % STYLES.length;
     X.cp_play_style(handle, STYLE_ID[STYLES[styleIdx]]);
@@ -176,8 +183,17 @@ function paintHud(s) {
 }
 
 function frame() {
-  X.cp_play_step(handle, moveIndex(),
-                 held.has('boost') ? 1 : 0, held.has('zap') ? 1 : 0);
+  let mv, bo, za;
+  if (demo) {
+    mv = X.cp_play_hint(handle, auxPtr);
+    const a = i32()[auxPtr >> 2];
+    bo = a & 1; za = (a >> 1) & 1;
+  } else {
+    mv = moveIndex();
+    bo = held.has('boost') ? 1 : 0;
+    za = held.has('zap') ? 1 : 0;
+  }
+  X.cp_play_step(handle, mv, bo, za);
   X.cp_play_render(handle, fb);
   img.data.set(u8().subarray(fb, fb + W * H * 4));
   ctx.putImageData(img, 0, 0);
@@ -197,6 +213,7 @@ window.cpore = {
   release: k => held.delete(k),
   stats: readStats,
   moveIndex,
+  demo: on => { demo = on; held.clear(); },
 };
 
 /* ---- a scripted session, for the harness ----

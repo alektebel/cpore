@@ -124,3 +124,30 @@ void cp_play_stats(const CpPlay *p, int32_t *out)
 }
 
 const CpWorld *cp_play_world(const CpPlay *p) { return p ? &p->w : NULL; }
+
+/* What the scripted policy would press.
+ *
+ * The same baseline the PufferLib environment scores against, projected onto
+ * the same nine directions a person presses - so this is not a demo mode that
+ * cheats with privileged control, it is the reference agent playing the game
+ * through the player's own interface. That makes it useful for three things
+ * at once: an attract loop, a hint for someone stuck, and a visible check that
+ * the keyboard path and the action path really are the same path.
+ *
+ * Returns the move index; boost and discharge come back through `aux` as bit 0
+ * and bit 1 so the whole action fits one call. */
+int32_t cp_play_hint(const CpPlay *p, int32_t *aux)
+{
+    if (!p) { if (aux) *aux = 0; return 0; }
+    float act[CP_ACT_DIM];
+    cp_policy_greedy(&p->w, act);
+
+    int best = 0;
+    float bd = 0.30f;                 /* below this it is not really steering */
+    for (int k = 1; k < 9; k++) {
+        float d = act[0] * PLAY_MX[k] + act[1] * PLAY_MY[k];
+        if (d > bd) { bd = d; best = k; }
+    }
+    if (aux) *aux = (act[2] > 0.5f ? 1 : 0) | (act[3] > 0.5f ? 2 : 0);
+    return best;
+}

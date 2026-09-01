@@ -90,7 +90,7 @@ wasm/cpore.wasm: $(WASM_OBJ)
 # The playable cell stage. Same toolchain, a different set of objects: the
 # stage-1 simulation and both of its continuous-tone renderers, behind the flat
 # play ABI. Nothing here is shared with the editor build except the shim.
-CELL_WASM_SRC := src/rng.c src/genome.c src/world.c src/render.c \
+CELL_WASM_SRC := src/rng.c src/genome.c src/world.c src/policy.c src/render.c \
                  src/render_cell.c src/render_pond.c src/play.c wasm/shim.c
 CELL_WASM_OBJ := $(CELL_WASM_SRC:%.c=$(BUILD)/wasm/%.o)
 CELL_EXPORTS  := $(shell grep -oE '\bcp_play_[a-z_]+' include/cpore/cpore.h \

@@ -330,6 +330,11 @@ int32_t cp_play_stat_count(void);
  * step, status */
 void    cp_play_stats(const CpPlay *p, int32_t *out);
 const CpWorld *cp_play_world(const CpPlay *p);
+/* What the scripted baseline would press, in the player's own action space:
+ * the move index, with boost in bit 0 and discharge in bit 1 of *aux. An
+ * attract loop, a hint, and a check that the key path and the action path are
+ * one path. */
+int32_t cp_play_hint(const CpPlay *p, int32_t *aux);
 
 #ifdef __cplusplus
 }
