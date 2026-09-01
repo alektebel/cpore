@@ -800,12 +800,25 @@ static const Vis VIS[CP_VIS_COUNT] = {
       {0.085f,0.190f,0.520f}, {0.520f,0.700f,1.000f}, 0.10f, {0.46f,0.41f,0.35f},
       {0.05f,0.06f,0.05f}, {0.88f,0.95f,0.78f}, {0.46f,0.55f,0.42f},
       {0.02f,0.03f,0.02f} },
+
+    /* and once more for the brightfield pond. Same reason: a placeholder row
+     * so the enum stays dense. The palette is a light one here rather than
+     * the abyss ramp, because a stage that degrades to the pixel path from
+     * `pond` should degrade to something pale. */
+    { "pond", PAL_PETRI, 32, 1280, 720, 1.95f, 0.0f, 0,
+      {0.30f,0.55f,0.62f},
+      {0.32f,0.60f,0.66f}, {0.62f,0.80f,0.86f}, 0.16f, {0.55f,0.48f,0.34f},
+      {0.20f,0.40f,0.42f}, {0.86f,0.94f,1.00f}, {0.55f,0.86f,0.22f},
+      {0.13f,0.34f,0.44f} },
 };
 
 /* Which styles go down the palette path and which do not. Kept as a function
  * rather than a flag on Vis because it is a property of the pipeline a style
  * selects, not of the style's own parameters. */
-int cp_vis_continuous(int style) { return style == CP_VIS_DROP || style == CP_VIS_VISTA; }
+int cp_vis_continuous(int style)
+{
+    return style == CP_VIS_DROP || style == CP_VIS_VISTA || style == CP_VIS_POND;
+}
 
 const char *cp_vis_name(int style)
 {
@@ -867,6 +880,7 @@ void cp_render_styled(const CpWorld *w, uint8_t *rgba, int W, int H, int style)
      * canvas, not the primitives, not the HUD - so it forks here rather than
      * threading a second set of branches through a rasteriser built around a
      * palette. */
+    if (style == CP_VIS_POND) { cp_render_pond(w, rgba, W, H); return; }
     if (cp_vis_continuous(style)) { cp_render_drop(w, rgba, W, H); return; }
     const Vis *v = &VIS[style];
 

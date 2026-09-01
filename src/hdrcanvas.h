@@ -197,6 +197,107 @@ static inline void d_disc(Hdr *p, float cx, float cy, float rad, C3 col, float i
     }
 }
 
+/* ---- opaque compositing ----
+ *
+ * The additive primitives above draw light: a thing that emits, or scatters,
+ * against a dark field. That is the whole grammar of a darkfield plate and it
+ * is the wrong grammar for water with the lamp behind it, where a creature is
+ * an opaque painted object that *blocks* the light behind it and is lit from
+ * one side. Adding a colour can never darken, and multiplying can never
+ * change hue, so neither of them can put a matte orange body over pale blue
+ * water. That needs a third operator, and this is it.
+ *
+ * `a` is opacity, so a value below 1 is genuine translucency - a jelly, a
+ * bubble wall, a fin thin enough to see the water through. Nothing here is
+ * energy-conserving because nothing here is emitting energy; that is the
+ * point of the distinction.
+ */
+static inline void hdr_over(Hdr *p, int x, int y, C3 c, float a)
+{
+    if ((unsigned)x >= (unsigned)p->W || (unsigned)y >= (unsigned)p->H) return;
+    if (a <= 0.0f) return;
+    if (a > 1.0f) a = 1.0f;
+    float *t = p->px + 3 * ((size_t)y * p->W + x);
+    t[0] += (c.r - t[0]) * a;
+    t[1] += (c.g - t[1]) * a;
+    t[2] += (c.b - t[2]) * a;
+}
+
+/* An opaque disc, shaded.
+ *
+ * `lit` is the direction the key comes from, as a unit vector in screen space,
+ * and the shading is a hemisphere term rather than a flat fill: a body drawn
+ * as one colour reads as a sticker, and the single cheapest thing that makes
+ * it read as a rounded object is knowing which side the light is on. The
+ * terminator is deliberately soft and the shadow side is tinted toward the
+ * water rather than toward black, because in a lit medium the dark side of
+ * anything is lit by everything around it.
+ */
+static inline void d_ball(Hdr *p, float cx, float cy, float rad, C3 col,
+                          C3 shade, float lx, float ly, float alpha, float soft)
+{
+    if (rad <= 0.0f || alpha <= 0.0f) return;
+    float w = 1.0f + 2.0f * soft;
+    float ext = rad + w;
+    int x0 = (int)floorf(cx - ext), x1 = (int)ceilf(cx + ext);
+    int y0 = (int)floorf(cy - ext), y1 = (int)ceilf(cy + ext);
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 >= p->W) x1 = p->W - 1;
+    if (y1 >= p->H) y1 = p->H - 1;
+    float inv = rad > 0.001f ? 1.0f / rad : 0.0f;
+    for (int y = y0; y <= y1; y++) {
+        float dy = (float)y + 0.5f - cy;
+        for (int x = x0; x <= x1; x++) {
+            float dx = (float)x + 0.5f - cx;
+            float d = sqrtf(dx * dx + dy * dy);
+            float c = cov_disc(d, rad, w);
+            if (c <= 0.0f) continue;
+            /* Surface normal of a sphere, read straight off the disc. */
+            float nx = dx * inv, ny = dy * inv;
+            float nz2 = 1.0f - nx * nx - ny * ny;
+            float nz = nz2 > 0.0f ? sqrtf(nz2) : 0.0f;
+            float lam = sat(nx * lx + ny * ly + nz * 0.72f);
+            float k = 0.42f + 0.58f * lam * lam;
+            hdr_over(p, x, y, clerp(shade, col, k), c * alpha);
+        }
+    }
+}
+
+/* An opaque tapered stroke: limbs, spikes, flagella, algae stalks. Radius
+ * runs r0 to r1 along the segment, so one call draws a taper rather than a
+ * chain of discs that pulses where they overlap. */
+static inline void d_fil_over(Hdr *p, float ax, float ay, float bx, float by,
+                              float r0, float r1, C3 col, float alpha, float soft)
+{
+    if (alpha <= 0.0f) return;
+    float w = 1.0f + 2.0f * soft;
+    float rmax = (r0 > r1 ? r0 : r1) + w;
+    float x0f = (ax < bx ? ax : bx) - rmax, x1f = (ax > bx ? ax : bx) + rmax;
+    float y0f = (ay < by ? ay : by) - rmax, y1f = (ay > by ? ay : by) + rmax;
+    int x0 = (int)floorf(x0f), x1 = (int)ceilf(x1f);
+    int y0 = (int)floorf(y0f), y1 = (int)ceilf(y1f);
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 >= p->W) x1 = p->W - 1;
+    if (y1 >= p->H) y1 = p->H - 1;
+    float ex = bx - ax, ey = by - ay;
+    float el2 = ex * ex + ey * ey;
+    if (el2 < 1e-6f) el2 = 1e-6f;
+    for (int y = y0; y <= y1; y++) {
+        for (int x = x0; x <= x1; x++) {
+            float px2 = (float)x + 0.5f - ax, py2 = (float)y + 0.5f - ay;
+            float t = (px2 * ex + py2 * ey) / el2;
+            t = sat(t);
+            float qx = px2 - ex * t, qy = py2 - ey * t;
+            float d = sqrtf(qx * qx + qy * qy);
+            float r = r0 + (r1 - r0) * t;
+            float c = cov_disc(d, r, w);
+            if (c > 0.0f) hdr_over(p, x, y, col, c * alpha);
+        }
+    }
+}
+
 /* Occlusion.
  *
  * An additive buffer can only ever make the frame brighter, so a shape that
@@ -361,6 +462,51 @@ static inline void d_text(Hdr *p, float x, float y, float sc, const char *s, C3 
 }
 
 static inline float d_textw(const char *s, float sc) { return (float)strlen(s) * 6.0f * sc; }
+
+/* The same text, composited instead of added.
+ *
+ * A readout over a lit field has the opposite problem to one over a dark
+ * field: the additive version cannot draw dark ink at all - d_disc refuses a
+ * non-positive intensity, so asking for it by passing a negative one silently
+ * draws nothing - and even a bright glyph has no dark surround to read
+ * against. On pale water the legible thing is dark type, and dark type is an
+ * `over`, not an `add`. */
+static inline void d_dot_over(Hdr *p, float cx, float cy, float rad, C3 col, float alpha)
+{
+    if (rad <= 0.0f || alpha <= 0.0f) return;
+    float w = 1.0f;
+    float ext = rad + w;
+    int x0 = (int)floorf(cx - ext), x1 = (int)ceilf(cx + ext);
+    int y0 = (int)floorf(cy - ext), y1 = (int)ceilf(cy + ext);
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 >= p->W) x1 = p->W - 1;
+    if (y1 >= p->H) y1 = p->H - 1;
+    for (int y = y0; y <= y1; y++) {
+        float dy = (float)y + 0.5f - cy;
+        for (int x = x0; x <= x1; x++) {
+            float dx = (float)x + 0.5f - cx;
+            float c = cov_disc(sqrtf(dx * dx + dy * dy), rad, w);
+            if (c > 0.0f) hdr_over(p, x, y, col, c * alpha);
+        }
+    }
+}
+
+static inline void d_text_over(Hdr *p, float x, float y, float sc, const char *s,
+                               C3 col, float alpha)
+{
+    float cx = x;
+    for (; *s; s++) {
+        const uint8_t *gl = cp_font_glyph((unsigned char)*s);
+        for (int col_i = 0; col_i < 5; col_i++)
+            for (int row = 0; row < 7; row++)
+                if (gl[col_i] & (1u << row))
+                    d_dot_over(p, cx + ((float)col_i + 0.5f) * sc,
+                               y + ((float)row + 0.5f) * sc,
+                               sc * 0.46f, col, alpha);
+        cx += 6.0f * sc;
+    }
+}
 
 /* A plain filled rule. The only HUD primitive that is not a shape - used for
  * hairlines, frame brackets and minimap borders. */

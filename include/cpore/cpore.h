@@ -274,7 +274,7 @@ int32_t cp_env_generation(const CpEnv *e);
  * stage 1's and `vista` is stage 3's. Asking a stage for a continuous style
  * that is not its own gets that stage's default back. */
 enum { CP_VIS_ABYSS = 0, CP_VIS_DMG, CP_VIS_NEON, CP_VIS_PETRI, CP_VIS_C64,
-       CP_VIS_TERRA, CP_VIS_DROP, CP_VIS_VISTA, CP_VIS_COUNT };
+       CP_VIS_TERRA, CP_VIS_DROP, CP_VIS_VISTA, CP_VIS_POND, CP_VIS_COUNT };
 const char *cp_vis_name(int style);
 /* 0 for the pixel-art styles, 1 for the continuous-tone ones. Callers that
  * share the pixel pipeline (quantise/blit/text) must not use it on a style
@@ -289,6 +289,12 @@ void cp_render_styled(const CpWorld *w, uint8_t *rgba, int width, int height,
  * CP_VIS_DROP; exposed because it is a genuinely different pipeline rather
  * than another entry in the style table. */
 void cp_render_drop(const CpWorld *w, uint8_t *rgba, int width, int height);
+/* Stage 1's other continuous-tone renderer, and the inverse of `drop`:
+ * brightfield instead of darkfield. The water is full of light, organisms are
+ * opaque objects lit from a fixed key, and depth reads as loss of contrast
+ * rather than loss of brightness. Reachable through cp_render_styled with
+ * CP_VIS_POND. */
+void cp_render_pond(const CpWorld *w, uint8_t *rgba, int width, int height);
 
 /* Shared pixel pipeline, so stage 2 draws through exactly the same palette,
  * dither and upscale rather than growing a second look. */
