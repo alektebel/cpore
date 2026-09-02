@@ -272,6 +272,66 @@ void cp_world_reset(CpWorld *w, uint32_t seed, const CpGenome *genome)
     w->status = CP_RUN;
 }
 
+/* ---------------- the stroke ----------------
+ *
+ * What a propulsor does, rather than how much of it there is.
+ *
+ * Thrust used to be a scalar off the part counts and the beat used to be a
+ * sine the renderer drew, and the two never met: the animation illustrated the
+ * motion instead of causing it. You could watch a flagellum thrash and the
+ * speed would not flicker.
+ *
+ * A stroke has a duty cycle - the fraction of the beat that actually pushes -
+ * and that is where the three propulsors genuinely differ. Cilia are many
+ * small hairs beating out of step with each other, so the sum is nearly
+ * continuous. A flagellum is one whip running a travelling wave, so it pushes
+ * hard through part of the cycle and coasts the rest. A jet is the extreme of
+ * that: a hard pulse and then a refill during which it cannot push at all.
+ *
+ * The normalisation is the load-bearing part. The gain integrates to exactly
+ * one over a cycle whatever the duty, so adding this changes the *texture* of
+ * movement and not the balance - a body's average speed is what it always was,
+ * and nothing downstream had to be retuned. What changes is that a cilia build
+ * glides and a jet build lurches, which is a difference a player can feel and
+ * a policy can learn to time.
+ */
+typedef struct { float rate, duty, puls; } CpStroke;
+
+static CpStroke stroke_of(const CpStats *st)
+{
+    CpStroke s;
+    float cil = (float)st->n[CP_PART_CILIA];
+    float fla = (float)st->n[CP_PART_FLAGELLA];
+    float jet = (float)st->n[CP_PART_JET];
+    float tot = cil + fla + jet;
+    if (tot <= 0.0f) {
+        /* Nothing to beat with. A bare cell still drifts and still has a
+         * phase, so it gets a slow, almost flat stroke rather than a divide
+         * by zero. */
+        s.rate = 0.55f; s.duty = 0.85f; s.puls = 0.10f;
+        return s;
+    }
+    s.rate = (1.40f * cil + 1.00f * fla + 0.55f * jet) / tot;
+    s.duty = (0.90f * cil + 0.45f * fla + 0.28f * jet) / tot;
+    s.puls = (0.12f * cil + 0.75f * fla + 0.95f * jet) / tot;
+    return s;
+}
+
+/* The multiplier on thrust at this point in the beat.
+ *
+ * A raised-cosine window `duty` wide, scaled so its integral over the cycle is
+ * one, then mixed toward flat by `puls`. Mixing toward a constant of exactly
+ * one is what keeps the mean at one for every setting.
+ */
+static float stroke_gain(const CpStroke *s, float phase)
+{
+    float u = phase - floorf(phase);
+    float d = s->duty < 0.05f ? 0.05f : (s->duty > 1.0f ? 1.0f : s->duty);
+    float pulse = 0.0f;
+    if (u < d) pulse = (1.0f - cosf(2.0f * PI * u / d)) / d;
+    return 1.0f + s->puls * (pulse - 1.0f);
+}
+
 /* ---------------- coming back ---------------- */
 
 int cp_world_tier(const CpWorld *w)
@@ -508,6 +568,14 @@ void cp_world_step(CpWorld *w, const float act[CP_ACT_DIM])
     /* jets only help if they are mounted behind you - jet_thrust already
      * folds in each nozzle's rearward component */
     float thrust = st->accel * boost + st->jet_thrust * an;
+
+    /* The beat pushes. This is the whole point of the stroke: the phase the
+     * renderer draws the cilia and the flagellum from is the same phase that
+     * decides how hard the body is being driven this instant, so what you see
+     * is the cause of what you feel rather than a picture of it. */
+    CpStroke stk = stroke_of(st);
+    thrust *= stroke_gain(&stk, p->phase);
+
     p->vx += ax * thrust * dt;
     p->vy += ay * thrust * dt;
 
@@ -521,7 +589,9 @@ void cp_world_step(CpWorld *w, const float act[CP_ACT_DIM])
     p->y += p->vy * dt;
     w->dist_travelled += len2(p->vx, p->vy) * dt;
     if (an > 0.05f) p->heading = atan2f(ay, ax);
-    p->phase += dt * (4.0f + 6.0f * an);
+    /* Beat faster when driving harder, and at the rate this propulsor runs
+     * at: cilia flicker, a jet pulses slowly. */
+    p->phase += dt * (4.0f + 6.0f * an) * stk.rate;
 
     p->x = clampf(p->x, p->r, CP_WORLD_W - p->r);
     p->y = clampf(p->y, p->r, CP_WORLD_H - p->r);
@@ -840,6 +910,19 @@ void cp_world_observe(const CpWorld *w, float *o)
     o[k++] = (float)w->generation / (float)(CP_GENERATIONS - 1);
     o[k++] = (st->elec_dmg > 0.0f && w->elec_cd <= 0.0f) ? 1.0f : 0.0f;
     o[k++] = st->percep / 620.0f;
+    /* Where the body is in its own stroke.
+     *
+     * Thrust is modulated by the beat, so without this the dynamics are
+     * partially observable in a way they were not before - an agent would see
+     * an unexplained oscillation in its own acceleration and could do nothing
+     * about it. The gain is what actually multiplies thrust; the sine is the
+     * position in the cycle, which is what lets a policy anticipate the next
+     * push rather than only observe the current one. */
+    {
+        CpStroke stk = stroke_of(st);
+        o[k++] = clampf(stroke_gain(&stk, p->phase) - 1.0f, -2.5f, 2.5f);
+        o[k++] = sinf(2.0f * PI * (p->phase - floorf(p->phase)));
+    }
 
     /* --- nearest food, clipped to what this build can actually see ---
      * Eyes are not decoration: an eyeless cell is given a shorter horizon,

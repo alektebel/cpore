@@ -41,7 +41,8 @@ def numpy_include():
 # cell stage draws through. render3d.c is stage 2's and drags the whole
 # aquatic simulation in behind it, which this environment has no use for.
 SIM = ["src/world.c", "src/genome.c", "src/rng.c",
-       "src/render.c", "src/render_cell.c", "src/policy.c"]
+       "src/render.c", "src/render_cell.c", "src/render_pond.c",
+       "src/policy.c"]
 
 setup(
     name="cpore-puffer",

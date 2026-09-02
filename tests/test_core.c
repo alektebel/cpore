@@ -230,7 +230,7 @@ int main(void)
      * lives entirely in how many *cells* a build can account for. */
     {
         int seen[2] = { 0, 0 };
-        const int cell_base = 13 + CP_OBS_FOOD_K * 4;
+        const int cell_base = CP_OBS_CELL_BASE;
         for (int sighted = 0; sighted < 2; sighted++) {
             CpGenome g;
             cp_genome_clear(&g);

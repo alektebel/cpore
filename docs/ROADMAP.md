@@ -160,9 +160,24 @@ a flier, seasons that move the biome boundaries over an episode. Stage 2 is
 also still a fixed box and should inherit both the resident-window treatment
 and a substrate/current equivalent of biomes.
 
-**13. Articulated physics and learned locomotion.** Bodies do not swim. Thrust
-is applied along a heading and the undulation is a decorative sine disconnected
-from the physics. Needs jointed segments with per-segment fluid drag, then a
+**13. Articulated physics and learned locomotion.** Half done for stage 1.
+
+The beat now drives the body: thrust is modulated by the same phase the
+renderer draws the cilia and flagellum from, so what you see is the cause of
+what you feel rather than a picture of it. A stroke has a duty cycle, and that
+is where the three propulsors genuinely differ - cilia are many hairs out of
+step, so the sum is nearly continuous; a jet is a hard pulse and a refill.
+Holding one direction, measured speed ripple: cilia 0%, flagella 7.6%, jet
+33.8%. The gain integrates to one over a cycle whatever the duty, so this
+changed the texture of movement and not the balance, and nothing downstream
+needed retuning.
+
+What is still missing is the articulation itself. There are no jointed
+segments and no per-segment fluid drag - the body is one disc with a scalar
+thrust that now pulses. Stage 3's walk cycle is still decorative. Beyond that,
+a morphology-conditioned policy (GNN or transformer over the body graph) so one
+controller generalises across body plans, with full articulation for the player
+and nearest N and cheap kinematics for the rest. Needs jointed segments with per-segment fluid drag, then a
 morphology-conditioned policy (GNN or transformer over the body graph) so one
 controller generalises across body plans. Full articulation for the player and
 nearest N, cheap kinematics for the rest.

@@ -98,7 +98,24 @@ typedef struct {
 /* observation shape */
 #define CP_OBS_FOOD_K  8
 #define CP_OBS_CELL_K  6
-#define CP_OBS_DIM     (13 + CP_OBS_FOOD_K * 4 + CP_OBS_CELL_K * 6 + (CP_PART_COUNT - 1) + 6)
+/* The layout, named rather than recomputed.
+ *
+ * These used to be one expression with a literal 13 in front of it, and the
+ * literal was duplicated in the tests to find where the cell block starts.
+ * Adding two self terms moved every block and the duplicate silently pointed
+ * at the wrong floats - the test still ran, still measured something, and was
+ * measuring the wrong columns. Deriving CP_OBS_DIM from the same constants any
+ * reader indexes with means the two cannot disagree again.
+ *
+ * The self block is 15: vitals, position against the four walls, and two for
+ * where the body is in its own propulsion stroke - thrust is modulated by the
+ * beat, so a policy that cannot see the beat cannot explain its own
+ * acceleration. */
+#define CP_OBS_SELF       15
+#define CP_OBS_FOOD_BASE  CP_OBS_SELF
+#define CP_OBS_CELL_BASE  (CP_OBS_FOOD_BASE + CP_OBS_FOOD_K * 4)
+#define CP_OBS_PART_BASE  (CP_OBS_CELL_BASE + CP_OBS_CELL_K * 6)
+#define CP_OBS_DIM        (CP_OBS_PART_BASE + (CP_PART_COUNT - 1) + 6)
 
 /* action shape: steering x/y, flagella burst, electric discharge, then a
  * design head of (type, angle) per slot. The design head is read only at a
