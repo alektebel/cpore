@@ -338,13 +338,16 @@ CpPlay *cp_play_create(int32_t w, int32_t h, uint32_t seed);
 void    cp_play_free(CpPlay *p);
 void    cp_play_reset(CpPlay *p, uint32_t seed);
 void    cp_play_style(CpPlay *p, int32_t style);
+/* Start from a given body: CP_MAX_PARTS pairs of (type, angle), or NULL for
+ * the starter cell. Same shape cp_env_reset takes. */
+void    cp_play_load(CpPlay *p, const int32_t *parts);
 /* move 0..8 (0 drifts, 1..8 are the compass from N clockwise), boost, zap.
  * Returns the world status. Death respawns rather than ending the run. */
 int32_t cp_play_step(CpPlay *p, int32_t move, int32_t boost, int32_t zap);
 void    cp_play_render(CpPlay *p, uint8_t *rgba);
 int32_t cp_play_stat_count(void);
 /* dna, goal, tier, generation, hp%, parts, plants, meat, kills, deaths,
- * step, status */
+ * step, status, speed in tenths */
 void    cp_play_stats(const CpPlay *p, int32_t *out);
 const CpWorld *cp_play_world(const CpPlay *p);
 /* What the scripted baseline would press, in the player's own action space:

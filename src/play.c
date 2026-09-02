@@ -17,6 +17,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 struct CpPlay {
     CpWorld  w;
@@ -99,9 +100,41 @@ void cp_play_render(CpPlay *p, uint8_t *rgba)
     cp_render_styled(&p->w, rgba, p->W, p->H, p->style);
 }
 
+/* Start from a given body.
+ *
+ * parts is CP_MAX_PARTS pairs of (type, angle), or NULL for the starter cell -
+ * the same shape cp_env_reset takes, so a build described once can be handed
+ * to the environment or to a player without translation. Out-of-range values
+ * are clamped rather than rejected and the budget is enforced by
+ * cp_genome_normalise, so a caller cannot smuggle in a body it cannot pay for.
+ *
+ * This exists because the three propulsors now feel different to drive and
+ * there was no way to ask for one: every session began with the starter cell
+ * and the difference was unreachable from the front end. */
+void cp_play_load(CpPlay *p, const int32_t *parts)
+{
+    if (!p) return;
+    CpGenome g;
+    if (parts) {
+        cp_genome_clear(&g);
+        for (int i = 0; i < CP_MAX_PARTS; i++) {
+            int t = parts[i * 2], a = parts[i * 2 + 1];
+            if (t < 0) t = 0;
+            if (t >= CP_PART_COUNT) t = CP_PART_COUNT - 1;
+            g.part[i].type = (uint8_t)t;
+            g.part[i].angle = (uint8_t)(a & 0xFF);
+        }
+        cp_genome_normalise(&g, CP_GEN_BUDGET[CP_GENERATIONS - 1]);
+    } else {
+        cp_genome_starter(&g);
+    }
+    p->best_dna = 0;
+    cp_world_reset(&p->w, p->seed, &g);
+}
+
 /* Everything a scoreboard could want, as one flat array so the caller needs no
  * struct layout knowledge. */
-#define CP_PLAY_STATS 12
+#define CP_PLAY_STATS 13
 int32_t cp_play_stat_count(void) { return CP_PLAY_STATS; }
 
 void cp_play_stats(const CpPlay *p, int32_t *out)
@@ -121,6 +154,10 @@ void cp_play_stats(const CpPlay *p, int32_t *out)
     out[9]  = w->deaths;
     out[10] = w->step;
     out[11] = w->status;
+    /* Speed, so a front end can plot it. Tenths, because the array is ints and
+     * the whole point of plotting it is to see a ripple of a few percent. */
+    out[12] = (int32_t)(sqrtf(w->player.vx * w->player.vx
+                              + w->player.vy * w->player.vy) * 10.0f);
 }
 
 const CpWorld *cp_play_world(const CpPlay *p) { return p ? &p->w : NULL; }

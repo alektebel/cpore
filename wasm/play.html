@@ -68,7 +68,8 @@
   <kbd>space</kbd> discharge &middot;
   <kbd>R</kbd> new pond &middot;
   <kbd>V</kbd> switch renderer &middot;
-  <kbd>H</kbd> let the baseline play
+  <kbd>H</kbd> let the baseline play &middot;
+  <kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> cilia / flagella / jet
 </div>
 
 <script type="module">
@@ -112,6 +113,39 @@ const fb = X.cp_wasm_alloc(W * H * 4);
 const statsPtr = X.cp_wasm_alloc(X.cp_play_stat_count() * 4);
 const img = new ImageData(new Uint8ClampedArray(W * H * 4), W, H);
 const auxPtr = X.cp_wasm_alloc(4);
+const partsPtr = X.cp_wasm_alloc(12 * 2 * 4);   /* CP_MAX_PARTS pairs */
+
+/* Three bodies that differ only in what pushes them.
+ *
+ * The propulsors have genuinely different duty cycles now - cilia are many
+ * hairs out of step so the sum is nearly continuous, a jet is a hard pulse and
+ * a refill - and until this there was no way to ask for one: every session
+ * began with the starter cell and the difference was unreachable. Same mouth,
+ * same eye, same count, so the only variable is the stroke. */
+const PART = { FILTER: 1, CILIA: 4, FLAGELLA: 5, JET: 6, EYE: 10 };
+const BUILDS = {
+  Digit1: ['cilia',    PART.CILIA],
+  Digit2: ['flagella', PART.FLAGELLA],
+  Digit3: ['jet',      PART.JET],
+};
+let buildName = 'starter';
+
+function loadBuild(type, name) {
+  const m = i32(), b = partsPtr >> 2;
+  m.fill(0, b, b + 12 * 2);
+  m[b + 0] = PART.FILTER; m[b + 1] = 0;
+  for (let i = 1; i <= 3; i++) { m[b + i * 2] = type; m[b + i * 2 + 1] = 120 + i * 6; }
+  m[b + 8] = PART.EYE; m[b + 9] = 24;
+  X.cp_play_load(handle, partsPtr);
+  buildName = name;
+  trace.length = 0;
+}
+
+/* A rolling speed trace. The stroke modulates thrust within a beat, and a few
+ * percent of ripple is not something you can see in a swimming cell - so it is
+ * plotted. This is the claim made visible rather than asserted. */
+const trace = [];
+const TRACE_N = 260;
 let styleIdx = 0;
 /* Attract mode: the scripted baseline pressing the player's own keys. Not a
  * demo with privileged control - it goes through the same nine directions,
@@ -149,6 +183,7 @@ addEventListener('keydown', e => {
   if (k) { held.add(k); e.preventDefault(); }
   if (e.code === 'KeyR') { X.cp_play_reset(handle, (Math.random() * 1e9) | 0); }
   if (e.code === 'KeyH') { demo = !demo; held.clear(); }
+  if (BUILDS[e.code]) { const [n, t] = BUILDS[e.code]; loadBuild(t, n); }
   if (e.code === 'KeyV') {
     styleIdx = (styleIdx + 1) % STYLES.length;
     X.cp_play_style(handle, STYLE_ID[STYLES[styleIdx]]);
@@ -159,7 +194,7 @@ addEventListener('blur', () => held.clear());
 
 /* ---- the loop ---- */
 const NAMES = ['dna', 'goal', 'tier', 'gen', 'hp', 'parts',
-               'plants', 'meat', 'kills', 'deaths', 'step', 'status'];
+               'plants', 'meat', 'kills', 'deaths', 'step', 'status', 'speed'];
 
 function readStats() {
   X.cp_play_stats(handle, statsPtr);
@@ -182,6 +217,35 @@ function paintHud(s) {
     `<span class="chip${bad ? ' bad' : ''}">${k} <b>${v}</b></span>`).join('');
 }
 
+/* Drawn over the frame, bottom right, small. Auto-scaled to its own window so
+ * a 7% ripple on a fast body and a 34% ripple on a slow one are both legible;
+ * the numbers beside it are what stop that autoscale from being misleading. */
+function paintTrace() {
+  if (trace.length < 4) return;
+  const w = 250, h = 62, x0 = W - w - 16, y0 = H - h - 16;
+  let lo = Infinity, hi = -Infinity;
+  for (const v of trace) { if (v < lo) lo = v; if (v > hi) hi = v; }
+  const span = Math.max(hi - lo, 1e-3);
+  ctx.save();
+  ctx.fillStyle = 'rgba(243,247,248,.80)';
+  ctx.fillRect(x0, y0, w, h);
+  ctx.strokeStyle = '#b9c8cd'; ctx.lineWidth = 1;
+  ctx.strokeRect(x0 + .5, y0 + .5, w - 1, h - 1);
+  ctx.beginPath();
+  trace.forEach((v, i) => {
+    const px = x0 + 4 + (w - 8) * i / (TRACE_N - 1);
+    const py = y0 + h - 16 - (h - 24) * (v - lo) / span;
+    i ? ctx.lineTo(px, py) : ctx.moveTo(px, py);
+  });
+  ctx.strokeStyle = '#1d7f6e'; ctx.lineWidth = 1.5; ctx.stroke();
+  const ripple = hi > 0 ? (hi - lo) / ((hi + lo) / 2) * 100 : 0;
+  ctx.fillStyle = '#16262c';
+  ctx.font = '11px ui-monospace, monospace';
+  ctx.fillText(`${buildName}  speed ${trace[trace.length-1].toFixed(0)}`
+               + `  ripple ${ripple.toFixed(0)}%`, x0 + 6, y0 + h - 5);
+  ctx.restore();
+}
+
 function frame() {
   let mv, bo, za;
   if (demo) {
@@ -197,7 +261,11 @@ function frame() {
   X.cp_play_render(handle, fb);
   img.data.set(u8().subarray(fb, fb + W * H * 4));
   ctx.putImageData(img, 0, 0);
-  paintHud(readStats());
+  const st = readStats();
+  trace.push(st.speed / 10);
+  if (trace.length > TRACE_N) trace.shift();
+  paintTrace();
+  paintHud(st);
   requestAnimationFrame(frame);
 }
 
@@ -213,6 +281,8 @@ window.cpore = {
   release: k => held.delete(k),
   stats: readStats,
   moveIndex,
+  loadBuild: (t, n) => loadBuild(t, n),
+  PART,
   demo: on => { demo = on; held.clear(); },
 };
 
