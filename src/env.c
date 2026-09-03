@@ -1,4 +1,5 @@
 #include "cpore/cpore.h"
+#include "cpore/codec.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -76,3 +77,26 @@ void cp_env_genome(const CpEnv *e, int32_t *out)
 }
 
 int32_t cp_env_generation(const CpEnv *e) { return e->w.generation; }
+
+/* Editor entry points at env level (game + share codes from any binding). */
+void cp_env_redesign(CpEnv *e, int style)
+{
+    if (e) cp_world_redesign(&e->w, style);
+}
+
+int32_t cp_env_apply_code(CpEnv *e, const char *code)
+{
+    CpGenome g;
+    if (!e || !code) return -1;
+    if (cp_decode_cell(code, &g)) return -1;
+    cp_world_apply_genome(&e->w, &g);
+    return 0;
+}
+
+int32_t cp_env_share_code(const CpEnv *e, char *out, size_t cap)
+{
+    if (!e || !out) return -1;
+    return cp_codec_cell(&e->w.genome, out, cap) > 0 ? 0 : -1;
+}
+
+int32_t cp_env_status(const CpEnv *e) { return e ? e->w.status : CP_RUN; }

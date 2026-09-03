@@ -1049,6 +1049,20 @@ void cp_vis_quantise(uint8_t *fb, int32_t w, int32_t h, int32_t style)
     quantise(fb, w, h, &VIS[style]);
 }
 
+int32_t cp_vis_palette(int32_t style, uint8_t *rgb, int32_t max, float *dither)
+{
+    if (style < 0 || style >= CP_VIS_COUNT) style = CP_VIS_ABYSS;
+    const Vis *v = &VIS[style];
+    if (v->pal_n > max) return 0;
+    for (int i = 0; i < v->pal_n; i++) {
+        rgb[3 * i + 0] = v->pal[i][0];
+        rgb[3 * i + 1] = v->pal[i][1];
+        rgb[3 * i + 2] = v->pal[i][2];
+    }
+    if (dither) *dither = v->dither;
+    return v->pal_n;
+}
+
 void cp_vis_blit(const uint8_t *low, int32_t lw, int32_t lh,
                  uint8_t *out, int32_t W, int32_t H, int32_t style)
 {

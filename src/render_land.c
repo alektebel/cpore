@@ -1051,8 +1051,15 @@ static V3 part_albedo4(int t, float *emissive)
  * on the hull but a two-bone chain that reaches the ground and swings on the
  * gait phase, because on land the contact between animal and terrain is the
  * thing the eye checks first. */
+/* Where the spine ended up, for a caller that has to put a part somewhere.
+ * A part's mount is segpos[seg] + axis * segrad[seg] * 0.60, and an editor
+ * that wants to answer "the user pointed here, which segment and which way
+ * round is that?" has to invert exactly that - so it needs the same stations
+ * the body was built on, not an approximation of them. */
+typedef struct { V3 pos[CP4_MAX_SEG]; float rad[CP4_MAX_SEG]; int n; } Spine;
+
 static int build_prims4(const Cp4Beast *b, int is_player, Prim *out,
-                        V3 *centre, float *bound, Skin *skin)
+                        V3 *centre, float *bound, Skin *skin, Spine *spine)
 {
     V3 fwd, right, up;
     basis3(b->yaw, b->pitch, &fwd, &right, &up);
@@ -1114,6 +1121,14 @@ static int build_prims4(const Cp4Beast *b, int is_player, Prim *out,
         segrad[i] = R * cp4_profile(&b->g, t)
                       * (1.0f + (float)b->g.lump[li] / 127.0f * 0.40f);
         if (segrad[i] < R * 0.15f) segrad[i] = R * 0.15f;
+    }
+
+    if (spine) {
+        spine->n = nseg;
+        for (int i = 0; i < nseg; i++) {
+            spine->pos[i] = segpos[i];
+            spine->rad[i] = segrad[i];
+        }
     }
 
     int n = 0;
@@ -1711,7 +1726,7 @@ static void draw_creature(Ctx *c, const Cp4Beast *b, int is_player)
     Skin sk;
     V3 centre;
     float bound;
-    int n = build_prims4(b, is_player, pr, &centre, &bound, &sk);
+    int n = build_prims4(b, is_player, pr, &centre, &bound, &sk, NULL);
     if (n <= 0) return;
 
     V3 d = sub(centre, c->eye);
@@ -2706,6 +2721,14 @@ void cp4_render(const Cp4World *w, uint8_t *rgba, int W, int H)
 void cp4_render_pose(const Cp4Genome *g, uint8_t *fb, int lw, int lh,
                      int style, uint32_t seed, float azimuth, float elev)
 {
+    cp4_render_pose_phase(g, fb, lw, lh, style, seed, azimuth, elev,
+                          (float)(seed % 128) * 0.05f);
+}
+
+void cp4_render_pose_phase(const Cp4Genome *g, uint8_t *fb, int lw, int lh,
+                           int style, uint32_t seed, float azimuth, float elev,
+                           float phase)
+{
     float *zb = (float *)malloc(sizeof(float) * (size_t)lw * lh);
     if (!zb) return;
 
@@ -2717,13 +2740,13 @@ void cp4_render_pose(const Cp4Genome *g, uint8_t *fb, int lw, int lh,
     b.alive = 1;
     b.p.x = 0.0f; b.p.y = -b.s.stand; b.p.z = 0.0f;
     b.yaw = 0.0f;
-    b.phase = (float)(seed % 128) * 0.05f;
+    b.phase = phase;
 
     Prim pr[MAX_PRIM];
     Skin sk;
     V3 centre;
     float bound;
-    int n = build_prims4(&b, 0, pr, &centre, &bound, &sk);
+    int n = build_prims4(&b, 0, pr, &centre, &bound, &sk, NULL);
 
     Ctx c;
     c.fb = fb; c.zb = zb; c.W = lw; c.H = lh;
@@ -2805,6 +2828,59 @@ void cp4_render_pose(const Cp4Genome *g, uint8_t *fb, int lw, int lh,
     outline_pass(&c);
     cp_vis_quantise(fb, lw, lh, style);
     free(zb);
+}
+
+int cp4_pose_prims(const Cp4Genome *g, float phase, float *prims, int max_prims,
+                   float *meta)
+{
+    Cp4Beast b;
+    memset(&b, 0, sizeof(b));
+    b.g = *g;
+    cp4_genome_stats(&b.g, &b.s);
+    b.hp = b.hp_max = b.s.hp_max;
+    b.alive = 1;
+    b.p.x = 0.0f; b.p.y = -b.s.stand; b.p.z = 0.0f;
+    b.yaw = 0.0f;
+    b.phase = phase;
+
+    Prim pr[MAX_PRIM];
+    Skin sk;
+    Spine spine;
+    V3 centre;
+    float bound;
+    int n = build_prims4(&b, 0, pr, &centre, &bound, &sk, &spine);
+    if (n > max_prims) return 0;
+
+    for (int i = 0; i < n; i++) {
+        float *o = prims + (size_t)i * CP4_POSE_PRIM;
+        o[0] = pr[i].a.x;  o[1]  = pr[i].a.y;  o[2]  = pr[i].a.z;  o[3]  = pr[i].ra;
+        o[4] = pr[i].b.x;  o[5]  = pr[i].b.y;  o[6]  = pr[i].b.z;  o[7]  = pr[i].rb;
+        o[8] = pr[i].col.x; o[9] = pr[i].col.y; o[10] = pr[i].col.z; o[11] = pr[i].k;
+        o[12] = pr[i].em;  o[13] = pr[i].body; o[14] = 0.0f;       o[15] = 0.0f;
+    }
+
+    meta[0]  = centre.x;    meta[1]  = centre.y;    meta[2]  = centre.z;
+    meta[3]  = bound;
+    meta[4]  = sk.origin.x; meta[5]  = sk.origin.y; meta[6]  = sk.origin.z;
+    meta[7]  = sk.fwd.x;    meta[8]  = sk.fwd.y;    meta[9]  = sk.fwd.z;
+    meta[10] = sk.right.x;  meta[11] = sk.right.y;  meta[12] = sk.right.z;
+    meta[13] = sk.up.x;     meta[14] = sk.up.y;     meta[15] = sk.up.z;
+    meta[16] = sk.base.x;   meta[17] = sk.base.y;   meta[18] = sk.base.z;
+    meta[19] = sk.mark.x;   meta[20] = sk.mark.y;   meta[21] = sk.mark.z;
+    meta[22] = sk.detail.x; meta[23] = sk.detail.y; meta[24] = sk.detail.z;
+    meta[25] = (float)sk.pattern;  meta[26] = sk.freq;
+    meta[27] = (float)sk.pattern2; meta[28] = sk.freq2;
+    meta[29] = b.s.stand;   meta[30] = (float)n;    meta[31] = (float)spine.n;
+    /* the spine stations, four floats each: where the vertebra is and how
+     * thick the body is there, which is all an editor needs to place a part */
+    for (int i = 0; i < CP4_MAX_SEG; i++) {
+        float *o = meta + 32 + i * 4;
+        o[0] = i < spine.n ? spine.pos[i].x : 0.0f;
+        o[1] = i < spine.n ? spine.pos[i].y : 0.0f;
+        o[2] = i < spine.n ? spine.pos[i].z : 0.0f;
+        o[3] = i < spine.n ? spine.rad[i] : 0.0f;
+    }
+    return n;
 }
 
 /* The default view: three-quarter, barely raised. Straight side-on hides

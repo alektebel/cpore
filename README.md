@@ -7,6 +7,12 @@ reinforcement learning environment rather than a game.
 
 Dependencies: `libc` and `libm`. No SDL, no OpenGL, no zlib, no stb.
 
+The sim core stays that way on purpose: it is the part the RL loop runs.
+Playing it needs a window and a GPU, so those live one layer out — the
+native game shell (`apps/cpore_game.c` + `src/glview.c`, X11+GLX from the
+stock system headers) presents frames on the GPU while the sim stays
+dependency-free. `make game` runs it; no browser, no install, no WASM.
+
 That screenshot is a pixel-art pipeline written from scratch: the scene is
 rasterised into a small buffer with hard-edged primitives (coverage is
 thresholded at the pixel centre, never blended), quantised to a fixed palette
@@ -20,6 +26,8 @@ make && make test && make bench
 ./build/cpore_shot --style hunter --seed 23 --steps 2600 --out shot.png
 ./build/cpore_shot --parts 2:0,7:16,4:112,4:144 --out custom.png
 ./build/cpore_shot --vis-all --out compare.png      # every style, same frame
+./build/cpore_game --stage land --seed 7            # play it natively (X11+GL)
+./build/cpore_tribe --table --seeds 30              # the tribe fork in numbers
 ```
 
 ## Stage 2: aquatic, in 3D
@@ -568,6 +576,60 @@ charmer   legacy M0.80 E1.00 R1.59  ->  4 cities taken, all by conversion
 ./build/cpore_civ --table          # every doctrine against twelve seeds
 ```
 
+## Stage 5: tribe
+
+The gap Spore filled between creature and civilisation: the species
+settles. Members, food stores, tools, huts — and five neighbouring tribes
+on the same planet, from the same seed, so the valley the creature walked
+is the valley its tribe farms. Charm and violence stay the two currencies,
+and the body decides which is cheap: fangs raid well, songs befriend well.
+
+Two mechanics, measured over 30 seeds, forced to a single approach:
+
+| approach | does | wins |
+|---|---|---|
+| befriend | gifts food, standing rises, alliance at +1 | 15/30, 74 allied |
+| raid | one war party split across open fronts, captives join on a raze | 19/30, 120 razed |
+
+Wars run at campaign pacing (an even match deals ~1 casualty a tick), so
+razing a tribe takes dozens of ticks and regrouping between wars matters —
+the first version wiped both sides on the opening tick. Imported share-code
+genomes found rival tribes, so an invasion rides the whole arc: a friend's
+creature becomes a neighbouring tribe, then (via the same legacy bridge)
+a nation.
+
+```
+./build/cpore_tribe --seed 5 --out tribe.png
+./build/cpore_tribe --table --seeds 30
+```
+
+```python
+land = LandEnv(seed=25)        # ... play the creature stage ...
+code = land.share_code()       # the survivor, as a string
+tribe = TribeEnv(seed=25, genome=land_genome_from_code(code))
+civ = CivEnv(seed=25, legacy=land.legacy())
+```
+
+## The native game
+
+`./build/cpore_game` plays all five stages in one X11+GL window, no browser
+involved. Keys `1-5` switch cell/aqua/creature/tribe/civ live; the arc
+chains, so the tribe founds from the genome you are driving and civ inherits
+its legacy. WASD moves (per-stage verbs on screen via `F1`... in practice:
+SPACE bites, E sings, N rebuilds toward the next archetype at the current
+budget, C prints the share code of your body, F takes a full-quality still
+with the screenshot renderer, G toggles the scripted autopilot).
+
+Presentation is the GPU's job: `src/glview.c` owns the GLX context and
+presents frames with integer pixel-art scaling and an FPS counter, while the
+sim never knows it exists. The scene-as-data contract the GPU tiers will run
+on already exists — `cp4_pose_prims()` hands the creature over as
+primitives and `cp_vis_palette()` hands every style's palette to a shader —
+so the shader-quantise and GPU-terrain tiers land without touching the sim.
+
+The WASM/browser build still exists (`make wasm`) but is no longer the
+plan's centre: training and fast iteration happen natively.
+
 ## Natural selection
 
 The other animals are not props. Every fish carries a genome, burns energy to
@@ -618,10 +680,11 @@ this project deletes:
 | Spore | cpore |
 | --- | --- |
 | No scripting API, no headless mode | Sim core is a library with zero I/O |
-| Runs at 1x real time, one instance | ~81k steps/s, 64 envs, one thread |
+| Runs at 1x real time, one instance | ~133k steps/s cell, ~16k land, 64 envs, one thread |
 | A playthrough is tens of hours | An episode is ≤9000 steps (~2s of compute) |
-| Five games with five interfaces | One world struct, per-stage rule sets |
-| No way to save/restore mid-run | `memcpy`-able 22KB state |
+| Five games with five interfaces | One planet, five rule sets, one campaign env |
+| No way to save/restore mid-run | `memcpy`-able POD state, per stage |
+| Creatures trapped in the game | Share codes: any genome is a pasteable string |
 
 The only real hook into the actual game is the
 [Spore ModAPI](https://github.com/emd4600/Spore-ModAPI), a C++ library built on
@@ -689,11 +752,11 @@ perception radius are zeroed — eyes buy information.
 ## Layout
 
 ```
-include/cpore/cpore.h   one public header, flat C ABI
+include/cpore/cpore.h   one public header per stage, flat C ABI (+vec.h, codec.h, codex.h)
 src/genome.c            parts, costs, budgets, the editor's action decoding
 src/world.c             the simulation (no I/O, no allocation, no globals)
 src/policy.c            scripted baseline, design head included
-src/env.c               RL wrapper: reset/step/observe/save/load
+src/env.c               RL wrapper: reset/step/observe/save/load + editor entry points
 src/aqua_genome.c       3D body plans: parts, costs, mutation
 src/aqua.c              the aquatic simulation, including the breeding population
 src/aqua_env.c          stage-2 RL wrapper
@@ -702,19 +765,24 @@ src/land.c              the creature simulation: four media, nests, impress-or-e
 src/land_env.c          stage-3 RL wrapper
 src/civ.c               the civilisation simulation: cities, units, doctrines
 src/civ_env.c           stage-4 RL wrapper, and the bridge from stage 3
+src/tribe.c             the tribe simulation: members, stores, tools, raid-or-befriend
+src/vec.c               batch stepper: N worlds, one call, flat buffers (the puffer path)
+src/genome_codec.c      share codes: every genome as a pasteable string
+src/codex.c             the discovery codex: first sightings as events
+src/glview.c            native GPU present path (X11+GLX; NOT in libcpore)
 src/render.c            pixel-art rasteriser, five styles, palette-quantised
 src/sdfbody.h           the shared SDF body: round cones under a smooth minimum
 src/render3d.c          sphere-impostor z-buffer renderer for stage 2
 src/render_land.c       ray-marched heightfield, sky and creatures for stage 3
 src/render_civ.c        orthographic map, territory and borders for stage 4
 src/png.c               PNG + DEFLATE encoder
-python/cpore/           ctypes binding, works without numpy
-apps/                   cpore_shot, cpore_aqua, cpore_land, cpore_civ, cpore_bench
-tests/test_core.c       determinism, snapshot, budgets, and every stage's balance
+python/cpore/           ctypes binding, puffer.py, campaign.py, textgym.py
+apps/                   shots per stage, cpore_game (native play), cpore_bench
+tests/test_core.c       determinism, snapshot, vec parity, codecs, every stage's balance
 ```
 
-The sim never includes the renderer, so a training build can drop
-`render.c`/`png.c` entirely.
+The sim never includes the renderer, and never includes `glview.c`, so a
+training build links the sim + `vec.c` and nothing else.
 
 ## Python
 
@@ -739,30 +807,53 @@ is trimmed by the C side, so a caller cannot smuggle in a build it has not paid
 for. `make_gym_env()` returns a `gymnasium.Env` if gymnasium and numpy are
 installed; nothing else requires them.
 
+```python
+from cpore import make_puffer_env      # pufferlib-native, one FFI call/step
+env = make_puffer_env("land", num_envs=64, seed=0)
+obs, infos = env.reset()               # (64, 170) float32, C writes it directly
+obs, rew, term, trunc, infos = env.step(env.greedy_actions())
+
+from cpore import Campaign             # cell -> aqua -> land -> tribe -> civ
+rep = Campaign(seed=25).run_baseline() # one arc, legacy handed forward
+
+from cpore import TextLand             # the LLM face: verbs, not floats
+game = TextLand(seed=7)
+print(game.act("move NE 2"))           # bite | sing | flee | dig | nest | ...
+```
+
+Any genome is a pasteable string — Spore's pollination without a server:
+
+```python
+code = land.share_code()               # "CP4-AQAAQI... (215 chars)"
+land2.apply_code(code)                 # byte-exact, checksum-checked
+tribe = TribeEnv(seed=7, genome=land_genome_from_code(code))
+```
+
 ## Numbers
 
-Single thread, `-O2`, on the machine this was developed on:
+Single thread, `-O2`, RTX 5060 Ti host. The puffer path is the training
+path: the same C stepped through one ctypes call per step into numpy
+buffers, scripted baseline driving, 64 envs:
 
 ```
-stage 1 (cell)   state 22776 B   obs  97   act 28
-
-64 envs                                  1 env
-  step only              81k steps/s       182k steps/s
-  step + observe         73k steps/s       178k steps/s
-  step + observe + base  60k steps/s       153k steps/s
-
-stage 3 (creature)   state 39648 B   obs 168   act 58
-  step + observe + baseline            25.5k steps/s
+stage            obs   act    puffer path, 64 envs   (raw C cell loop: 144k/103k)
+cell              97    28    133k steps/s
+aquatic          113    46    52k steps/s
+creature         170   106    16k steps/s
+tribe             41     9    543k steps/s
+civ              132    17    1.3M steps/s
 ```
 
-Stage 3 carries far more per step — 440 plants, 64 animals, four media and a
-terrain field sampled several times per animal — so it will never match the
-cell stage. It did start at 7.6k though: the NPC feeding pass was every animal
-against every plant, sixty-four times five hundred every step. A spatial hash
-over the flora, keyed by hashed cell coordinates because the world has no
-bounds to index against, took it to 25.5k. Every read goes through one macro
-and every write through one function, so the grid cannot drift out of step with
-the array it describes.
+(raw C cell loop for reference: 144k step-only, 103k step+observe+baseline.)
+
+The creature stage carries far more per step — 560 plants, 64 animals, four
+media and a terrain field sampled several times per animal — so it will
+never match the cell stage. It did start at 7.6k though: the NPC feeding
+pass was every animal against every plant, sixty-four times five hundred
+every step. A spatial hash over the flora, keyed by hashed cell coordinates
+because the world has no bounds to index against, took it past 16k. Every
+read goes through one macro and every write through one function, so the
+grid cannot drift out of step with the array it describes.
 
 Read that as roughly **30M entity-updates/s** — every step advances ~370
 entities, so this is not comparable to a 1M-steps/s Pong. The 64-env number is
@@ -815,6 +906,12 @@ All of it found by running the table, not by reading the code:
 - **`jet_thrust` counted jets instead of reading their angles**, so the
   header's "only rear-facing jets help" was a comment describing code that did
   not exist. Now it sums each nozzle's rearward component.
+- **Tribe wars wiped both sides on the opening tick.** Damage was absolute
+  attack over absolute defence per tick with full reciprocal cost per front,
+  so a five-front war dealt 5x casualties to the attacker. Wars now run at
+  campaign pacing (~1 casualty a tick even), the war party splits across open
+  fronts, retaliation is staggered per tribe, and razing absorbs captives —
+  charm 15/30 wins, raid 19/30.
 
 ## Known limits
 
@@ -834,13 +931,16 @@ All of it found by running the table, not by reading the code:
 Full version, including what is deliberately *not* being done and why, in
 [docs/ROADMAP.md](docs/ROADMAP.md).
 
-1. Structure-of-arrays world layout, then shard envs across cores.
+1. Shard vec batches across cores (one batch per thread; the API is already
+   shaped for it), then SoA world layout if the working set still binds.
 2. PPO on the cell stage, jointly over control and the design head — does a
    learned policy reorder that table, and does it learn to put spikes forward?
 3. Carry the evolving population back into stage 1, and let the player's own
    genome enter the same gene pool.
-4. Creature stage on land: legs instead of fins, terrain, and pack behaviour.
-5. Tribal, Civ, Space as further rule sets over the same state.
+4. Space as a further rule set (galaxy of systems, after the arc through civ
+   is fun, not before).
+5. GPU scene tiers: palette-quantise in shader, then terrain mesh +
+   instanced impostors from `cp4_pose_prims()` for the interactive view.
 
 ## Visual styles
 

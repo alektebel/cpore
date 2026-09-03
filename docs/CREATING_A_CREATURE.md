@@ -1,9 +1,20 @@
 # Creating a creature: the minimal steps
 
-The shortest path from a clean checkout to a creature of your own design,
-using what exists today. (The drag-and-drop browser editor is planned —
-see [PLAN.md](PLAN.md) stage 1.3; until it lands, the creature creator is
-the CLI for looking and the Python API for building.)
+The shortest path from a clean checkout to a creature of your own design.
+Two doors: play it live in the native game, or build it in Python. (The
+drag-and-drop browser editor is still planned — see [PLAN.md](PLAN.md);
+until it lands, the game keys plus the Python API are the creator.)
+
+## 0. Play it (native, no browser)
+
+```
+make game   # ./build/cpore_game --stage land --seed 7
+```
+
+WASD moves, SPACE bites, E sings, **N rebuilds you toward the next
+archetype** at the current budget, **C prints your share code**, F takes a
+full-quality still. Keys 1–5 switch cell/aqua/creature/tribe/civ live, and
+the tribe founds from whatever genome you are driving.
 
 ## 1. Build
 
@@ -76,5 +87,15 @@ If it starved: check the mouth matches the food where it woke up. If it
 drowned: fins and gills gate water. If it never left the spawn valley:
 longer legs are for exactly that.
 
-That's the whole loop — parts, prices, a body, a life, a verdict. Repeat
-from step 4 until the census says the design works.
+## 6. Share it
+
+```python
+code = env.share_code()      # "CP4-..." — pasteable, checksum-checked
+env.apply_code(code)         # same body, any machine, any seed
+```
+
+That's the whole loop — parts, prices, a body, a life, a verdict, a string
+you can send a friend. Their creature founds a rival tribe in your world
+(`TribeEnv`), and its descendants' doctrine in your civ stage — which is
+Spore's pollination with no server. Repeat from step 4 until the census
+says the design works.

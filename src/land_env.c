@@ -1,4 +1,5 @@
 #include "cpore/land.h"
+#include "cpore/codec.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -103,3 +104,25 @@ void cp4_env_census(const Cp4Env *e, int32_t *counts, float *means)
         means[7] = w->home.store;
     }
 }
+
+void cp4_env_redesign(Cp4Env *e, int style)
+{
+    if (e) cp4_world_redesign(&e->w, style);
+}
+
+int32_t cp4_env_apply_code(Cp4Env *e, const char *code)
+{
+    Cp4Genome g;
+    if (!e || !code) return -1;
+    if (cp_decode_land(code, &g)) return -1;
+    cp4_world_apply_genome(&e->w, &g);
+    return 0;
+}
+
+int32_t cp4_env_share_code(const Cp4Env *e, char *out, size_t cap)
+{
+    if (!e || !out) return -1;
+    return cp_codec_land(&e->w.player.g, out, cap) > 0 ? 0 : -1;
+}
+
+int32_t cp4_env_status(const Cp4Env *e) { return e ? e->w.status : CP4_RUN; }

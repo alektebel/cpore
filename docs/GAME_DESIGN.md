@@ -83,21 +83,23 @@ Pacing falls out of numbers we already have: run the sim at ~15 steps/s and a
 ~2¼ minutes. Render at whatever the machine can do; sim ticks stay fixed-rate
 so determinism and the test suite are untouched.
 
-### Platform: WASM first, native never required
+### Platform: native first, browser on the side
 
-The repo's selling point is libc+libm and nothing else. A browser build
-preserves that (emscripten is a compiler, not a dependency of the core) and
-makes the game a link instead of an install — which matters, because "custom
-Spore you can play in a tab" is the whole demo.
+The repo's selling point is libc+libm and nothing else, and training happens
+natively — so the game is native too: `apps/cpore_game.c` over `src/glview.c`
+(X11+GLX from stock headers, no engine, no SDL). The sim core never links
+windowing or GL; the shell maps input onto the action vectors the RL loop
+already drives. The emscripten target still builds for link-sharing, but it
+is not the path anything depends on.
 
 Where the code goes:
 
 | piece | location |
 |---|---|
-| emscripten target | `Makefile` (`make wasm`), compiling `LIB_SRC` + renderers |
-| browser shell: canvas blit, input → action vector, HUD | `web/index.html`, `web/main.js` |
-| interactive render tier | `src/render_land.c`, as a quality parameter — **not a fork** |
-| a native dev harness, if ever needed | `apps/play.c` behind an optional `make play` (SDL allowed there because `apps/` never taints the core) |
+| native game shell: input → action vector, HUD, map view | `apps/cpore_game.c` |
+| GPU present path: GLX context, integer-scale blit, FPS | `src/glview.c` (never in libcpore) |
+| interactive render tiers | map view in the shell now; shader-quantise + GPU terrain next, behind the `cp_vis_palette` / `cp4_pose_prims` contract |
+| legacy browser shell | `web/` (`make wasm`) |
 
 ### The render budget, honestly
 
@@ -213,14 +215,12 @@ gets the design head, same boundary, same budget.
 
 ## Part IV — The lab (pufferlib + an LLM benchmark)
 
-**Puffer-native vectorisation.** The current `CporeVecEnv` loops in Python.
-The plan is the roadmap's SoA item with a delivery target: a batch stepper in
-`src/vec.c` owning N worlds contiguously (`cpv_create/reset/step` writing
-flat obs/rew/done buffers), then a `python/cpore/puffer.py` implementing
-`pufferlib.PufferEnv` with zero-copy numpy views over those buffers. Thread
-sharding inside `vec.c` comes second — measure the single-thread SoA gain
-first; the README already notes the 64-env working set is the bottleneck.
-Acceptance the repo's way: a steps/s table before and after, and a PPO run
+**Puffer-native vectorisation.** Done: `src/vec.c` batches N worlds behind
+one call writing flat obs/rew/done buffers, and `python/cpore/puffer.py`
+implements native `PufferEnv`s with numpy buffers C writes into directly —
+the old ctypes loop stays as the slow path. Thread sharding (one batch per
+core) comes second; the API is already shaped for it. Acceptance the repo's
+way: a steps/s table before and after (in the README), and next a PPO run
 that beats the scripted baseline's 30-seed table — the experiment the whole
 project was built to ask.
 
@@ -333,12 +333,12 @@ that most wants early contact with reality.
 
 | # | name | delivers | accept when |
 |---|---|---|---|
-| M1 | **Walk** | `make wasm`, interactive tier, input → action vector | ≥30 fps at 320×180 on a laptop; walk to a river and watch a live sunset; 30-seed table byte-identical |
-| M2 | **Pay** | codex + rarity tiers + first-sighting card + senses | a cold 10-minute session yields ≥5 codex entries, ≥1 rare; discovery reward flag works in the lab |
-| M3 | **Build** | browser editor + test pen + share codes | each of the six archetypes hand-buildable in <3 min; share string round-trips through Python |
-| M4 | **Traverse** | climbing/stamina/glide + weather | a named peak reachable only with the right build; all six archetypes still viable on the re-run table |
-| M5 | **Scale** | `src/vec.c` SoA + puffer binding | measured steps/s table; a PPO run that beats the scripted 30-seed table |
-| M6 | **Judge** | text protocol + LLM harness | leaderboard over fixed seeds: baseline / PPO / ≥2 LLMs / one human |
+| M1 | **Walk** | native game shell, GPU present, input → action vector | DONE: `cpore_game` at 60 presents/s, map tier for land/tribe/civ, photo stills via the beauty renderer; 30-seed table byte-identical |
+| M2 | **Pay** | codex + rarity tiers + first-sighting card + senses | codex DONE (game banner + lab reward use it); rarity/senses open |
+| M3 | **Build** | browser editor + test pen + share codes | share codes + live-redesign API DONE (C + Python round-trip; N key in game); drag-and-drop canvas + test pen open |
+| M4 | **Traverse** | climbing/stamina/glide + weather | open |
+| M5 | **Scale** | `src/vec.c` SoA + puffer binding | vec + puffer DONE with measured table; PPO-beats-baseline run open |
+| M6 | **Judge** | text protocol + LLM harness | text face + transcript + seeds DONE; leaderboard rows beyond scripted open |
 | M7 | **Live** | procedural audio (WebAudio), photo mode, APNG export | a session recording someone would post unprompted |
 
 Dependencies are honest: M2–M4 all ride on M1's shell; M5–M6 need nothing

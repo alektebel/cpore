@@ -358,6 +358,9 @@ void cp4_world_reset(Cp4World *w, uint32_t seed, const Cp4Genome *g);
 void cp4_world_step(Cp4World *w, const float act[CP4_ACT_DIM]);
 void cp4_world_observe(const Cp4World *w, float *obs);
 void cp4_policy_greedy(const Cp4World *w, float act[CP4_ACT_DIM]);
+/* Live redesign (game editor / share codes). See cpore.h. */
+void cp4_world_redesign(Cp4World *w, int style);
+void cp4_world_apply_genome(Cp4World *w, const Cp4Genome *g);
 
 typedef struct Cp4Env Cp4Env;
 Cp4Env *cp4_env_create(uint32_t seed);
@@ -371,6 +374,11 @@ size_t  cp4_env_state_size(void);
 void    cp4_env_save(const Cp4Env *e, void *dst);
 void    cp4_env_load(Cp4Env *e, const void *src);
 const Cp4World *cp4_env_world(const Cp4Env *e);
+/* editor from any binding (see cpore.h). */
+void    cp4_env_redesign(Cp4Env *e, int style);
+int32_t cp4_env_apply_code(Cp4Env *e, const char *code);
+int32_t cp4_env_share_code(const Cp4Env *e, char *out, size_t cap);
+int32_t cp4_env_status(const Cp4Env *e);
 /* counts[19]: births, deaths, pop, allies, enemies, befriended, kills,
  *             discovered, hatchlings, home, medium, steps in each of the four
  *             media, then bush/kelp/tuber/meat eaten
@@ -388,6 +396,32 @@ void cp4_render_portrait(const Cp4Genome *g, uint8_t *fb, int lw, int lh,
  * yaw gene is that it looks different from the front than from the side. */
 void cp4_render_pose(const Cp4Genome *g, uint8_t *fb, int lw, int lh,
                      int style, uint32_t seed, float azimuth, float elev);
+/* The same again, with the gait phase pulled out of the seed and made an
+ * argument. An editor wants the animal to walk on the spot while the dirt it
+ * stands on holds still, and the seed drives both. */
+void cp4_render_pose_phase(const Cp4Genome *g, uint8_t *fb, int lw, int lh,
+                           int style, uint32_t seed, float azimuth, float elev,
+                           float phase);
+
+/* The same body, handed over as data instead of pixels.
+ *
+ * A creature is a list of round cones smooth-unioned together, which is the
+ * one shape a fragment shader is happiest with - so an interactive viewport
+ * wants the list, not the picture. This keeps C the source of truth for what
+ * a genome *is*: the caller may march it on a GPU, but it did not decide the
+ * body plan, and picking a part off the screen resolves against the same
+ * primitives the still images are made of.
+ *
+ * Sixteen floats a primitive: a.xyz ra | b.xyz rb | col.xyz k | em body _ _
+ * Returns the count, or 0 if the caller's array is too small. */
+#define CP4_POSE_PRIM  16
+/* centre, bound, the skin frame and its coats, then the spine: four floats a
+ * station from index 32, being where the vertebra is and how thick the body is
+ * there. A part mounts at pos + axis * rad * 0.60, so an editor can invert a
+ * click on the body back into a segment and a yaw/pitch with this alone. */
+#define CP4_POSE_META  56
+int cp4_pose_prims(const Cp4Genome *g, float phase, float *prims, int max_prims,
+                   float *meta);
 
 #ifdef __cplusplus
 }

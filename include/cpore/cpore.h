@@ -194,6 +194,11 @@ typedef struct {
 void  cp_world_reset(CpWorld *w, uint32_t seed, const CpGenome *genome);
 void  cp_world_step(CpWorld *w, const float act[CP_ACT_DIM]);
 void  cp_world_observe(const CpWorld *w, float *obs /* CP_OBS_DIM */);
+/* Live redesign at the current generation's budget (the game editor's entry
+ * point): rebuild toward a scripted style, or apply a decoded share-code
+ * genome. Same refresh the generation boundary runs, minus the reward. */
+void  cp_world_redesign(CpWorld *w, int style);
+void  cp_world_apply_genome(CpWorld *w, const CpGenome *g);
 
 /* scripted baseline: fills the whole action vector, design head included. */
 void  cp_policy_greedy(const CpWorld *w, float act[CP_ACT_DIM]);
@@ -221,6 +226,12 @@ const CpWorld *cp_env_world(const CpEnv *e);
 /* read back the live genome as CP_MAX_PARTS pairs of (type, angle) */
 void   cp_env_genome(const CpEnv *e, int32_t *out);
 int32_t cp_env_generation(const CpEnv *e);
+/* editor from any binding: rebuild toward a style, apply a pasted share
+ * code (0 ok), or read the live genome as a share string (0 ok). */
+void    cp_env_redesign(CpEnv *e, int style);
+int32_t cp_env_apply_code(CpEnv *e, const char *code);
+int32_t cp_env_share_code(const CpEnv *e, char *out, size_t cap);
+int32_t cp_env_status(const CpEnv *e);
 
 /* ---- rendering (optional; pure function of world state) ---- */
 
@@ -238,6 +249,11 @@ void cp_render_styled(const CpWorld *w, uint8_t *rgba, int width, int height,
  * dither and upscale rather than growing a second look. */
 void cp_vis_dims(int style, int32_t *w, int32_t *h);
 void cp_vis_quantise(uint8_t *fb, int32_t w, int32_t h, int32_t style);
+/* The style's palette and dither spread, for a caller that has to do the same
+ * quantisation somewhere this code cannot reach - a GPU shader, say. Copies
+ * 3 bytes per entry and returns the count, so the two paths cannot drift onto
+ * different colours. */
+int32_t cp_vis_palette(int32_t style, uint8_t *rgb, int32_t max, float *dither);
 void cp_vis_blit(const uint8_t *low, int32_t lw, int32_t lh,
                  uint8_t *out, int32_t W, int32_t H, int32_t style);
 void cp_px_rect(uint8_t *fb, int32_t W, int32_t H, int32_t x, int32_t y,

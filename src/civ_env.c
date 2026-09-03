@@ -84,3 +84,5 @@ void cp5_legacy_from_world(const Cp4World *land, float *out3)
     cp5_legacy_from_creature(&land->player.g, &lg);
     for (int a = 0; a < CP5_APPROACH_COUNT; a++) out3[a] = lg.bonus[a];
 }
+
+int32_t cp5_env_status(const Cp5Env *e) { return e ? e->w.status : CP5_RUN; }

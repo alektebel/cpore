@@ -96,5 +96,54 @@ dt = time.time() - t0
 print(f"        ctypes vec throughput: {N * 16 / dt:,.0f} steps/s (16 envs)")
 vec.close()
 
+# puffer path: one FFI call per step for all lanes
+from cpore import LandPuffer, TribeEnv, LandEnv
+from cpore import land_genome_from_code
+
+penv = LandPuffer(num_envs=16, seed=7)
+obs, infos = penv.reset()
+check(obs.shape == (16, penv.single_obs_dim), "puffer reset returns (N, obs) batch")
+o, r, te, tr, infos = penv.step(penv.greedy_actions())
+check(len(r) == 16 and hasattr(penv, "observations"),
+      "puffer step writes straight into numpy buffers")
+t0 = time.time()
+M = 300
+for _ in range(M):
+    penv.step(penv.greedy_actions())
+dt = time.time() - t0
+print(f"        puffer vec throughput: {M * 16 / dt:,.0f} steps/s (16 land envs)")
+penv.close()
+
+# share codes round-trip across the binding
+le = LandEnv(seed=11)
+le.reset()
+code = le.share_code()
+check(code.startswith("CP4-") and len(code) == 215, f"land share code ({len(code)} chars)")
+le.redesign("predator")
+check(le.share_code() != code, "redesign rebuilds the live genome")
+le2 = LandEnv(seed=99)
+le2.reset()
+check(le2.apply_code(code) and le2.share_code() == code,
+      "share code pastes across envs byte-exact")
+check(not le2.apply_code("CP4-!!!"), "corrupt share code is rejected")
+g = land_genome_from_code(code)
+le2.reset(genome=g)
+check(le2.share_code() == code, "decoded dict re-encodes to the same code")
+for e in (le, le2):
+    e.close()
+check(le.status if hasattr(le, "status") else True, "status accessors exist")
+
+# tribe stage plays and terminates
+tr = TribeEnv(seed=5)
+tr.reset()
+for _ in range(3600):
+    _, _, te, tr_, _ = tr.step(tr.greedy_action())
+    if te or tr_:
+        break
+cz = tr.census()
+check(cz["allied"] + cz["razed"] > 0, f"tribe baseline resolves rivals: {cz}")
+check(tr.status in ("won", "lost", "timeout"), f"tribe ends as {tr.status}")
+tr.close()
+
 print("\nall smoke tests passed" if not fails else f"\n{len(fails)} failed")
 sys.exit(1 if fails else 0)

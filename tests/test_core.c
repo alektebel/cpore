@@ -2,6 +2,10 @@
 #include "cpore/aqua.h"
 #include "cpore/land.h"
 #include "cpore/civ.h"
+#include "cpore/tribe.h"
+#include "cpore/vec.h"
+#include "cpore/codec.h"
+#include "cpore/codex.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1261,6 +1265,263 @@ int main(void)
         }
         CHECK(ended == trials, "civ: every episode reaches a terminal state");
         CHECK(consistent, "civ: the city ledger matches the cities on the map");
+        free(w);
+    }
+
+    /* ================= STAGE 5: TRIBE ================= */
+    printf("\n-- tribe --\n");
+
+    /* Same contract as every other stage: identical seed, identical episode. */
+    {
+        Cp6World *a = (Cp6World *)malloc(sizeof(Cp6World));
+        Cp6World *b = (Cp6World *)malloc(sizeof(Cp6World));
+        cp6_world_reset(a, 51, NULL, NULL, 0);
+        cp6_world_reset(b, 51, NULL, NULL, 0);
+        int same = 1;
+        for (int t = 0; t < 1200; t++) {
+            float act[CP6_ACT_DIM];
+            cp6_policy_greedy(a, act);
+            cp6_world_step(a, act);
+            cp6_policy_greedy(b, act);
+            cp6_world_step(b, act);
+        }
+        if (memcmp(a, b, sizeof(Cp6World)) != 0) same = 0;
+        CHECK(same, "tribe: the same seed replays exactly");
+        free(a); free(b);
+    }
+    {
+        Cp6Env *e = cp6_env_create(52);
+        float obs[CP6_OBS_DIM], act[CP6_ACT_DIM], r;
+        int32_t term, trunc;
+        void *snap = malloc(cp6_env_state_size());
+        memset(act, 0, sizeof(act));
+        act[0] = 0.6f; act[1] = 0.25f; act[2] = 0.15f;
+        for (int t = 0; t < 300; t++) cp6_env_step(e, act, obs, &r, &term, &trunc);
+        cp6_env_save(e, snap);
+        float after[CP6_OBS_DIM], redo[CP6_OBS_DIM];
+        for (int t = 0; t < 200; t++) cp6_env_step(e, act, after, &r, &term, &trunc);
+        cp6_env_load(e, snap);
+        for (int t = 0; t < 200; t++) cp6_env_step(e, act, redo, &r, &term, &trunc);
+        CHECK(memcmp(after, redo, sizeof(after)) == 0,
+              "tribe: restore reproduces the future exactly");
+        free(snap);
+        cp6_env_free(e);
+    }
+
+    /* Observations stay in range, and episodes always end. */
+    {
+        Cp6World *w = (Cp6World *)malloc(sizeof(Cp6World));
+        float obs[CP6_OBS_DIM];
+        int ok = 1, ended = 0;
+        for (int seed = 0; seed < 6; seed++) {
+            cp6_world_reset(w, (uint32_t)(seed * 19 + 2), NULL, NULL, 0);
+            for (int t = 0; t < CP6_MAX_STEPS + 4; t++) {
+                float act[CP6_ACT_DIM];
+                cp6_policy_greedy(w, act);
+                cp6_world_step(w, act);
+                cp6_world_observe(w, obs);
+                for (int i = 0; i < CP6_OBS_DIM; i++)
+                    if (!(obs[i] == obs[i]) || obs[i] < -4.0f || obs[i] > 4.0f) ok = 0;
+                if (w->status != CP6_RUN) break;
+            }
+            if (w->status != CP6_RUN) ended++;
+        }
+        CHECK(ok, "tribe: observations are finite and in range");
+        CHECK(ended == 6, "tribe: every episode reaches a terminal state");
+        free(w);
+    }
+
+    /* --- THE FORK, AGAIN ---
+     * Charm and violence are bought with the same founder. A devout tribe
+     * that only gives must ally neighbours; a warlike tribe that only raids
+     * must bury them. If only one path finishes episodes, the stage has one
+     * strategy wearing two hats. */
+    {
+        int allied = 0, razed = 0, gifts = 0, raids = 0;
+        Cp6World *w = (Cp6World *)malloc(sizeof(Cp6World));
+        for (int s = 0; s < 4; s++) {
+            Cp4Genome devout, warlike;
+            float act[CP6_ACT_DIM];
+            cp4_genome_autodesign(&devout, NULL, CP4_GEN_BUDGET[0], CP4_STYLE_CHARMER);
+            cp6_world_reset(w, (uint32_t)(s * 23 + 4), &devout, NULL, 0);
+            memset(act, 0, sizeof(act));
+            act[0] = 0.6f; act[1] = 0.2f; act[2] = 0.2f;
+            for (int i = 1; i < CP6_MAX_TRIBES; i++) act[2 + i] = 0.8f;
+            for (int t = 0; t < CP6_MAX_STEPS && w->status == CP6_RUN; t++)
+                cp6_world_step(w, act);
+            allied += w->allied; gifts += w->gifts;
+
+            cp4_genome_autodesign(&warlike, NULL, CP4_GEN_BUDGET[0], CP4_STYLE_PREDATOR);
+            cp6_world_reset(w, (uint32_t)(s * 23 + 4), &warlike, NULL, 0);
+            memset(act, 0, sizeof(act));
+            act[0] = 0.5f; act[1] = 0.35f; act[2] = 0.15f;
+            for (int i = 1; i < CP6_MAX_TRIBES; i++) act[2 + i] = -0.8f;
+            for (int t = 0; t < CP6_MAX_STEPS && w->status == CP6_RUN; t++)
+                cp6_world_step(w, act);
+            razed += w->razed; raids += w->raids;
+        }
+        printf("        charm: %d allied (%d gifts) | raid: %d razed (%d raids)\n",
+               allied, gifts, razed, raids);
+        CHECK(allied > 0 && gifts > 0, "tribe: gifts befriend neighbours");
+        CHECK(razed > 0 && raids > 0, "tribe: raids eliminate neighbours");
+        free(w);
+    }
+
+    /* Imported lineages found rival tribes: the invasion rides the arc. */
+    {
+        Cp6World *w = (Cp6World *)malloc(sizeof(Cp6World));
+        Cp4Genome inv[2];
+        cp4_genome_autodesign(&inv[0], NULL, CP4_GEN_BUDGET[0], CP4_STYLE_PREDATOR);
+        cp4_genome_autodesign(&inv[1], NULL, CP4_GEN_BUDGET[0], CP4_STYLE_FLYER);
+        cp6_world_reset(w, 77, NULL, inv, 2);
+        int same0 = memcmp(&w->tribe[1].genome, &inv[0], sizeof(Cp4Genome)) == 0;
+        int same1 = memcmp(&w->tribe[2].genome, &inv[1], sizeof(Cp4Genome)) == 0;
+        CHECK(same0 && same1, "tribe: imported genomes found rival tribes");
+        free(w);
+    }
+
+    /* ================= VECTOR CORE ================= */
+    printf("\n-- vec --\n");
+
+    /* A batch lane and a single env on the same seed stay bit-identical,
+     * which is the property the whole pufferlib path rests on. */
+    {
+        CpVec *v = cp_vec_create(4, 100);
+        CpEnv *e[4];
+        float acts[4 * CP_ACT_DIM], vo[4 * CP_OBS_DIM], so[CP_OBS_DIM];
+        float vr[4], sr;
+        int32_t vt[4], vtr[4], st, str;
+        int same = 1;
+        for (int i = 0; i < 4; i++) {
+            e[i] = cp_env_create(100 + (uint32_t)i);
+            cp_env_reset(e[i], 100 + (uint32_t)i, NULL, NULL);
+        }
+        for (int t = 0; t < 300; t++) {
+            for (int i = 0; i < 4; i++) {
+                float a[CP_ACT_DIM];
+                cp_policy_greedy(cp_env_world(e[i]), a);
+                memcpy(acts + i * CP_ACT_DIM, a, sizeof(a));
+            }
+            cp_vec_step(v, acts, vo, vr, vt, vtr, 0);
+            for (int i = 0; i < 4; i++) {
+                cp_env_step(e[i], acts + i * CP_ACT_DIM, so, &sr, &st, &str);
+                if (memcmp(vo + i * CP_OBS_DIM, so, sizeof(so)) != 0) same = 0;
+                if (vr[i] != sr || vt[i] != st || vtr[i] != str) same = 0;
+            }
+        }
+        CHECK(same, "vec: cell batch lanes match single envs exactly");
+        for (int i = 0; i < 4; i++) cp_env_free(e[i]);
+        cp_vec_free(v);
+    }
+    {
+        Cp4VecBatch *v = cp4_vec_create(3, 200);
+        Cp4Env *e[3];
+        float acts[3 * CP4_ACT_DIM], vo[3 * CP4_OBS_DIM], so[CP4_OBS_DIM];
+        float vr[3], sr;
+        int32_t vt[3], vtr[3], st, str;
+        int same = 1;
+        for (int i = 0; i < 3; i++) {
+            e[i] = cp4_env_create(200 + (uint32_t)i);
+            cp4_env_reset(e[i], 200 + (uint32_t)i, NULL, NULL);
+        }
+        for (int t = 0; t < 150; t++) {
+            for (int i = 0; i < 3; i++) {
+                float a[CP4_ACT_DIM];
+                cp4_policy_greedy(cp4_env_world(e[i]), a);
+                memcpy(acts + i * CP4_ACT_DIM, a, sizeof(a));
+            }
+            cp4_vec_step(v, acts, vo, vr, vt, vtr, 0);
+            for (int i = 0; i < 3; i++) {
+                cp4_env_step(e[i], acts + i * CP4_ACT_DIM, so, &sr, &st, &str);
+                if (memcmp(vo + i * CP4_OBS_DIM, so, sizeof(so)) != 0) same = 0;
+                if (vr[i] != sr || vt[i] != st || vtr[i] != str) same = 0;
+            }
+        }
+        CHECK(same, "vec: land batch lanes match single envs exactly");
+        for (int i = 0; i < 3; i++) cp4_env_free(e[i]);
+        cp4_vec_free(v);
+    }
+
+    /* ================= SHARE CODES ================= */
+    printf("\n-- codec --\n");
+    {
+        int ok = 1;
+        CpRng rng;
+        cp_rng_seed(&rng, 8);
+        for (int i = 0; i < 60; i++) {
+            CpGenome g, h;
+            char s[CP_CODEC_CELL_STR + 1], t[CP_CODEC_CELL_STR + 1];
+            cp_genome_random(&g, &rng, CP_GEN_BUDGET[i % CP_GENERATIONS]);
+            if (!cp_codec_cell(&g, s, sizeof(s))) ok = 0;
+            if (cp_decode_cell(s, &h)) ok = 0;
+            if (!cp_codec_cell(&h, t, sizeof(t))) ok = 0;
+            if (strcmp(s, t) != 0) ok = 0;
+        }
+        {
+            /* a corrupted code must fail, not decode to a stranger */
+            CpGenome g, h;
+            char s[CP_CODEC_CELL_STR + 1];
+            cp_genome_random(&g, &rng, CP_GEN_BUDGET[0]);
+            cp_codec_cell(&g, s, sizeof(s));
+            s[6] = (s[6] == 'A') ? 'B' : 'A';
+            if (cp_decode_cell(s, &h) == 0) ok = 0;
+            if (cp_decode_cell("XX1-nonsense", &h) == 0) ok = 0;
+        }
+        CHECK(ok, "codec: cell share codes round-trip and reject corruption");
+    }
+    {
+        int ok = 1;
+        CpRng rng;
+        cp_rng_seed(&rng, 31);
+        for (int i = 0; i < 40; i++) {
+            Cp4Genome g, h;
+            char s[CP_CODEC_LAND_STR + 1], t[CP_CODEC_LAND_STR + 1];
+            cp4_genome_random(&g, &rng, CP4_GEN_BUDGET[0]);
+            cp4_genome_normalise(&g, CP4_GEN_BUDGET[0]);
+            if (!cp_codec_land(&g, s, sizeof(s))) ok = 0;
+            if (cp_decode_land(s, &h)) ok = 0;
+            if (memcmp(&g, &h, sizeof(g)) != 0) ok = 0;
+            if (!cp_codec_land(&h, t, sizeof(t))) ok = 0;
+            if (strcmp(s, t) != 0) ok = 0;
+        }
+        CHECK(ok, "codec: land share codes round-trip byte-exact");
+    }
+
+    /* ================= CODEX ================= */
+    printf("\n-- codex --\n");
+    {
+        CpdxCodex c;
+        char name[CPDX_NAME];
+        int ok = 1, full;
+        cpdx_reset(&c);
+        if (cpdx_note(&c, 1234, 3, 0, 0, 1, 100, 0.0f, 0.0f) != 1) ok = 0;
+        if (cpdx_note(&c, 1234, 3, 0, 0, 1, 200, 0.0f, 0.0f) != 0) ok = 0;
+        if (c.n != 1 || c.entry[0].sightings != 2) ok = 0;
+        cpdx_default_name(999, name);
+        if (name[0] == '\0') ok = 0;
+        for (uint32_t i = 2; i < CPDX_MAX + 10; i++)
+            cpdx_note(&c, 5000 + i, 0, 0, 0, 0, 0, 0.0f, 0.0f);
+        full = (c.n == CPDX_MAX);
+        CHECK(ok && full, "codex: first sightings fire, repeats count, it caps");
+    }
+
+    /* ================= LIVE REDESIGN ================= */
+    printf("\n-- redesign --\n");
+    {
+        CpWorld *w = (CpWorld *)malloc(sizeof(CpWorld));
+        int ev0, ok;
+        cp_world_reset(w, 61, NULL);
+        ev0 = w->design_events;
+        cp_world_redesign(w, CP_STYLE_TANK);
+        ok = (w->design_events == ev0 + 1) &&
+             (cp_genome_cost(&w->genome) <= CP_GEN_BUDGET[w->generation]);
+        {
+            int spikes = 0;
+            for (int i = 0; i < CP_MAX_PARTS; i++)
+                if (w->genome.part[i].type == CP_PART_SPIKE) spikes++;
+            if (spikes == 0) ok = 0;   /* a tank rebuild must buy spikes */
+        }
+        CHECK(ok, "redesign: the live cell rebuilds toward the style in budget");
         free(w);
     }
 

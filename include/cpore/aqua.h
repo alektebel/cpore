@@ -191,6 +191,9 @@ void cp3_world_reset(Cp3World *w, uint32_t seed, const Cp3Genome *g);
 void cp3_world_step(Cp3World *w, const float act[CP3_ACT_DIM]);
 void cp3_world_observe(const Cp3World *w, float *obs);
 void cp3_policy_greedy(const Cp3World *w, float act[CP3_ACT_DIM]);
+/* Live redesign (game editor / share codes). See cpore.h. */
+void cp3_world_redesign(Cp3World *w, int style);
+void cp3_world_apply_genome(Cp3World *w, const Cp3Genome *g);
 
 /* ambient light reaching a given depth, 1 at the surface -> ~0 at the seabed */
 float cp3_daylight(float depth);
@@ -208,6 +211,11 @@ size_t  cp3_env_state_size(void);
 void    cp3_env_save(const Cp3Env *e, void *dst);
 void    cp3_env_load(Cp3Env *e, const void *src);
 const Cp3World *cp3_env_world(const Cp3Env *e);
+/* editor from any binding (see cpore.h). */
+void    cp3_env_redesign(Cp3Env *e, int style);
+int32_t cp3_env_apply_code(Cp3Env *e, const char *code);
+int32_t cp3_env_share_code(const Cp3Env *e, char *out, size_t cap);
+int32_t cp3_env_status(const Cp3Env *e);
 /* population telemetry: counts = {births, deaths, pop},
  * means = {gen, parts, mouth, tail, light, depth} */
 void    cp3_env_census(const Cp3Env *e, int32_t *counts, float *means);

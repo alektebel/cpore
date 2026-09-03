@@ -60,6 +60,27 @@ of the items below.
   position, eight biomes off the pair, and fertility varying fivefold across
   them so a biome is a mechanic rather than a paint job. The same field colours
   the stage-4 map, because it is the same planet.
+- ~~**Stage 5: the tribe stage.**~~ Members, stores, tools, huts and five
+  neighbours on the same planet; raid and befriend as two measured mechanics
+  (19/30 vs 15/30 over 30 seeds); imported share-code genomes found rival
+  tribes, so invasions ride the arc into civ.
+- ~~**The vector core and the pufferlib path.**~~ `src/vec.c` batches N
+  worlds behind one call with flat buffers C writes straight into numpy;
+  `python/cpore/puffer.py` is a native `PufferEnv` per stage (133k/16k
+  steps/s cell/land, 64 envs). The old ctypes loop stays as the slow path.
+- ~~**Share codes.**~~ Every genome as a pasteable, checksum-checked string
+  (`src/genome_codec.c`), with live apply + redesign entry points at the C
+  and Python levels. No server; the string is the transport.
+- ~~**A real campaign wrapper.**~~ `python/cpore/campaign.py` runs
+  cell → aqua → land → tribe → civ as one episode with legacy handed
+  forward (seed 25 plays the full arc under the scripted baseline).
+- ~~**The text face for LLMs.**~~ `python/cpore/textgym.py`: situation
+  reports + a verb DSL with frame-skip, JSONL transcripts, fixed-seed
+  leaderboard scaffold.
+- ~~**The native game.**~~ `apps/cpore_game.c` + `src/glview.c`: all five
+  stages playable in one X11+GL window, GPU-presented, with an editor-lite
+  (N), share codes (C) and full-quality photo stills (F). WASM is demoted
+  to a legacy target; training and iteration happen natively.
 
 ## Next
 
@@ -79,16 +100,16 @@ has none — its fish react to what you are, never to what you have done.
 scripted with fixed stats. Give them genomes, energy, breeding and mutation so
 every stage shares one selection machinery.
 
-**11b. Stage 5: space.** The last stage Spore had, and the only one still
+**11b. Stage 6: space.** The last stage Spore had, and the only one still
 missing. It wants a different shape again — a galaxy of star systems rather
-than one planet — so it is worth doing only once the four that exist are
+than one planet — so it is worth doing only once the five that exist are
 properly balanced rather than merely working.
 
-**11c. A real campaign wrapper.** All four stages chain today, but only by hand
-in Python: play one, read what it hands forward, seed the next. A single
-`Campaign` environment that runs the whole arc as one episode would make the
-cross-stage credit assignment an actual research question rather than a
-plumbing exercise.
+**11c. A real campaign wrapper.** ~~All four stages chain today, but only by
+hand in Python~~ Done: `python/cpore/campaign.py` runs the five-stage arc as
+one episode with legacy handed forward. What remains is the fixed-shape
+padded-observation variant that lets one PPO policy train across the arc —
+that is the long-horizon credit-assignment benchmark proper.
 
 ## Larger
 
@@ -106,9 +127,10 @@ morphology-conditioned policy (GNN or transformer over the body graph) so one
 controller generalises across body plans. Full articulation for the player and
 nearest N, cheap kinematics for the rest.
 
-**14. WASM build and browser editor.** Compile sim and renderer to WebAssembly
-and put a drag-and-drop editor in the browser. Spore-like UX without adding a
-single native dependency to the C core.
+**14. WASM build and browser editor.** Demoted: the native game
+(`apps/cpore_game.c`) is the play path now, and training happens natively.
+The emscripten target still builds (`make wasm`) for link-sharing, but the
+drag-and-drop browser editor waits until the native game says it is needed.
 
 **15. Animated output and an offline path tracer.** APNG is a short step from
 the existing DEFLATE encoder, and stills badly undersell a world whose whole

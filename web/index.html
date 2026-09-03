@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>cpore — creature editor</title>
+    <style>
+      :root {
+        --ink: #3b3a36;
+        --dim: #8c8a83;
+        --paper: #f2f1ec;
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        background: var(--paper);
+        color: var(--ink);
+        font: 400 13px/1.5 ui-sans-serif, system-ui, "Helvetica Neue", sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+      #stage {
+        position: absolute;
+        inset: 0;
+        display: grid;
+        place-items: center;
+      }
+      #frame { position: relative; line-height: 0; }
+      #view {
+        cursor: grab;
+        border-radius: 3px;
+      }
+      #frame.over #view { cursor: pointer; }
+      #frame.dragging #view { cursor: grabbing; }
+      #overlay {
+        position: absolute;
+        left: 0;
+        top: 0;
+        pointer-events: none;
+      }
+      #hint {
+        position: fixed;
+        left: 50%;
+        bottom: 52px;
+        transform: translateX(-50%);
+        color: #a9a69d;
+        letter-spacing: 0.04em;
+        pointer-events: none;
+      }
+
+      .rail {
+        position: fixed;
+        top: 0;
+        bottom: 0;
+        width: 196px;
+        padding: 26px 22px;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        user-select: none;
+        overflow-y: auto;
+        scrollbar-width: none;
+      }
+      .rail::-webkit-scrollbar { display: none; }
+      .rail.left { left: 0; }
+      .rail.right { right: 0; text-align: right; }
+
+      /* thin sliders: a track, a dot, no chrome */
+      .slider {
+        display: block;
+        margin: 7px 0 0;
+        font-size: 11px;
+        color: var(--dim);
+      }
+      .slider > span {
+        display: flex;
+        justify-content: space-between;
+      }
+      .slider input {
+        -webkit-appearance: none;
+        appearance: none;
+        width: 100%;
+        height: 11px;
+        background: none;
+        cursor: ew-resize;
+        margin: 0;
+      }
+      .slider input::-webkit-slider-runnable-track {
+        height: 1px;
+        background: #d6d4cc;
+      }
+      .slider input::-webkit-slider-thumb {
+        -webkit-appearance: none;
+        width: 9px;
+        height: 9px;
+        margin-top: -4px;
+        border-radius: 50%;
+        background: var(--ink);
+      }
+      .slider input::-moz-range-track { height: 1px; background: #d6d4cc; }
+      .slider input::-moz-range-thumb {
+        width: 9px; height: 9px; border: 0; border-radius: 50%; background: var(--ink);
+      }
+      .swatch {
+        display: inline-block;
+        width: 100%;
+        height: 3px;
+        margin-top: 3px;
+      }
+
+      .label {
+        font-size: 10px;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--dim);
+        margin: 18px 0 6px;
+      }
+      .label:first-child { margin-top: 0; }
+
+      button {
+        appearance: none;
+        background: none;
+        border: 0;
+        padding: 3px 0;
+        font: inherit;
+        color: var(--ink);
+        text-align: inherit;
+        cursor: pointer;
+        opacity: 0.68;
+        transition: opacity 0.12s;
+      }
+      button:hover { opacity: 1; }
+      button.on { opacity: 1; font-weight: 600; }
+
+      #dna {
+        position: fixed;
+        top: 26px;
+        left: 50%;
+        transform: translateX(-50%);
+        text-align: center;
+        letter-spacing: 0.06em;
+        font-variant-numeric: tabular-nums;
+      }
+      #meter {
+        width: 220px;
+        height: 2px;
+        margin: 7px auto 0;
+        background: #dedcd4;
+      }
+      #meter > i {
+        display: block;
+        height: 100%;
+        background: var(--ink);
+        transition: width 0.15s;
+      }
+      #stats {
+        position: fixed;
+        left: 50%;
+        bottom: 22px;
+        transform: translateX(-50%);
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
+        gap: 4px 20px;
+        max-width: 620px;
+        color: var(--dim);
+        font-variant-numeric: tabular-nums;
+      }
+      #stats b { font-weight: 500; color: var(--ink); }
+      #perf {
+        position: fixed;
+        right: 22px;
+        bottom: 22px;
+        color: #b9b6ad;
+        font-variant-numeric: tabular-nums;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="stage">
+      <div id="frame">
+        <canvas id="view"></canvas>
+        <canvas id="overlay"></canvas>
+      </div>
+    </div>
+    <div id="hint"></div>
+
+    <div class="rail left">
+      <div class="label">body</div>
+      <div id="body"></div>
+      <div class="label">paint</div>
+      <div id="paint"></div>
+      <div class="label">start from</div>
+      <div id="styles"></div>
+      <button id="random">something random</button>
+      <button id="mutate">mutate this one</button>
+      <div class="label">view</div>
+      <button id="hold">hold still</button>
+      <button id="look">smooth</button>
+      <button id="undo">undo</button>
+    </div>
+
+    <div class="rail right">
+      <div class="label">add a part</div>
+      <div id="parts"></div>
+      <div class="label" id="sellabel">selected</div>
+      <div id="inspector"></div>
+    </div>
+
+    <div id="dna">
+      <span id="dnatext"></span>
+      <div id="meter"><i></i></div>
+    </div>
+    <div id="stats"></div>
+    <div id="perf"></div>
+
+    <script src="cpore.js"></script>
+    <script src="genome.js"></script>
+    <script src="gl.js"></script>
+    <script src="editor.js"></script>
+  </body>
+</html>

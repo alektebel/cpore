@@ -133,6 +133,7 @@ const Cp5World *cp5_env_world(const Cp5Env *e);
 /* counts: cities, captured, converted, bought, lost, units mil/eco/rel
  * vals:   money, income, bonus mil/eco/rel */
 void    cp5_env_census(const Cp5Env *e, int32_t *counts, float *vals);
+int32_t cp5_env_status(const Cp5Env *e);
 
 void cp5_render(const Cp5World *w, uint8_t *rgba, int width, int height);
 void cp5_render_styled(const Cp5World *w, uint8_t *rgba, int width, int height,

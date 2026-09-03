@@ -864,3 +864,35 @@ void cp3_policy_greedy(const Cp3World *w, float act[CP3_ACT_DIM])
     d[CP3_MAX_PARTS * 4]     = (float)(g.nseg - 2) * (2.0f / (float)(CP3_MAX_SEG - 2)) - 1.0f;
     d[CP3_MAX_PARTS * 4 + 1] = ((float)g.girth - 40.0f) / 100.0f - 1.0f;
 }
+
+/* Live redesign, as in stage 1: same refresh sequence the generation
+ * boundary runs (genome, derived body, full heal, energy), minus the
+ * progress reward. */
+void cp3_world_redesign(Cp3World *w, int style)
+{
+    Cp3Genome g;
+    if (!w || w->status != CP3_RUN) return;
+    if (style < 0 || style >= CP3_STYLE_COUNT) style = CP3_STYLE_GRAZER;
+    if (w->generation < 0 || w->generation >= CP3_GENERATIONS) return;
+    cp3_genome_autodesign(&g, &w->rng, CP3_GEN_BUDGET[w->generation], style);
+    cp3_genome_normalise(&g, CP3_GEN_BUDGET[w->generation]);
+    w->player.g = g;
+    fish_from_genome(&w->player);
+    w->player.hp = w->player.hp_max;
+    w->player.energy = clampf(w->player.energy + 40.0f, 0.0f, 160.0f);
+    w->design_events++;
+}
+
+void cp3_world_apply_genome(Cp3World *w, const Cp3Genome *g)
+{
+    Cp3Genome c;
+    if (!w || !g || w->status != CP3_RUN) return;
+    if (w->generation < 0 || w->generation >= CP3_GENERATIONS) return;
+    c = *g;
+    cp3_genome_normalise(&c, CP3_GEN_BUDGET[w->generation]);
+    w->player.g = c;
+    fish_from_genome(&w->player);
+    w->player.hp = w->player.hp_max;
+    w->player.energy = clampf(w->player.energy + 40.0f, 0.0f, 160.0f);
+    w->design_events++;
+}

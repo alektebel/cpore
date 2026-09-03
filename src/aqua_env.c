@@ -1,4 +1,5 @@
 #include "cpore/aqua.h"
+#include "cpore/codec.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -77,3 +78,25 @@ void cp3_env_census(const Cp3Env *e, int32_t *counts, float *means)
         means[5] = e->w.mean_depth;
     }
 }
+
+void cp3_env_redesign(Cp3Env *e, int style)
+{
+    if (e) cp3_world_redesign(&e->w, style);
+}
+
+int32_t cp3_env_apply_code(Cp3Env *e, const char *code)
+{
+    Cp3Genome g;
+    if (!e || !code) return -1;
+    if (cp_decode_aqua(code, &g)) return -1;
+    cp3_world_apply_genome(&e->w, &g);
+    return 0;
+}
+
+int32_t cp3_env_share_code(const Cp3Env *e, char *out, size_t cap)
+{
+    if (!e || !out) return -1;
+    return cp_codec_aqua(&e->w.player.g, out, cap) > 0 ? 0 : -1;
+}
+
+int32_t cp3_env_status(const Cp3Env *e) { return e ? e->w.status : CP3_RUN; }

@@ -34,17 +34,20 @@ minutes? Nothing that does not serve that question belongs in this phase.
 
 ### 1.1 Walk
 
-Real-time in the browser. `make wasm` (emscripten, single-threaded — no
-COOP/COEP header trouble), a shell in `web/` that maps keyboard + mouse onto
-the existing land-stage action vector and blits the frame to a canvas at an
-integer pixel scale. An interactive quality tier inside `src/render_land.c`
-— one quality struct, not a fork — targeting 320×180 at ≥30 fps. Sim ticks
-fixed at ~15 steps/s, so an episode is a ten-minute session and a day/night
-cycle passes every ~2¼ minutes.
+Real-time, natively. `make game` builds `apps/cpore_game.c`: an X11+GLX
+shell (stock system headers, no SDL) that maps keyboard onto the existing
+action vectors and presents frames on the GPU at an integer pixel scale,
+with the codex, editor-lite, share codes and photo stills built in. The
+emscripten target still builds for link-sharing but is no longer the plan's
+centre. Sim ticks fixed at ~15 steps/s, so an episode is a ten-minute
+session and a day/night cycle passes every ~2¼ minutes. (Status: DONE —
+`cpore_game` plays all five stages; the interactive first-person marcher
+remains the photo tier, the map view is the play tier.)
 
-*Code:* `Makefile`, `web/index.html`, `web/main.js`, `src/render_land.c`.
-*Done when:* ≥30 fps on a mid-range laptop; you can walk to a river and
-watch a live sunset; the 30-seed balance table is byte-identical.
+*Code:* `apps/cpore_game.c`, `src/glview.c`, map-view tier in the shell.
+*Done when:* walk the map at 60 presents/s on a mid-range laptop with an
+NVIDIA GPU; snapshot a live sunset with F; the 30-seed balance table is
+byte-identical (it is — the shell never touches the sim).
 
 ### 1.2 Pay
 
@@ -68,8 +71,11 @@ enforced in C. The test pen: a pocket world (flat ground, pond, bush, one
 rival) to try the build for 200 steps. Share codes: the genome as a short
 base64 string, so a creature is a thing you paste.
 
-*Code:* editor UI in `web/`, pocket-world flag in `src/land_env.c`,
-`src/genome_codec.c`.
+*Code:* editor keys in `apps/cpore_game.c`, live-redesign entry points in
+`src/world.c`/`aqua.c`/`land.c`, pocket-world flag in `src/land_env.c`,
+`src/genome_codec.c`. (Status: DONE except the pocket test pen — share
+strings round-trip through C and Python, N rebuilds toward any archetype at
+the current budget.)
 *Done when:* each of the six archetypes is hand-buildable in under three
 minutes; a share string round-trips through the Python binding.
 
@@ -191,6 +197,9 @@ rivalries escalate from ecology to war.
 
 ### 4.1 The tribe stage
 
+(Status: DONE — `src/tribe.c`, `include/cpore/tribe.h`, `TribeEnv`, with the
+raid/befriend fork measured at 19/30 vs 15/30 over 30 seeds.)
+
 A new rule set over the same planet, between creature and civ: your species
 settles. A handful of tribe members (the follower/nest machinery grown up),
 fire, tools, food stores, domestication of species from *your own codex*,
@@ -201,7 +210,8 @@ still matters: what your species' parts are decides what its tools extend.
 
 *Code:* `src/tribe.c`, `src/tribe_env.c`, `include/cpore/tribe.h`, a
 map-scale renderer reusing `render_civ.c`'s approach; legacy bridge in the
-same style as `cp5_legacy_from_world`.
+same style as `cp5_legacy_from_world`. (Status: DONE — sim + env ABI live in
+`src/tribe.c`, map renderer included, bridge via share codes + legacy.)
 *Done when:* three doctrines (raid, trade, charm) win over a seed table by
 genuinely different mechanics, like civ's force/trade/faith already do.
 
@@ -213,8 +223,9 @@ the bridges that exist. For the game face this is "campaign mode"; for the
 lab it is the long-horizon credit-assignment benchmark the roadmap has
 wanted all along.
 
-*Code:* `src/campaign.c` + `campaign_env.c` wrapping the per-stage envs;
-`python/cpore/campaign.py`.
+*Code:* `python/cpore/campaign.py` wrapping the per-stage envs.
+(Status: DONE for play/eval — seed 25 runs cell → civ under the scripted
+baseline. The fixed-shape single-policy variant is tracked work.)
 *Done when:* a full arc plays start to finish in one sitting, and a
 scripted baseline's campaign score exists for others to beat.
 
@@ -238,13 +249,13 @@ code pasted an hour earlier.
 ## The lab track (parallel, independent)
 
 Runs alongside all phases; nothing above depends on it and it depends on
-nothing above. (1) `src/vec.c` — SoA batch stepper, then the pufferlib
-binding in `python/cpore/puffer.py`, accepted by a measured steps/s table
-and a PPO run that beats the scripted 30-seed table. (2) The text protocol
-in `python/cpore/textgym.py` and the LLM harness, accepted by a leaderboard
-over fixed seeds: baseline / PPO / ≥2 LLMs / one human. Tournament entry by
-share code (3.2) is where the two tracks meet: humans, PPO policies and
-LLMs compete in the same table.
+nothing above. (Status: DONE as listed — (1) `src/vec.c` batch stepper plus
+`python/cpore/puffer.py` native `PufferEnv`s, accepted by the steps/s table
+in the README; a PPO run that beats the scripted 30-seed table is the open
+experiment. (2) `python/cpore/textgym.py` plus the leaderboard scaffold,
+accepted by a leaderboard over fixed seeds.) Tournament entry by share code
+(3.2) is where the two tracks meet: humans, PPO policies and LLMs compete
+in the same table.
 
 ---
 

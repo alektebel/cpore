@@ -2248,3 +2248,39 @@ void cp4_policy_greedy(const Cp4World *w, float act[CP4_ACT_DIM])
     d[CP4_MAX_PARTS * 4]     = (float)(g.nseg - 2) * (2.0f / (float)(CP4_MAX_SEG - 2)) - 1.0f;
     d[CP4_MAX_PARTS * 4 + 1] = ((float)g.girth - 50.0f) / 95.0f - 1.0f;
 }
+
+/* Live redesign, as in stages 1-2: same refresh the generation boundary runs
+ * (genome, derived body, full heal, stamina, energy), minus the progress
+ * reward. The game editor calls this; a pasted share code arrives through
+ * cp4_world_apply_genome after cp_decode_land. */
+void cp4_world_redesign(Cp4World *w, int style)
+{
+    Cp4Genome g;
+    Cp4Beast *p;
+    if (!w || w->status != CP4_RUN) return;
+    if (style < 0 || style >= CP4_STYLE_COUNT) style = CP4_STYLE_GRAZER;
+    if (w->generation < 0 || w->generation >= CP4_GENERATIONS) return;
+    cp4_genome_autodesign(&g, &w->rng, CP4_GEN_BUDGET[w->generation], style);
+    p = &w->player;
+    p->g = g;
+    beast_from_genome(p);
+    p->hp = p->hp_max;
+    p->stam = p->s.stamina;
+    p->energy = clampf(p->energy + 40.0f, 0.0f, 170.0f);
+}
+
+void cp4_world_apply_genome(Cp4World *w, const Cp4Genome *g)
+{
+    Cp4Genome c;
+    Cp4Beast *p;
+    if (!w || !g || w->status != CP4_RUN) return;
+    if (w->generation < 0 || w->generation >= CP4_GENERATIONS) return;
+    c = *g;
+    cp4_genome_normalise(&c, CP4_GEN_BUDGET[w->generation]);
+    p = &w->player;
+    p->g = c;
+    beast_from_genome(p);
+    p->hp = p->hp_max;
+    p->stam = p->s.stamina;
+    p->energy = clampf(p->energy + 40.0f, 0.0f, 170.0f);
+}

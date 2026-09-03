@@ -800,3 +800,27 @@ void cp_world_observe(const CpWorld *w, float *o)
     o[k++] = clampf((st->spike_dmg + st->jaw_dmg) / 30.0f, 0.0f, 2.5f);
     o[k++] = clampf((float)st->cost / 125.0f, 0.0f, 2.5f);
 }
+
+/* ---------------- live redesign: the game editor's entry point ----------------
+ * Rebuild the live cell at the CURRENT generation's budget, through the same
+ * apply path a generation boundary uses. No reward is granted (this is an
+ * editor, not progress), so the lab cannot farm it and the game cannot buy
+ * power with a keypress beyond what the budget allows. */
+void cp_world_redesign(CpWorld *w, int style)
+{
+    CpGenome g;
+    if (!w || w->status != CP_RUN) return;
+    if (style < 0 || style >= CP_STYLE_COUNT) style = CP_STYLE_GRAZER;
+    if (w->generation < 0 || w->generation >= CP_GENERATIONS) return;
+    cp_genome_autodesign(&g, &w->rng, CP_GEN_BUDGET[w->generation], style);
+    apply_genome(w, &g, CP_GEN_BUDGET[w->generation], 1);
+    w->design_events++;
+}
+
+void cp_world_apply_genome(CpWorld *w, const CpGenome *g)
+{
+    if (!w || !g || w->status != CP_RUN) return;
+    if (w->generation < 0 || w->generation >= CP_GENERATIONS) return;
+    apply_genome(w, g, CP_GEN_BUDGET[w->generation], 1);
+    w->design_events++;
+}

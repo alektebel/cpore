@@ -43,6 +43,9 @@ LAND_VIS = "terra"
 # angle units: 0..255 clockwise from the front of the cell
 FRONT, RIGHT, BACK, LEFT = 0, 64, 128, 192
 
+# scripted-designer styles per stage (see redesign())
+CELL_STYLES = ("grazer", "hunter", "tank", "scout")
+
 
 def genome(*parts):
     """Build a genome from (name_or_index, angle) pairs.
@@ -83,6 +86,11 @@ def _load(path=None):
     lib.cp_part_cost.restype = c_int32
     lib.cp_env_step.argtypes = [c_void_p, POINTER(c_float), POINTER(c_float),
                                 POINTER(c_float), POINTER(c_int32), POINTER(c_int32)]
+    lib.cp_env_redesign.argtypes = [c_void_p, c_int32]
+    lib.cp_env_apply_code.argtypes = [c_void_p, c_char_p]
+    lib.cp_env_apply_code.restype = c_int32
+    lib.cp_env_share_code.argtypes = [c_void_p, c_char_p, c_size_t]
+    lib.cp_env_share_code.restype = c_int32
     lib.cp_env_obs_dim.restype = c_int32
     lib.cp_env_act_dim.restype = c_int32
     lib.cp_env_state_size.restype = c_size_t
@@ -211,6 +219,25 @@ class CporeEnv:
 
     def genome_cost(self):
         return sum(PART_COST[PART[n]] for n, _ in self.genome())
+
+    def redesign(self, style="grazer"):
+        """Live editor: rebuild toward a scripted style at the current
+        generation's budget. Same refresh a generation boundary runs."""
+        if isinstance(style, str):
+            style = CELL_STYLES.index(style)
+        self._lib.cp_env_redesign(self._h, int(style))
+        return self.genome()
+
+    def apply_code(self, code: str) -> bool:
+        """Apply a pasted share-code genome to the live cell."""
+        return int(self._lib.cp_env_apply_code(self._h, code.encode())) == 0
+
+    def share_code(self) -> str:
+        """The live cell as a pasteable share string."""
+        buf = ctypes.create_string_buffer(64)
+        if int(self._lib.cp_env_share_code(self._h, buf, 64)) != 0:
+            raise RuntimeError("share_code failed")
+        return buf.value.decode()
 
     @property
     def generation(self) -> int:
@@ -341,22 +368,86 @@ AQ_PART_NAMES = ("none", "filter", "jaw", "fin", "tail",
 AQ_PART = {n: i for i, n in enumerate(AQ_PART_NAMES)}
 AQ_PART_COST = (0, 5, 12, 6, 8, 10, 6, 10, 12, 14)
 AQ_GEN_BUDGET = (40, 70, 105, 150)
+AQ_STYLES = ("grazer", "hunter", "diver")
 
 
 def aqua_genome(parts, nseg=3, girth=120):
-    """Build a 3D body plan from (name, segment, yaw, pitch) tuples.
+    """Build a 3D body plan from (name, segment, yaw, pitch[, scale, mirror]).
 
         aqua_genome([("jaw", 0, 0, 0), ("tail", 2, 128, 0)], nseg=3)
 
     yaw is 0..255 around the body axis, pitch -64..63 up/down. The simulation
-    reads both when it resolves bites, thrust and armour."""
+    reads both when it resolves bites, thrust and armour. scale/mirror
+    default to 128/0 when omitted."""
     out = []
     for p in parts:
-        t, seg, yaw, pitch = p
+        p = tuple(p)
+        t, seg, yaw, pitch = p[0], p[1], p[2], p[3]
+        scale = p[4] if len(p) > 4 else 128
+        mirror = p[5] if len(p) > 5 else 0
         if isinstance(t, str):
             t = AQ_PART[t]
-        out.append((int(t), int(seg), int(yaw) & 0xFF, int(pitch)))
+        out.append((int(t), int(seg), int(yaw) & 0xFF, int(pitch),
+                    int(scale), int(mirror)))
     return {"parts": out, "nseg": int(nseg), "girth": int(girth)}
+
+
+def _b64dec(s):
+    import base64
+    t = s.replace("-", "+").replace("_", "/")
+    t += "=" * (-len(t) % 4)
+    return base64.b64decode(t)
+
+
+def _b64check(prefix, s, n):
+    if not s.startswith(prefix):
+        raise ValueError(f"not a {prefix} share code")
+    raw = _b64dec(s[len(prefix):])
+    if len(raw) != n + 1:
+        raise ValueError("share code has wrong length")
+    h = 2166136261
+    for b in raw[:n]:
+        h = ((h ^ b) * 16777619) & 0xFFFFFFFF
+    if (h & 0xFF) != raw[n]:
+        raise ValueError("share code checksum mismatch")
+    return raw[:n]
+
+
+def cell_genome_from_code(code):
+    """Decode a CP1- share string to a parts list for CporeEnv.reset."""
+    raw = _b64check("CP1-", code, 24)
+    return [(int(raw[i * 2]), int(raw[i * 2 + 1])) for i in range(12)
+            if raw[i * 2] != 0]
+
+
+def aqua_genome_from_code(code):
+    """Decode a CP3- share string to a genome dict for AquaEnv.reset."""
+    raw = _b64check("CP3-", code, 80)
+    parts = []
+    for i in range(10):
+        t = int(raw[i * 6])
+        if t == 0:
+            continue
+        parts.append((t, int(raw[i * 6 + 1]), int(raw[i * 6 + 2]),
+                      int(raw[i * 6 + 3]) - 64, int(raw[i * 6 + 4]),
+                      int(raw[i * 6 + 5])))
+    return {"parts": parts, "nseg": int(raw[60]), "girth": int(raw[61])}
+
+
+def land_genome_from_code(code):
+    """Decode a CP4- share string to a genome dict for LandEnv.reset."""
+    raw = _b64check("CP4-", code, 157)
+    parts = []
+    o = 0
+    for _ in range(16):
+        t = int(raw[o])
+        if t != 0:
+            parts.append((t, int(raw[o + 1]), int(raw[o + 2]),
+                          int(raw[o + 3]) - 64, int(raw[o + 4]),
+                          int(raw[o + 5]), int(raw[o + 6]),
+                          int(raw[o + 7]) - 128))
+        o += 8
+    return {"parts": parts, "nseg": int(raw[o]), "girth": int(raw[o + 1])}
 
 
 def _bind_aqua(lib):
@@ -378,6 +469,11 @@ def _bind_aqua(lib):
     lib.cp3_part_name.argtypes = [c_int32]
     lib.cp3_part_name.restype = c_char_p
     lib.cp3_env_census.argtypes = [c_void_p, POINTER(c_int32), POINTER(c_float)]
+    lib.cp3_env_redesign.argtypes = [c_void_p, c_int32]
+    lib.cp3_env_apply_code.argtypes = [c_void_p, c_char_p]
+    lib.cp3_env_apply_code.restype = c_int32
+    lib.cp3_env_share_code.argtypes = [c_void_p, c_char_p, c_size_t]
+    lib.cp3_env_share_code.restype = c_int32
     return lib
 
 
@@ -428,7 +524,9 @@ class AquaEnv:
             pp = None
         else:
             flat = []
-            for t, sg, yw, pt in genome["parts"][:10]:
+            for p in genome["parts"][:10]:
+                p = tuple(p)
+                t, sg, yw, pt = p[0], p[1], p[2], p[3]
                 if isinstance(t, str):
                     t = AQ_PART[t]
                 flat += [int(t), int(sg), int(yw) & 0xFF, int(pt)]
@@ -455,6 +553,26 @@ class AquaEnv:
     def greedy_action(self):
         self._lib.cp3_policy_greedy(self._lib.cp3_env_world(self._h), self._act)
         return list(self._act)
+
+    def redesign(self, style="grazer"):
+        """Live editor (see CporeEnv.redesign)."""
+        if isinstance(style, str):
+            style = AQ_STYLES.index(style)
+        self._lib.cp3_env_redesign(self._h, int(style))
+
+    def apply_code(self, code: str) -> bool:
+        return int(self._lib.cp3_env_apply_code(self._h, code.encode())) == 0
+
+    def share_code(self) -> str:
+        buf = ctypes.create_string_buffer(128)
+        if int(self._lib.cp3_env_share_code(self._h, buf, 128)) != 0:
+            raise RuntimeError("share_code failed")
+        return buf.value.decode()
+
+    @property
+    def status(self) -> str:
+        return ("running", "dead", "evolved", "timeout")[
+            int(self._lib.cp3_env_status(self._h))]
 
     def census(self):
         """Live population statistics - what the ocean has evolved into.
@@ -560,6 +678,13 @@ def _bind_land(lib):
     lib.cp4_part_name.argtypes = [c_int32]
     lib.cp4_part_name.restype = c_char_p
     lib.cp4_env_census.argtypes = [c_void_p, POINTER(c_int32), POINTER(c_float)]
+    lib.cp4_env_redesign.argtypes = [c_void_p, c_int32]
+    lib.cp4_env_apply_code.argtypes = [c_void_p, c_char_p]
+    lib.cp4_env_apply_code.restype = c_int32
+    lib.cp4_env_share_code.argtypes = [c_void_p, c_char_p, c_size_t]
+    lib.cp4_env_share_code.restype = c_int32
+    lib.cp4_env_status.argtypes = [c_void_p]
+    lib.cp4_env_status.restype = c_int32
     lib.cp4_height.argtypes = [c_uint32, c_float, c_float]
     lib.cp4_height.restype = c_float
     lib.cp5_legacy_from_world.argtypes = [c_void_p, POINTER(c_float)]
@@ -646,6 +771,21 @@ class LandEnv:
         self._lib.cp4_policy_greedy(self._lib.cp4_env_world(self._h), self._act)
         return list(self._act)
 
+    def redesign(self, style="grazer"):
+        """Live editor (see CporeEnv.redesign)."""
+        if isinstance(style, str):
+            style = LAND_STYLES.index(style)
+        self._lib.cp4_env_redesign(self._h, int(style))
+
+    def apply_code(self, code: str) -> bool:
+        return int(self._lib.cp4_env_apply_code(self._h, code.encode())) == 0
+
+    def share_code(self) -> str:
+        buf = ctypes.create_string_buffer(256)
+        if int(self._lib.cp4_env_share_code(self._h, buf, 256)) != 0:
+            raise RuntimeError("share_code failed")
+        return buf.value.decode()
+
     def height(self, x, y=None):
         """Ground height at a world position. y grows downward, so a smaller
         number is higher ground - the same axis the aquatic stage used for
@@ -669,6 +809,11 @@ class LandEnv:
         buf = (c_float * 3)()
         self._lib.cp5_legacy_from_world(self._lib.cp4_env_world(self._h), buf)
         return {"military": buf[0], "economic": buf[1], "religious": buf[2]}
+
+    @property
+    def status(self) -> str:
+        return ("running", "dead", "evolved", "timeout")[
+            int(self._lib.cp4_env_status(self._h))]
 
     def census(self):
         """Live population and diplomacy, read through a C accessor rather than
@@ -744,6 +889,8 @@ def _bind_civ(lib):
     lib.cp5_policy_greedy.argtypes = [c_void_p, POINTER(c_float)]
     lib.cp5_render_styled.argtypes = [c_void_p, c_void_p, c_int32, c_int32, c_int32]
     lib.cp5_env_census.argtypes = [c_void_p, POINTER(c_int32), POINTER(c_float)]
+    lib.cp5_env_status.argtypes = [c_void_p]
+    lib.cp5_env_status.restype = c_int32
     lib.cp5_approach_name.argtypes = [c_int32]
     lib.cp5_approach_name.restype = c_char_p
     return lib
@@ -824,6 +971,11 @@ class CivEnv:
         self._lib.cp5_policy_greedy(self._lib.cp5_env_world(self._h), self._act)
         return list(self._act)
 
+    @property
+    def status(self) -> str:
+        return ("running", "lost", "won", "timeout")[
+            int(self._lib.cp5_env_status(self._h))]
+
     def census(self):
         self._lib.cp5_env_census(self._h, self._cnt, self._val)
         return {"cities": self._cnt[0], "captured": self._cnt[1],
@@ -851,6 +1003,164 @@ class CivEnv:
         if isinstance(v, str):
             v = VIS[v]
         self._lib.cp5_render_styled(self._lib.cp5_env_world(self._h), self._fb, w, h, v)
+        return w, h
+
+    def render(self, vis=None):
+        w, h = self._draw(vis)
+        if _np is not None:
+            return _np.frombuffer(self._fb, dtype=_np.uint8).reshape(h, w, 4).copy()
+        return self._fb.raw
+
+    def save_png(self, path: str, vis=None):
+        w, h = self._draw(vis)
+        if self._lib.cp_png_write(path.encode(), self._fb, w, h) != 0:
+            raise IOError(f"failed to write {path}")
+        return path
+
+
+# ---------------------------------------------------------------------------
+# Stage 5: tribe
+# ---------------------------------------------------------------------------
+
+TRIBE_STYLES = ("raid", "gather", "charm")
+
+
+def _bind_tribe(lib):
+    lib.cp6_env_create.argtypes = [c_uint32]
+    lib.cp6_env_create.restype = c_void_p
+    lib.cp6_env_free.argtypes = [c_void_p]
+    lib.cp6_env_reset.argtypes = [c_void_p, c_uint32, POINTER(c_int32), POINTER(c_float)]
+    lib.cp6_env_step.argtypes = [c_void_p, POINTER(c_float), POINTER(c_float),
+                                 POINTER(c_float), POINTER(c_int32), POINTER(c_int32)]
+    lib.cp6_env_obs_dim.restype = c_int32
+    lib.cp6_env_act_dim.restype = c_int32
+    lib.cp6_env_state_size.restype = c_size_t
+    lib.cp6_env_save.argtypes = [c_void_p, c_void_p]
+    lib.cp6_env_load.argtypes = [c_void_p, c_void_p]
+    lib.cp6_env_world.argtypes = [c_void_p]
+    lib.cp6_env_world.restype = c_void_p
+    lib.cp6_policy_greedy.argtypes = [c_void_p, POINTER(c_float)]
+    lib.cp6_env_census.argtypes = [c_void_p, POINTER(c_int32), POINTER(c_float)]
+    lib.cp6_env_status.argtypes = [c_void_p]
+    lib.cp6_env_status.restype = c_int32
+    return lib
+
+
+class TribeEnv:
+    """Stage 5. Settle the species the creature stage produced: members,
+    stores, tools, huts - befriend or raid five neighbours.
+
+    ``founder`` is a land genome dict (see land_genome); None settles a
+    default grazer. For the campaign arc, found from the live creature::
+
+        land = LandEnv(seed=7)   # ... play ...
+        # read the survivor's share code, then settle it:
+        tribe = TribeEnv(seed=7)
+    """
+
+    metadata = {"render_modes": ["rgb_array"]}
+
+    def __init__(self, seed: int = 0, genome=None, render_size=(1280, 720),
+                 vis=DEFAULT_VIS):
+        self._lib = _bind_tribe(lib())
+        self.obs_dim = int(self._lib.cp6_env_obs_dim())
+        self.act_dim = int(self._lib.cp6_env_act_dim())
+        self._h = self._lib.cp6_env_create(c_uint32(seed & 0xFFFFFFFF))
+        if not self._h:
+            raise MemoryError("cp6_env_create failed")
+        self._obs = (c_float * self.obs_dim)()
+        self._act = (c_float * self.act_dim)()
+        self._rew = c_float()
+        self._term = c_int32()
+        self._trunc = c_int32()
+        self._state_size = int(self._lib.cp6_env_state_size())
+        self._cnt = (c_int32 * 6)()
+        self._val = (c_float * 4)()
+        self.default_genome = genome
+        self.render_size = render_size
+        self.vis = vis
+        self._fb = None
+        self._seed = seed
+
+    def close(self):
+        if getattr(self, "_h", None):
+            self._lib.cp6_env_free(self._h)
+            self._h = None
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    def reset(self, seed=None, genome=None):
+        if seed is None:
+            seed = self._seed
+        self._seed = seed
+        genome = genome if genome is not None else self.default_genome
+        if genome is None:
+            pp = None
+        else:
+            flat = []
+            for p in genome["parts"][:LAND_MAX_PARTS]:
+                p = tuple(p)
+                p = p + (0, 0, 0, 0, 128, 0, 128, 0)[len(p):]
+                t, sg, yw, pt, sc, mr, ln, bd = p[:8]
+                if isinstance(t, str):
+                    t = LAND_PART[t]
+                flat += [int(t), int(sg), int(yw) & 0xFF, int(pt), int(sc),
+                         int(mr), int(ln), int(bd)]
+            flat += [0, 0, 0, 0, 0, 0, 128, 0] * (
+                LAND_MAX_PARTS - len(flat) // LAND_PART_FIELDS)
+            flat += [genome.get("nseg", 3), genome.get("girth", 130)]
+            pp = (c_int32 * len(flat))(*flat)
+        self._lib.cp6_env_reset(self._h, c_uint32(seed & 0xFFFFFFFF), pp, self._obs)
+        return self._out()
+
+    def step(self, action):
+        for i in range(self.act_dim):
+            self._act[i] = float(action[i])
+        self._lib.cp6_env_step(self._h, self._act, self._obs,
+                               ctypes.byref(self._rew),
+                               ctypes.byref(self._term), ctypes.byref(self._trunc))
+        return (self._out(), float(self._rew.value),
+                bool(self._term.value), bool(self._trunc.value), {})
+
+    def _out(self):
+        if _np is not None:
+            return _np.frombuffer(self._obs, dtype=_np.float32).copy()
+        return list(self._obs)
+
+    def greedy_action(self):
+        self._lib.cp6_policy_greedy(self._lib.cp6_env_world(self._h), self._act)
+        return list(self._act)
+
+    @property
+    def status(self) -> str:
+        return ("running", "lost", "won", "timeout")[
+            int(self._lib.cp6_env_status(self._h))]
+
+    def census(self):
+        self._lib.cp6_env_census(self._h, self._cnt, self._val)
+        return {"members": self._cnt[0], "allied": self._cnt[1],
+                "razed": self._cnt[2], "gifts": self._cnt[3],
+                "raids": self._cnt[4], "loot": self._cnt[5],
+                "stores": self._val[0], "gathered": self._val[1],
+                "standing": self._val[2], "score": self._val[3]}
+
+    def save_state(self) -> bytes:
+        buf = ctypes.create_string_buffer(self._state_size)
+        self._lib.cp6_env_save(self._h, buf)
+        return buf.raw
+
+    def load_state(self, blob: bytes):
+        self._lib.cp6_env_load(self._h, ctypes.create_string_buffer(blob, len(blob)))
+
+    def _draw(self, vis=None):
+        w, h = self.render_size
+        if self._fb is None:
+            self._fb = ctypes.create_string_buffer(w * h * 4)
+        self._lib.cp6_render_styled(self._lib.cp6_env_world(self._h), self._fb, w, h, 0)
         return w, h
 
     def render(self, vis=None):
