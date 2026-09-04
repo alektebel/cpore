@@ -17,7 +17,7 @@ static float clampf(float v, float a, float b) { return v < a ? a : (v > b ? b :
 int main(int argc, char **argv)
 {
     uint32_t seed = 5;
-    int steps = 3000, W = 1280, H = 720, every = 0, vis = CP_VIS_TERRA, gallery = 0, table = 0,
+    int steps = 3000, W = 1280, H = 720, every = 0, vis = CP_VIS_VISTA, gallery = 0, table = 0,
         climate = 0, nseeds = 12, map = 0, sheet = 0;
     float span = 24000.0f;
     const char *out = "land.png";
@@ -84,7 +84,12 @@ int main(int argc, char **argv)
         }
         const int cols = 2, rows = 2;
         const int tw = W / cols, th = H / rows;
-        const int lw = tw / 2, lh = th / 2;
+        /* Tiles render at half size and double up for the pixel styles,
+         * because that is the look; the continuous ones render at the size
+         * they are shown at, because for those the doubling is just a
+         * resolution the renderer was never allowed to use. */
+        const int ss = cp_vis_continuous(vis) ? 1 : 2;
+        const int lw = tw / ss, lh = th / ss;
         uint8_t *tile = (uint8_t *)malloc((size_t)lw * lh * 4);
         uint8_t *fb2 = (uint8_t *)malloc((size_t)W * H * 4);
         if (!tile || !fb2) { fprintf(stderr, "oom\n"); return 1; }
@@ -98,7 +103,7 @@ int main(int argc, char **argv)
             int ox = (i % cols) * tw, oy = (i / cols) * th;
             for (int y = 0; y < th; y++)
                 for (int x = 0; x < tw; x++) {
-                    const uint8_t *sp = tile + 4 * ((size_t)(y / 2) * lw + (x / 2));
+                    const uint8_t *sp = tile + 4 * ((size_t)(y / ss) * lw + (x / ss));
                     uint8_t *dp = fb2 + 4 * ((size_t)(oy + y) * W + (ox + x));
                     dp[0] = sp[0]; dp[1] = sp[1]; dp[2] = sp[2]; dp[3] = 255;
                 }
@@ -294,10 +299,12 @@ int main(int argc, char **argv)
     if (gallery > 0) {
         const int cols = 4, rows = 2;
         const int tw = W / cols, th = H / rows;
-        /* Half, not a quarter. A creature editor's gallery is the one place
-         * the pixels are all subject, and at 80x90 a tail and a pair of
-         * arms are the same three pixels. */
-        const int lw = tw / 2, lh = th / 2;
+        /* Tiles render at half size and double up for the pixel styles,
+         * because that is the look; the continuous ones render at the size
+         * they are shown at, because for those the doubling is just a
+         * resolution the renderer was never allowed to use. */
+        const int ss = cp_vis_continuous(vis) ? 1 : 2;
+        const int lw = tw / ss, lh = th / ss;
         uint8_t *tile = (uint8_t *)malloc((size_t)lw * lh * 4);
         uint8_t *fb2 = (uint8_t *)malloc((size_t)W * H * 4);
         if (!tile || !fb2) { fprintf(stderr, "oom\n"); return 1; }
@@ -314,7 +321,7 @@ int main(int argc, char **argv)
             int ox = (i % cols) * tw, oy = (i / cols) * th;
             for (int y = 0; y < th; y++) {
                 for (int x = 0; x < tw; x++) {
-                    const uint8_t *sp = tile + 4 * ((size_t)(y / 2) * lw + (x / 2));
+                    const uint8_t *sp = tile + 4 * ((size_t)(y / ss) * lw + (x / ss));
                     uint8_t *dp = fb2 + 4 * ((size_t)(oy + y) * W + (ox + x));
                     dp[0] = sp[0]; dp[1] = sp[1]; dp[2] = sp[2]; dp[3] = 255;
                 }

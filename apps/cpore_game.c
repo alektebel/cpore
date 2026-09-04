@@ -132,23 +132,14 @@ static void map_dot(Game *g, uint8_t *fb, float camx, float camz,
 static void draw_land(Game *g, uint8_t *fb)
 {
     Cp4World *w = &g->l;
-    float camx = w->player.p.x, camz = w->player.p.z;
-    float dim = 0.35f + 0.65f * cp4_daylight(w->step);
     int i;
-    map_terrain(g, fb, camx, camz, 640.0f, 360.0f, dim);
-    for (i = 0; i < w->n_flora; i++) {
-        Cp4Flora *f = &w->flora[i];
-        if (f->type == CP4_FLORA_NONE) continue;
-        if (f->type == CP4_FLORA_BUSH) map_dot(g, fb, camx, camz, 640, 360, f->p.x, f->p.z, 0, 60, 200, 80);
-        else if (f->type == CP4_FLORA_KELP) map_dot(g, fb, camx, camz, 640, 360, f->p.x, f->p.z, 0, 40, 180, 160);
-        else if (f->type == CP4_FLORA_TUBER) map_dot(g, fb, camx, camz, 640, 360, f->p.x, f->p.z, 0, 170, 130, 70);
-        else map_dot(g, fb, camx, camz, 640, 360, f->p.x, f->p.z, 0, 200, 60, 60);
-    }
+    /* continuous tone: the cached-heightfield marcher, atmosphere doing the
+     * drawing, grass and gait breathing with the step */
+    cp4_render_vista(w, fb, FW, FH);
     for (i = 0; i < CP4_MAX_BEASTS; i++) {
         Cp4Beast *b = &w->beast[i];
         uint32_t hh;
         if (!b->alive) continue;
-        map_dot(g, fb, camx, camz, 640, 360, b->p.x, b->p.z, 0, 240, 240, 240);
         /* codex: first sighting of a lineage is an event */
         hh = cpdx_hash_bytes((const uint8_t *)&b->g, (uint32_t)sizeof(b->g));
         if (hh) {
@@ -161,19 +152,6 @@ static void draw_land(Game *g, uint8_t *fb)
                 g->banner_t = 180;
             }
         }
-    }
-    for (i = 0; i < CP4_MAX_NESTS; i++) {
-        if (!w->nest[i].alive) continue;
-        map_dot(g, fb, camx, camz, 640, 360, w->nest[i].p.x, w->nest[i].p.z, 1, 250, 220, 90);
-    }
-    if (w->home.alive)
-        map_dot(g, fb, camx, camz, 640, 360, w->home.p.x, w->home.p.z, 1, 90, 220, 255);
-    /* player + facing */
-    map_dot(g, fb, camx, camz, 640, 360, w->player.p.x, w->player.p.z, 1, 255, 255, 255);
-    {
-        float fx = cosf(w->player.yaw), fz = sinf(w->player.yaw);
-        map_dot(g, fb, camx, camz, 640, 360,
-                w->player.p.x + fx * 14.0f, w->player.p.z + fz * 14.0f, 0, 255, 80, 80);
     }
 }
 
@@ -318,7 +296,7 @@ static void photo(Game *g)
     if (g->stage == 0) {
         uint8_t *hi = malloc(1280 * 720 * 4);
         snprintf(path, sizeof(path), "game_cell_%u.png", g->seed);
-        cp_render_styled(&g->w, hi, 1280, 720, CP_VIS_ABYSS);
+        cp_render_styled(&g->w, hi, 1280, 720, CP_VIS_POND);
         cp_png_write(path, hi, 1280, 720);
         free(hi);
     } else if (g->stage == 1) {
@@ -328,10 +306,10 @@ static void photo(Game *g)
         cp_png_write(path, hi, 1280, 720);
         free(hi);
     } else if (g->stage == 2) {
-        uint8_t *hi = malloc(640 * 360 * 4);
+        uint8_t *hi = malloc(1280 * 720 * 4);
         snprintf(path, sizeof(path), "game_land_%u.png", g->seed);
-        cp4_render_styled(&g->l, hi, 640, 360, CP_VIS_TERRA);
-        cp_png_write(path, hi, 640, 360);
+        cp4_render_vista(&g->l, hi, 1280, 720);
+        cp_png_write(path, hi, 1280, 720);
         free(hi);
     } else if (g->stage == 3) {
         snprintf(path, sizeof(path), "game_tribe_%u.png", g->seed);
@@ -567,7 +545,7 @@ int main(int argc, char **argv)
 
         /* ---- present ---- */
         memset(fb, 0, (size_t)FW * FH * 4);
-        if (g.stage == 0) cp_render_styled(&g.w, fb, FW, FH, CP_VIS_ABYSS);
+        if (g.stage == 0) cp_render_styled(&g.w, fb, FW, FH, CP_VIS_POND);
         else if (g.stage == 1) {
             if ((frame % 3) == 0) cp3_render_styled(&g.a, fb, FW, FH, CP_VIS_ABYSS);
         } else if (g.stage == 2) draw_land(&g, fb);

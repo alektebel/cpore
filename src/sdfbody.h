@@ -76,6 +76,14 @@ typedef struct {
     float em;
     float body;        /* 1 for trunk, 0 for appendages - only the trunk
                         * carries the pattern genes */
+    /* Which genome slot put this here, or -1 for the trunk. Geometry does not
+     * need it and neither renderer reads it while shading; an editor does,
+     * because "which part did I just click on" has no other honest answer
+     * than asking the same field the picture was made from. Stamped by the
+     * builder after the fact rather than passed through push(), which would
+     * mean touching every call site in two stages for a field most of them
+     * have nothing to say about. */
+    int   part;
 } Prim;
 
 static void push(Prim *out, int *n, V3 a, V3 b, float ra, float rb,
@@ -85,6 +93,7 @@ static void push(Prim *out, int *n, V3 a, V3 b, float ra, float rb,
     Prim *p = &out[(*n)++];
     p->a = a; p->b = b; p->ra = ra; p->rb = rb; p->k = k;
     p->col = col; p->em = em; p->body = body;
+    p->part = -1;
 }
 
 /* round cone: a segment with a radius that varies along it. Approximate (the

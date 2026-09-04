@@ -37,6 +37,25 @@ extern "C" {
 #define CP_DNA_GOAL    100.0f
 #define CP_GENERATIONS 4          /* redesigns at 25/50/75 DNA, then evolve */
 
+/* The size rule, which is the whole stage in one number.
+ *
+ * Attrition by contact damage makes size a modifier. Swallowing makes it the
+ * question you are always answering: a cell this much bigger than you eats you
+ * whole, a cell this much smaller is lunch, and everything between the two is
+ * a fight. That single threshold is why you count your own growth, why some
+ * shapes are worth fleeing on sight, and why the meter reads as a ladder
+ * rather than a score.
+ *
+ * The two directions are deliberately not symmetric. Swimming into something
+ * small enough swallows it at once, which is what makes growing feel like
+ * anything; being swallowed takes a fraction of a second of continuous
+ * contact, so a predator has to actually hold onto you. Symmetry would be
+ * tidier and worse: a cell that kills you on the frame it grazes you is
+ * unreadable, and the only lesson available from it is to never touch
+ * anything. */
+#define CP_GULP        1.55f
+#define CP_GULP_HOLD   0.28f      /* seconds in a bigger mouth before it closes */
+
 /* ------------------------------------------------------------------ *
  * Parts - the cell stage roster.
  *
@@ -79,7 +98,24 @@ typedef struct {
 /* observation shape */
 #define CP_OBS_FOOD_K  8
 #define CP_OBS_CELL_K  6
-#define CP_OBS_DIM     (13 + CP_OBS_FOOD_K * 4 + CP_OBS_CELL_K * 6 + (CP_PART_COUNT - 1) + 6)
+/* The layout, named rather than recomputed.
+ *
+ * These used to be one expression with a literal 13 in front of it, and the
+ * literal was duplicated in the tests to find where the cell block starts.
+ * Adding two self terms moved every block and the duplicate silently pointed
+ * at the wrong floats - the test still ran, still measured something, and was
+ * measuring the wrong columns. Deriving CP_OBS_DIM from the same constants any
+ * reader indexes with means the two cannot disagree again.
+ *
+ * The self block is 15: vitals, position against the four walls, and two for
+ * where the body is in its own propulsion stroke - thrust is modulated by the
+ * beat, so a policy that cannot see the beat cannot explain its own
+ * acceleration. */
+#define CP_OBS_SELF       15
+#define CP_OBS_FOOD_BASE  CP_OBS_SELF
+#define CP_OBS_CELL_BASE  (CP_OBS_FOOD_BASE + CP_OBS_FOOD_K * 4)
+#define CP_OBS_PART_BASE  (CP_OBS_CELL_BASE + CP_OBS_CELL_K * 6)
+#define CP_OBS_DIM        (CP_OBS_PART_BASE + (CP_PART_COUNT - 1) + 6)
 
 /* action shape: steering x/y, flagella burst, electric discharge, then a
  * design head of (type, angle) per slot. The design head is read only at a
@@ -170,6 +206,7 @@ typedef struct {
     float    dna;
     int32_t  generation;
     float    boost_cd, elec_cd, elec_flash;
+    float    gulp_hold;         /* seconds held inside something bigger */
 
     CpFood   food[CP_MAX_FOOD];
     int32_t  n_food;
@@ -185,7 +222,8 @@ typedef struct {
     /* episode bookkeeping */
     float    reward;
     int32_t  status;            /* CP_RUN / CP_DEAD / ... */
-    int32_t  ate_plant, ate_meat, kills, hits_taken, discharges;
+    int32_t  ate_plant, ate_meat, kills, hits_taken, discharges, deaths;
+    int32_t  gulps, gulped;     /* cells swallowed whole, and times swallowed */
     float    dmg_dealt, dmg_taken;   /* higher-resolution than kill counts */
     int32_t  design_events;     /* how many times the design head was applied */
     float    dist_travelled;
@@ -199,6 +237,26 @@ void  cp_world_observe(const CpWorld *w, float *obs /* CP_OBS_DIM */);
  * genome. Same refresh the generation boundary runs, minus the reward. */
 void  cp_world_redesign(CpWorld *w, int style);
 void  cp_world_apply_genome(CpWorld *w, const CpGenome *g);
+
+/* Come back from being eaten.
+ *
+ * Dying in a cell stage is a setback, not an ending: you keep the body you
+ * designed, you lose ground on the meter, and you are put back in the water
+ * somewhere else. cp_world_step still reports CP_DEAD - a caller that wants
+ * the episode to end there can have it - but a caller that wants the stage
+ * the way it is actually played calls this and carries on.
+ *
+ * Returns the DNA it cost. */
+float cp_world_respawn(CpWorld *w);
+
+/* How far up the size ladder the player is: 0, 1 or 2.
+ *
+ * The cell stage is played three times over at three scales - what ate you in
+ * the first is food in the third - and the tier is what the camera, the spawn
+ * table and the difficulty ramp all read. It is a pure function of the meter,
+ * so it needs no state of its own. */
+int   cp_world_tier(const CpWorld *w);
+#define CP_TIERS 3
 
 /* scripted baseline: fills the whole action vector, design head included. */
 void  cp_policy_greedy(const CpWorld *w, float act[CP_ACT_DIM]);
@@ -235,15 +293,36 @@ int32_t cp_env_status(const CpEnv *e);
 
 /* ---- rendering (optional; pure function of world state) ---- */
 
-/* Visual styles. Each moves internal resolution, palette, camera scale, dither
- * strength and outline treatment together - they are not palette swaps. */
+/* Visual styles.
+ *
+ * The first six are pixel-art styles: each moves internal resolution, palette,
+ * camera scale, dither strength and outline treatment together, and they are
+ * not palette swaps. CP_VIS_DROP is not one of them - it is a separate
+ * continuous-tone paths with no palette, no dither and no upscale: `drop` is
+ * stage 1's and `vista` is stage 3's. Asking a stage for a continuous style
+ * that is not its own gets that stage's default back. */
 enum { CP_VIS_ABYSS = 0, CP_VIS_DMG, CP_VIS_NEON, CP_VIS_PETRI, CP_VIS_C64,
-       CP_VIS_TERRA, CP_VIS_COUNT };
+       CP_VIS_TERRA, CP_VIS_DROP, CP_VIS_VISTA, CP_VIS_POND, CP_VIS_COUNT };
 const char *cp_vis_name(int style);
+/* 0 for the pixel-art styles, 1 for the continuous-tone ones. Callers that
+ * share the pixel pipeline (quantise/blit/text) must not use it on a style
+ * that answers 1. */
+int         cp_vis_continuous(int style);
 
 void cp_render(const CpWorld *w, uint8_t *rgba, int width, int height);
 void cp_render_styled(const CpWorld *w, uint8_t *rgba, int width, int height,
                       int style);
+/* Stage 1's continuous-tone renderer: an HDR darkfield plate, resolved
+ * straight to the output resolution. Reachable through cp_render_styled with
+ * CP_VIS_DROP; exposed because it is a genuinely different pipeline rather
+ * than another entry in the style table. */
+void cp_render_drop(const CpWorld *w, uint8_t *rgba, int width, int height);
+/* Stage 1's other continuous-tone renderer, and the inverse of `drop`:
+ * brightfield instead of darkfield. The water is full of light, organisms are
+ * opaque objects lit from a fixed key, and depth reads as loss of contrast
+ * rather than loss of brightness. Reachable through cp_render_styled with
+ * CP_VIS_POND. */
+void cp_render_pond(const CpWorld *w, uint8_t *rgba, int width, int height);
 
 /* Shared pixel pipeline, so stage 2 draws through exactly the same palette,
  * dither and upscale rather than growing a second look. */
@@ -262,6 +341,36 @@ void cp_px_text(uint8_t *fb, int32_t W, int32_t H, int32_t x, int32_t y,
                 int32_t sc, const char *s, float r, float g, float b, float a);
 int32_t cp_px_text_w(const char *s, int32_t sc);
 int  cp_png_write(const char *path, const uint8_t *rgba, int width, int height);
+
+/* ---- playing it by hand ----
+ *
+ * The same nine directions, boost and discharge the PufferLib environment
+ * uses, because a key press and an action index being the same number is what
+ * makes a person and a policy players of one game rather than two. Flat ABI -
+ * a handle, ints, one byte buffer - so ctypes and WebAssembly both call it
+ * without a binding layer. */
+typedef struct CpPlay CpPlay;
+CpPlay *cp_play_create(int32_t w, int32_t h, uint32_t seed);
+void    cp_play_free(CpPlay *p);
+void    cp_play_reset(CpPlay *p, uint32_t seed);
+void    cp_play_style(CpPlay *p, int32_t style);
+/* Start from a given body: CP_MAX_PARTS pairs of (type, angle), or NULL for
+ * the starter cell. Same shape cp_env_reset takes. */
+void    cp_play_load(CpPlay *p, const int32_t *parts);
+/* move 0..8 (0 drifts, 1..8 are the compass from N clockwise), boost, zap.
+ * Returns the world status. Death respawns rather than ending the run. */
+int32_t cp_play_step(CpPlay *p, int32_t move, int32_t boost, int32_t zap);
+void    cp_play_render(CpPlay *p, uint8_t *rgba);
+int32_t cp_play_stat_count(void);
+/* dna, goal, tier, generation, hp%, parts, plants, meat, kills, deaths,
+ * step, status, speed in tenths */
+void    cp_play_stats(const CpPlay *p, int32_t *out);
+const CpWorld *cp_play_world(const CpPlay *p);
+/* What the scripted baseline would press, in the player's own action space:
+ * the move index, with boost in bit 0 and discharge in bit 1 of *aux. An
+ * attract loop, a hint, and a check that the key path and the action path are
+ * one path. */
+int32_t cp_play_hint(const CpPlay *p, int32_t *aux);
 
 #ifdef __cplusplus
 }

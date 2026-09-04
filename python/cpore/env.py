@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import ctypes
 import os
-from ctypes import POINTER, c_float, c_int32, c_uint32, c_void_p, c_size_t, c_char_p
+from ctypes import (POINTER, c_float, c_int, c_int32, c_uint8, c_uint32,
+                    c_void_p, c_size_t, c_char_p)
 
 try:
     import numpy as _np
@@ -33,12 +34,12 @@ GEN_BUDGET = (30, 55, 85, 125)
 STATUS = ("running", "dead", "evolved", "timeout")
 
 # render styles; index == the CP_VIS_* enum value
-VIS_STYLES = ("abyss", "dmg", "neon", "petri", "c64", "terra")
+VIS_STYLES = ("abyss", "dmg", "neon", "petri", "c64", "terra", "drop", "vista")
 VIS = {n: i for i, n in enumerate(VIS_STYLES)}
-DEFAULT_VIS = "abyss"
+DEFAULT_VIS = "drop"
 # The land stage renders through its own palette at twice the resolution;
 # the water palette has no sky in it.
-LAND_VIS = "terra"
+LAND_VIS = "vista"
 
 # angle units: 0..255 clockwise from the front of the cell
 FRONT, RIGHT, BACK, LEFT = 0, 64, 128, 192
@@ -657,6 +658,304 @@ def land_genome(parts, nseg=3, girth=130):
         out.append((int(t), int(seg), int(yaw) & 0xFF, int(pitch),
                     int(scale), 1 if mirror else 0, int(ln), int(bend)))
     return {"parts": out, "nseg": int(nseg), "girth": int(girth)}
+
+
+
+# ---------------------------------------------------------------- creature
+# editor
+#
+# The C side deliberately does not expose Cp4Genome across the boundary: the
+# struct has grown a field twice, and every layout ctypes mirrors is a promise
+# to keep it. What crosses instead is a handle, integers and flat arrays, so
+# this binding never has to know what a body plan looks like in memory.
+
+_EDIT_BOUND = [False]
+
+
+def _bind_edit(lib):
+    if _EDIT_BOUND[0]:
+        return
+    lib.cp4_edit_create.argtypes = [c_int32, c_int32, c_int32]
+    lib.cp4_edit_create.restype = c_void_p
+    lib.cp4_edit_free.argtypes = [c_void_p]
+    lib.cp4_edit_budget.argtypes = [c_void_p, c_int32]
+    lib.cp4_edit_load.argtypes = [c_void_p, POINTER(c_int32), c_int32, c_int32]
+    lib.cp4_edit_random.argtypes = [c_void_p, c_uint32]
+    lib.cp4_edit_style.argtypes = [c_void_p, c_int32]
+    lib.cp4_edit_mutate.argtypes = [c_void_p, c_uint32, c_float]
+    lib.cp4_edit_view.argtypes = [c_void_p, c_float, c_float, c_float, c_float]
+    lib.cp4_edit_orbit.argtypes = [c_void_p, c_float, c_float]
+    lib.cp4_edit_get_view.argtypes = [c_void_p, POINTER(c_float)]
+    lib.cp4_edit_render.argtypes = [c_void_p, POINTER(c_uint8), c_int32]
+    lib.cp4_edit_surface.argtypes = [c_void_p, c_int32, c_int32, POINTER(c_int32)]
+    lib.cp4_edit_surface.restype = c_int32
+    lib.cp4_edit_pick.argtypes = [c_void_p, c_int32, c_int32]
+    lib.cp4_edit_pick.restype = c_int32
+    lib.cp4_edit_extent.argtypes = [c_void_p, c_int32, POINTER(c_int32)]
+    lib.cp4_edit_extent.restype = c_int32
+    lib.cp4_edit_remove.argtypes = [c_void_p, c_int32]
+    lib.cp4_edit_remove.restype = c_int32
+    lib.cp4_edit_drop.argtypes = [c_void_p, c_int32, c_int32, c_int32, c_int32]
+    lib.cp4_edit_drop.restype = c_int32
+    lib.cp4_edit_move.argtypes = [c_void_p, c_int32, c_int32, c_int32]
+    lib.cp4_edit_move.restype = c_int32
+    lib.cp4_edit_shape.argtypes = [c_void_p, c_int32, c_int32, c_int32, c_int32]
+    lib.cp4_edit_shape.restype = c_int32
+    lib.cp4_edit_mirror.argtypes = [c_void_p, c_int32, c_int32]
+    lib.cp4_edit_mirror.restype = c_int32
+    lib.cp4_edit_spine_pick.argtypes = [c_void_p, c_int32, c_int32, c_float]
+    lib.cp4_edit_spine_pick.restype = c_int32
+    lib.cp4_edit_spine_drag.argtypes = [c_void_p, c_int32, c_int32, c_int32]
+    lib.cp4_edit_spine_drag.restype = c_int32
+    lib.cp4_edit_spine_girth.argtypes = [c_void_p, c_int32, c_float]
+    lib.cp4_edit_spine_set.argtypes = [c_void_p, c_int32, c_int32, c_int32, c_int32]
+    lib.cp4_edit_paint.argtypes = [c_void_p, c_int32, c_int32, c_int32, c_int32, c_int32]
+    lib.cp4_edit_coats.argtypes = [c_void_p, c_int32, c_int32, c_int32, c_int32]
+    lib.cp4_edit_cost.argtypes = [c_void_p]
+    lib.cp4_edit_cost.restype = c_int32
+    lib.cp4_edit_budget_get.argtypes = [c_void_p]
+    lib.cp4_edit_budget_get.restype = c_int32
+    lib.cp4_edit_can_afford.argtypes = [c_void_p, c_int32, c_int32]
+    lib.cp4_edit_can_afford.restype = c_int32
+    lib.cp4_edit_genome.argtypes = [c_void_p, POINTER(c_int32)]
+    lib.cp4_edit_body.argtypes = [c_void_p, POINTER(c_int32)]
+    lib.cp4_edit_stat_count.restype = c_int32
+    lib.cp4_edit_stats.argtypes = [c_void_p, POINTER(c_float)]
+    lib.cp4_edit_finish.argtypes = [c_void_p, POINTER(c_int32)]
+    _EDIT_BOUND[0] = True
+
+
+EDIT_STATS = ("speed", "accel", "turn", "jump", "grip", "hp", "armor",
+              "bite", "claw", "graze", "carn", "sight", "hearing", "charm",
+              "reach", "carry", "stamina", "swim", "fly", "dig")
+
+PATTERNS = ("plain", "bands", "spots", "counter", "stripes", "mottle",
+            "gradient", "rings")
+PATTERN = {n: i for i, n in enumerate(PATTERNS)}
+
+
+class CreatureEditor:
+    """An open editing session on one body plan.
+
+    Everything that takes a position takes it in pixels, where a mouse would
+    be, because the renderer and the picker are the same march - so a part
+    dropped on a pixel lands on the surface that pixel showed.
+
+        ed = CreatureEditor(480, 480)
+        ed.style("predator")
+        slot = ed.pick(240, 240)          # what is under the pointer
+        ed.drop(260, 200, "horn")         # put a horn there
+        ed.paint(hue=150, sat=220)
+        ed.save_png("creature.png")
+    """
+
+    def __init__(self, width=480, height=480, budget=None, lib_path=None):
+        self._lib = _load(lib_path)
+        _bind_edit(self._lib)
+        if budget is None:
+            budget = LAND_GEN_BUDGET[-1]
+        self._h = self._lib.cp4_edit_create(int(width), int(height), int(budget))
+        if not self._h:
+            raise RuntimeError("could not open a creature editor")
+        self.width, self.height = int(width), int(height)
+        self._fb = (c_uint8 * (self.width * self.height * 4))()
+        self._parts = (c_int32 * (LAND_MAX_PARTS * LAND_PART_FIELDS))()
+        self._body = (c_int32 * 13)()
+        self._stats = (c_float * len(EDIT_STATS))()
+
+    def close(self):
+        if getattr(self, "_h", None):
+            self._lib.cp4_edit_free(self._h)
+            self._h = None
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        self.close()
+
+    # ---- loading ----
+    def load(self, plan):
+        """Take a land_genome() dict, or a list of part tuples."""
+        if isinstance(plan, dict):
+            parts, nseg, girth = plan["parts"], plan["nseg"], plan["girth"]
+        else:
+            d = land_genome(plan)
+            parts, nseg, girth = d["parts"], d["nseg"], d["girth"]
+        buf = (c_int32 * (LAND_MAX_PARTS * LAND_PART_FIELDS))()
+        for i, p in enumerate(parts[:LAND_MAX_PARTS]):
+            for j, val in enumerate(p[:LAND_PART_FIELDS]):
+                buf[i * LAND_PART_FIELDS + j] = int(val)
+        self._lib.cp4_edit_load(self._h, buf, int(nseg), int(girth))
+        return self
+
+    def style(self, name_or_index):
+        i = LAND_STYLES.index(name_or_index) if isinstance(name_or_index, str) \
+            else int(name_or_index)
+        self._lib.cp4_edit_style(self._h, i)
+        return self
+
+    def random(self, seed=0):
+        self._lib.cp4_edit_random(self._h, int(seed) & 0xFFFFFFFF)
+        return self
+
+    def mutate(self, seed=0, rate=0.25):
+        self._lib.cp4_edit_mutate(self._h, int(seed) & 0xFFFFFFFF, float(rate))
+        return self
+
+    # ---- camera ----
+    def view(self, azimuth=None, elev=None, zoom=None, phase=None):
+        cur = (c_float * 4)()
+        self._lib.cp4_edit_get_view(self._h, cur)
+        self._lib.cp4_edit_view(
+            self._h,
+            float(cur[0] if azimuth is None else azimuth),
+            float(cur[1] if elev is None else elev),
+            float(cur[2] if zoom is None else zoom),
+            float(cur[3] if phase is None else phase))
+        return self
+
+    def orbit(self, dazimuth=0.0, delev=0.0):
+        self._lib.cp4_edit_orbit(self._h, float(dazimuth), float(delev))
+        return self
+
+    # ---- interaction, in pixels ----
+    def surface(self, x, y):
+        """Where on the body a pixel lands, as (seg, yaw, pitch), or None if
+        the pointer is off the animal. This is the hover question; pick() is
+        the "what did I grab" question and says None over bare trunk."""
+        buf = (c_int32 * 3)()
+        if not self._lib.cp4_edit_surface(self._h, int(x), int(y), buf):
+            return None
+        return (int(buf[0]), int(buf[1]), int(buf[2]))
+
+    def pick(self, x, y):
+        """Which part slot is under a pixel, or None."""
+        s = self._lib.cp4_edit_pick(self._h, int(x), int(y))
+        return None if s < 0 else s
+
+    def extent(self, slot):
+        """Where a part sits on screen: (cx, cy, tip_x, tip_y, radius) in
+        pixels, or None if the slot is empty. Projected from the geometry, so
+        it costs nothing next to a pick - which is what makes it usable for
+        drag handles that follow the part every frame."""
+        if not self._lib.cp4_edit_extent(self._h, int(slot), self._parts):
+            return None
+        return tuple(self._parts[i] for i in range(5))
+
+    def drop(self, x, y, part, mirror=-1):
+        """Place a part where the pointer is. Returns the slot, or None if it
+        missed the body, there was no slot free, or the budget said no - and
+        in every one of those cases nothing changed."""
+        t = LAND_PART[part] if isinstance(part, str) else int(part)
+        s = self._lib.cp4_edit_drop(self._h, int(x), int(y), t, int(mirror))
+        return None if s < 0 else s
+
+    def move(self, slot, x, y):
+        return bool(self._lib.cp4_edit_move(self._h, int(slot), int(x), int(y)))
+
+    def remove(self, slot):
+        return bool(self._lib.cp4_edit_remove(self._h, int(slot)))
+
+    def shape(self, slot, scale=-1, length=-1, bend=-1000):
+        return bool(self._lib.cp4_edit_shape(self._h, int(slot), int(scale),
+                                             int(length), int(bend)))
+
+    def mirror(self, slot, on=True):
+        return bool(self._lib.cp4_edit_mirror(self._h, int(slot), 1 if on else 0))
+
+    def spine_pick(self, x, y, grab=14.0):
+        v = self._lib.cp4_edit_spine_pick(self._h, int(x), int(y), float(grab))
+        return None if v < 0 else v
+
+    def spine_drag(self, vert, x, y):
+        return bool(self._lib.cp4_edit_spine_drag(self._h, int(vert), int(x), int(y)))
+
+    def spine_girth(self, vert, amount):
+        return bool(self._lib.cp4_edit_spine_girth(self._h, int(vert), float(amount)))
+
+    def spine(self, nseg=-1, girth=-1, arch=-2000, sweep=-2000):
+        self._lib.cp4_edit_spine_set(self._h, int(nseg), int(girth),
+                                     int(arch), int(sweep))
+        return self
+
+    # ---- paint ----
+    def paint(self, hue=-1, hue2=-1, hue3=-1, sat=-1, val=-1):
+        self._lib.cp4_edit_paint(self._h, int(hue), int(hue2), int(hue3),
+                                 int(sat), int(val))
+        return self
+
+    def coats(self, pattern=-1, scale=-1, pattern2=-1, scale2=-1):
+        p = PATTERN[pattern] if isinstance(pattern, str) else int(pattern)
+        q = PATTERN[pattern2] if isinstance(pattern2, str) else int(pattern2)
+        self._lib.cp4_edit_coats(self._h, p, int(scale), q, int(scale2))
+        return self
+
+    # ---- readback ----
+    @property
+    def cost(self):
+        return int(self._lib.cp4_edit_cost(self._h))
+
+    @property
+    def budget(self):
+        return int(self._lib.cp4_edit_budget_get(self._h))
+
+    def can_afford(self, part, mirror=0):
+        t = LAND_PART[part] if isinstance(part, str) else int(part)
+        return bool(self._lib.cp4_edit_can_afford(self._h, t, int(mirror)))
+
+    def parts(self):
+        """[(slot, name, seg, yaw, pitch, scale, mirror, len, bend), ...]"""
+        self._lib.cp4_edit_genome(self._h, self._parts)
+        out = []
+        for i in range(LAND_MAX_PARTS):
+            f = self._parts[i * LAND_PART_FIELDS:(i + 1) * LAND_PART_FIELDS]
+            if f[0] == 0:
+                continue
+            out.append((i, LAND_PART_NAMES[f[0]]) + tuple(int(x) for x in f[1:]))
+        return out
+
+    def body(self):
+        self._lib.cp4_edit_body(self._h, self._body)
+        k = ("nseg", "girth", "arch", "sweep", "hue", "hue2", "hue3",
+             "sat", "val", "pattern", "pscale", "pattern2", "pscale2")
+        return dict(zip(k, (int(x) for x in self._body)))
+
+    def stats(self):
+        self._lib.cp4_edit_stats(self._h, self._stats)
+        return dict(zip(EDIT_STATS, (float(x) for x in self._stats)))
+
+    def finish(self):
+        """Compact the slots and hand back a plan the environment accepts."""
+        buf = (c_int32 * (LAND_MAX_PARTS * LAND_PART_FIELDS))()
+        self._lib.cp4_edit_finish(self._h, buf)
+        parts = []
+        for i in range(LAND_MAX_PARTS):
+            f = buf[i * LAND_PART_FIELDS:(i + 1) * LAND_PART_FIELDS]
+            if f[0] == 0:
+                continue
+            parts.append(tuple(int(x) for x in f))
+        b = self.body()
+        return {"parts": parts, "nseg": b["nseg"], "girth": b["girth"]}
+
+    # ---- pixels ----
+    def render(self, quality=2):
+        """RGBA bytes, width*height*4. quality 0 is what you draw while the
+        mouse is moving; 3 is supersampled and slow."""
+        self._lib.cp4_edit_render(self._h, self._fb, int(quality))
+        return bytes(self._fb)
+
+    def save_png(self, path, quality=3):
+        self._lib.cp4_edit_render(self._h, self._fb, int(quality))
+        self._lib.cp_png_write(path.encode(), self._fb,
+                               c_int(self.width), c_int(self.height))
+        return path
 
 
 def _bind_land(lib):

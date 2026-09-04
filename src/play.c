@@ -1,0 +1,190 @@
+/* Playing the cell stage, by hand.
+ *
+ * The same simulation the PufferLib environment steps and the same action
+ * space it uses - nine directions, a boost and a discharge - because the point
+ * of that action space was always that a key press and an action index are the
+ * same number. A person driving this and a policy driving the environment are
+ * playing one game, not two that resemble each other, and if they ever come
+ * apart it will be visible here first.
+ *
+ * The ABI is flat on purpose: an opaque handle, ints, and one byte buffer. It
+ * is the same shape as the creature editor's, so ctypes and WebAssembly can
+ * both call it without a binding layer, and the browser build needs no runtime
+ * beyond the two hundred lines in wasm/shim.c.
+ */
+
+#include "cpore/cpore.h"
+
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+
+struct CpPlay {
+    CpWorld  w;
+    int      W, H;
+    int      style;
+    uint32_t seed;
+    /* Held across steps so the HUD can report a run rather than a frame. */
+    int32_t  best_dna;
+};
+
+typedef struct CpPlay CpPlay;
+
+/* The nine directions, identical to the ones puffer/cell.h uses. Duplicated
+ * rather than shared because the alternative is for the simulation to depend
+ * on the environment, and the direction of that dependency is the one thing
+ * this project has been careful about from the start. The test in
+ * tests/test_core.c checks the two tables agree. */
+static const float PLAY_MX[9] = { 0.0f,  0.0f,  0.7071f, 1.0f,  0.7071f,
+                                  0.0f, -0.7071f, -1.0f, -0.7071f };
+static const float PLAY_MY[9] = { 0.0f, -1.0f, -0.7071f, 0.0f,  0.7071f,
+                                  1.0f,  0.7071f,  0.0f, -0.7071f };
+
+CpPlay *cp_play_create(int32_t w, int32_t h, uint32_t seed)
+{
+    if (w < 64 || h < 64) return NULL;
+    CpPlay *p = (CpPlay *)calloc(1, sizeof(CpPlay));
+    if (!p) return NULL;
+    p->W = w; p->H = h;
+    p->seed = seed;
+    p->style = CP_VIS_POND;
+    cp_world_reset(&p->w, seed, NULL);
+    return p;
+}
+
+void cp_play_free(CpPlay *p) { free(p); }
+
+void cp_play_reset(CpPlay *p, uint32_t seed)
+{
+    if (!p) return;
+    p->seed = seed;
+    p->best_dna = 0;
+    cp_world_reset(&p->w, seed, NULL);
+}
+
+void cp_play_style(CpPlay *p, int32_t style)
+{
+    if (!p) return;
+    if (style < 0 || style >= CP_VIS_COUNT) style = CP_VIS_POND;
+    p->style = style;
+}
+
+/* One frame. Returns the world status, so the page can tell "still going"
+ * from "you evolved" without reading the stats block.
+ *
+ * Death respawns rather than ending, which is what the stage does when a
+ * person is playing it: being eaten costs a chunk of the meter and puts you
+ * back in the water. The environment makes the same choice for the same
+ * reason. */
+int32_t cp_play_step(CpPlay *p, int32_t move, int32_t boost, int32_t zap)
+{
+    if (!p) return CP_DEAD;
+    if (move < 0 || move > 8) move = 0;
+
+    float act[CP_ACT_DIM];
+    memset(act, 0, sizeof(act));
+    act[0] = PLAY_MX[move];
+    act[1] = PLAY_MY[move];
+    act[2] = boost ? 1.0f : 0.0f;
+    act[3] = zap ? 1.0f : 0.0f;
+
+    cp_world_step(&p->w, act);
+    if ((int32_t)p->w.dna > p->best_dna) p->best_dna = (int32_t)p->w.dna;
+    if (p->w.status == CP_DEAD) cp_world_respawn(&p->w);
+    return p->w.status;
+}
+
+void cp_play_render(CpPlay *p, uint8_t *rgba)
+{
+    if (!p || !rgba) return;
+    cp_render_styled(&p->w, rgba, p->W, p->H, p->style);
+}
+
+/* Start from a given body.
+ *
+ * parts is CP_MAX_PARTS pairs of (type, angle), or NULL for the starter cell -
+ * the same shape cp_env_reset takes, so a build described once can be handed
+ * to the environment or to a player without translation. Out-of-range values
+ * are clamped rather than rejected and the budget is enforced by
+ * cp_genome_normalise, so a caller cannot smuggle in a body it cannot pay for.
+ *
+ * This exists because the three propulsors now feel different to drive and
+ * there was no way to ask for one: every session began with the starter cell
+ * and the difference was unreachable from the front end. */
+void cp_play_load(CpPlay *p, const int32_t *parts)
+{
+    if (!p) return;
+    CpGenome g;
+    if (parts) {
+        cp_genome_clear(&g);
+        for (int i = 0; i < CP_MAX_PARTS; i++) {
+            int t = parts[i * 2], a = parts[i * 2 + 1];
+            if (t < 0) t = 0;
+            if (t >= CP_PART_COUNT) t = CP_PART_COUNT - 1;
+            g.part[i].type = (uint8_t)t;
+            g.part[i].angle = (uint8_t)(a & 0xFF);
+        }
+        cp_genome_normalise(&g, CP_GEN_BUDGET[CP_GENERATIONS - 1]);
+    } else {
+        cp_genome_starter(&g);
+    }
+    p->best_dna = 0;
+    cp_world_reset(&p->w, p->seed, &g);
+}
+
+/* Everything a scoreboard could want, as one flat array so the caller needs no
+ * struct layout knowledge. */
+#define CP_PLAY_STATS 13
+int32_t cp_play_stat_count(void) { return CP_PLAY_STATS; }
+
+void cp_play_stats(const CpPlay *p, int32_t *out)
+{
+    if (!p || !out) return;
+    const CpWorld *w = &p->w;
+    out[0]  = (int32_t)w->dna;
+    out[1]  = (int32_t)CP_DNA_GOAL;
+    out[2]  = cp_world_tier(w);
+    out[3]  = w->generation;
+    out[4]  = (int32_t)(w->player.hp_max > 0.0f
+                        ? w->player.hp / w->player.hp_max * 100.0f : 0.0f);
+    out[5]  = w->stats.n_parts;
+    out[6]  = w->ate_plant;
+    out[7]  = w->ate_meat;
+    out[8]  = w->kills;
+    out[9]  = w->deaths;
+    out[10] = w->step;
+    out[11] = w->status;
+    /* Speed, so a front end can plot it. Tenths, because the array is ints and
+     * the whole point of plotting it is to see a ripple of a few percent. */
+    out[12] = (int32_t)(sqrtf(w->player.vx * w->player.vx
+                              + w->player.vy * w->player.vy) * 10.0f);
+}
+
+const CpWorld *cp_play_world(const CpPlay *p) { return p ? &p->w : NULL; }
+
+/* What the scripted policy would press.
+ *
+ * The same baseline the PufferLib environment scores against, projected onto
+ * the same nine directions a person presses - so this is not a demo mode that
+ * cheats with privileged control, it is the reference agent playing the game
+ * through the player's own interface. That makes it useful for three things
+ * at once: an attract loop, a hint for someone stuck, and a visible check that
+ * the keyboard path and the action path really are the same path.
+ *
+ * Returns the move index; boost and discharge come back through `aux` as bit 0
+ * and bit 1 so the whole action fits one call. */
+int32_t cp_play_hint(const CpPlay *p, int32_t *aux)
+{
+    if (!p) { if (aux) *aux = 0; return 0; }
+    float act[CP_ACT_DIM];
+    cp_policy_greedy(&p->w, act);
+
+    int best = 0;
+    float bd = 0.30f;                 /* below this it is not really steering */
+    for (int k = 1; k < 9; k++) {
+        float d = act[0] * PLAY_MX[k] + act[1] * PLAY_MY[k];
+        if (d > bd) { bd = d; best = k; }
+    }
+    if (aux) *aux = (act[2] > 0.5f ? 1 : 0) | (act[3] > 0.5f ? 2 : 0);
+    return best;
+}

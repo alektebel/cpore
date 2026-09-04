@@ -1,0 +1,383 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cpore Cell Stage</title>
+<style>
+  /* One visual world, and it is the renderer's. The page is a frame around a
+     lit pond, so it is pale and cool rather than the dark chrome the editor
+     wears - a black surround around a bright image makes the image look
+     washed out, which is the opposite of what this renderer is for. */
+  :root {
+    --bg: #dfe7ea; --panel: #f3f7f8; --line: #b9c8cd;
+    --ink: #16262c; --dim: #5b737c; --hot: #1d7f6e; --warn: #b0402f;
+    --ui: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --mono: ui-monospace, SFMono-Regular, Menlo, "DejaVu Sans Mono", monospace;
+  }
+  * { box-sizing: border-box; }
+  html { background: var(--bg); }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 13px/1.5 var(--ui);
+    display: flex; flex-direction: column; align-items: center;
+    gap: 10px; padding: 14px; min-height: 100vh;
+  }
+  header { max-width: 62ch; text-align: center; }
+  h1 { font-size: 15px; letter-spacing: .2em; text-transform: uppercase;
+       margin: 0 0 4px; font-weight: 650; }
+  header p { margin: 0; color: var(--dim); }
+  #stage { position: relative; }
+  canvas { display: block; border: 1px solid var(--line); border-radius: 3px;
+           background: #cfdde1; max-width: 100%; height: auto; cursor: crosshair; }
+  #boot { position: absolute; inset: 0; display: grid; place-items: center;
+          background: var(--panel); color: var(--dim); border-radius: 3px; }
+  #hud { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center;
+         max-width: 960px; }
+  .chip { background: var(--panel); border: 1px solid var(--line);
+          border-radius: 3px; padding: 3px 9px; font-family: var(--mono);
+          font-variant-numeric: tabular-nums; font-size: 12px; }
+  .chip b { color: var(--hot); font-weight: 650; }
+  .chip.bad b { color: var(--warn); }
+  kbd { font-family: var(--mono); background: var(--panel); font-size: 11px;
+        border: 1px solid var(--line); border-radius: 3px; padding: 0 4px; }
+  #keys { color: var(--dim); font-size: 12px; }
+  :focus-visible { outline: 2px solid var(--hot); outline-offset: 2px; }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Cell Stage</h1>
+  <p>Eat, grow, and do not be eaten. Anything much smaller than you is food and
+     anything much bigger will swallow you whole, so the only question that
+     matters is size &mdash; yours against whatever is nearest.</p>
+</header>
+
+<div id="stage">
+  <canvas id="view" width="960" height="540" tabindex="0"
+          aria-label="cell stage viewport"></canvas>
+  <div id="boot">loading&hellip;</div>
+</div>
+
+<div id="hud"></div>
+<div id="keys">
+  <kbd>WASD</kbd> / <kbd>arrows</kbd> swim &middot;
+  <kbd>shift</kbd> burst &middot;
+  <kbd>space</kbd> discharge &middot;
+  <kbd>R</kbd> new pond &middot;
+  <kbd>V</kbd> switch renderer &middot;
+  <kbd>H</kbd> let the baseline play &middot;
+  <kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> cilia / flagella / jet
+</div>
+
+<script type="module">
+/* The browser side of the playable cell stage.
+ *
+ * The module underneath is cpore's own C compiled to wasm32 by clang, with no
+ * toolchain runtime under it: the transcendentals it cannot express as
+ * WebAssembly instructions are imported from here, because the browser already
+ * has a correctly rounded math library.
+ *
+ * The one hazard: growing WebAssembly's linear memory detaches every
+ * ArrayBuffer view onto it. So nothing here caches a view - they are remade on
+ * demand, and every call into C is assumed to have invalidated whatever was
+ * held before it.
+ */
+const MATH = {
+  sinf: Math.sin, cosf: Math.cos, tanf: Math.tan,
+  asinf: Math.asin, acosf: Math.acos, atanf: Math.atan,
+  atan2f: Math.atan2, powf: Math.pow, expf: Math.exp, logf: Math.log,
+  fmodf: (a, b) => a % b,
+};
+
+const W = 960, H = 540;
+const STYLES = ['pond', 'drop'];
+const STYLE_ID = { pond: 8, drop: 6 };
+
+const cv = document.getElementById('view');
+const ctx = cv.getContext('2d', { alpha: false });
+const $ = id => document.getElementById(id);
+
+const bin = await (await fetch('./cell.wasm')).arrayBuffer();
+const { instance } = await WebAssembly.instantiate(bin, { env: MATH });
+const X = instance.exports;
+
+const u8 = () => new Uint8Array(X.memory.buffer);
+const i32 = () => new Int32Array(X.memory.buffer);
+
+const handle = X.cp_play_create(W, H, (Math.random() * 1e9) | 0);
+if (!handle) throw new Error('cp_play_create failed');
+const fb = X.cp_wasm_alloc(W * H * 4);
+const statsPtr = X.cp_wasm_alloc(X.cp_play_stat_count() * 4);
+const img = new ImageData(new Uint8ClampedArray(W * H * 4), W, H);
+const auxPtr = X.cp_wasm_alloc(4);
+const partsPtr = X.cp_wasm_alloc(12 * 2 * 4);   /* CP_MAX_PARTS pairs */
+
+/* Three bodies that differ only in what pushes them.
+ *
+ * The propulsors have genuinely different duty cycles now - cilia are many
+ * hairs out of step so the sum is nearly continuous, a jet is a hard pulse and
+ * a refill - and until this there was no way to ask for one: every session
+ * began with the starter cell and the difference was unreachable. Same mouth,
+ * same eye, same count, so the only variable is the stroke. */
+const PART = { FILTER: 1, CILIA: 4, FLAGELLA: 5, JET: 6, EYE: 10 };
+const BUILDS = {
+  Digit1: ['cilia',    PART.CILIA],
+  Digit2: ['flagella', PART.FLAGELLA],
+  Digit3: ['jet',      PART.JET],
+};
+let buildName = 'starter';
+
+function loadBuild(type, name) {
+  const m = i32(), b = partsPtr >> 2;
+  m.fill(0, b, b + 12 * 2);
+  m[b + 0] = PART.FILTER; m[b + 1] = 0;
+  for (let i = 1; i <= 3; i++) { m[b + i * 2] = type; m[b + i * 2 + 1] = 120 + i * 6; }
+  m[b + 8] = PART.EYE; m[b + 9] = 24;
+  X.cp_play_load(handle, partsPtr);
+  buildName = name;
+  trace.length = 0;
+}
+
+/* A rolling speed trace. The stroke modulates thrust within a beat, and a few
+ * percent of ripple is not something you can see in a swimming cell - so it is
+ * plotted. This is the claim made visible rather than asserted. */
+const trace = [];
+const TRACE_N = 260;
+let styleIdx = 0;
+/* Attract mode: the scripted baseline pressing the player's own keys. Not a
+ * demo with privileged control - it goes through the same nine directions,
+ * which is what makes it worth watching and worth trusting. */
+let demo = new URLSearchParams(location.search).has('demo');
+
+/* ---- input ----
+ *
+ * Held keys, not key events: a game read from keydown alone stutters at the
+ * OS repeat delay, and one read from keypress cannot express two directions at
+ * once. The set is sampled once per frame, which is also exactly how an action
+ * is sampled from a policy - the two paths meet at the same nine integers. */
+const held = new Set();
+const CODE = {
+  KeyW: 'up', ArrowUp: 'up', KeyS: 'down', ArrowDown: 'down',
+  KeyA: 'left', ArrowLeft: 'left', KeyD: 'right', ArrowRight: 'right',
+  ShiftLeft: 'boost', ShiftRight: 'boost', Space: 'zap',
+};
+
+/* (dx, dy) to the same nine directions the environment uses. Index 0 is
+ * drift, then the compass from north, clockwise. */
+const DIR = [
+  [8, 1, 2],   /* dy = -1: NW  N  NE */
+  [7, 0, 3],   /* dy =  0: W   .  E  */
+  [6, 5, 4],   /* dy = +1: SW  S  SE */
+];
+function moveIndex() {
+  const dx = (held.has('right') ? 1 : 0) - (held.has('left') ? 1 : 0);
+  const dy = (held.has('down') ? 1 : 0) - (held.has('up') ? 1 : 0);
+  return DIR[dy + 1][dx + 1];
+}
+
+addEventListener('keydown', e => {
+  const k = CODE[e.code];
+  if (k) { held.add(k); e.preventDefault(); }
+  if (e.code === 'KeyR') { X.cp_play_reset(handle, (Math.random() * 1e9) | 0); }
+  if (e.code === 'KeyH') { demo = !demo; held.clear(); }
+  if (BUILDS[e.code]) { const [n, t] = BUILDS[e.code]; loadBuild(t, n); }
+  if (e.code === 'KeyV') {
+    styleIdx = (styleIdx + 1) % STYLES.length;
+    X.cp_play_style(handle, STYLE_ID[STYLES[styleIdx]]);
+  }
+});
+addEventListener('keyup', e => { const k = CODE[e.code]; if (k) held.delete(k); });
+addEventListener('blur', () => held.clear());
+
+/* ---- the loop ---- */
+const NAMES = ['dna', 'goal', 'tier', 'gen', 'hp', 'parts',
+               'plants', 'meat', 'kills', 'deaths', 'step', 'status', 'speed'];
+
+function readStats() {
+  X.cp_play_stats(handle, statsPtr);
+  const m = i32(), b = statsPtr >> 2;
+  return Object.fromEntries(NAMES.map((n, i) => [n, m[b + i]]));
+}
+
+function paintHud(s) {
+  const pct = Math.round(s.dna / s.goal * 100);
+  $('hud').innerHTML = [
+    ['dna', `${pct}%`, false],
+    ['tier', `${s.tier + 1}/3`, false],
+    ['gen', `${s.gen + 1}/4`, false],
+    ['health', `${s.hp}%`, s.hp < 34],
+    ['parts', s.parts, false],
+    ['eaten', s.plants + s.meat, false],
+    ['kills', s.kills, false],
+    ['deaths', s.deaths, s.deaths > 0],
+  ].map(([k, v, bad]) =>
+    `<span class="chip${bad ? ' bad' : ''}">${k} <b>${v}</b></span>`).join('');
+}
+
+/* Drawn over the frame, bottom right, small. Auto-scaled to its own window so
+ * a 7% ripple on a fast body and a 34% ripple on a slow one are both legible;
+ * the numbers beside it are what stop that autoscale from being misleading. */
+function paintTrace() {
+  if (trace.length < 4) return;
+  const w = 250, h = 62, x0 = W - w - 16, y0 = H - h - 16;
+  let lo = Infinity, hi = -Infinity;
+  for (const v of trace) { if (v < lo) lo = v; if (v > hi) hi = v; }
+  const span = Math.max(hi - lo, 1e-3);
+  ctx.save();
+  ctx.fillStyle = 'rgba(243,247,248,.80)';
+  ctx.fillRect(x0, y0, w, h);
+  ctx.strokeStyle = '#b9c8cd'; ctx.lineWidth = 1;
+  ctx.strokeRect(x0 + .5, y0 + .5, w - 1, h - 1);
+  ctx.beginPath();
+  trace.forEach((v, i) => {
+    const px = x0 + 4 + (w - 8) * i / (TRACE_N - 1);
+    const py = y0 + h - 16 - (h - 24) * (v - lo) / span;
+    i ? ctx.lineTo(px, py) : ctx.moveTo(px, py);
+  });
+  ctx.strokeStyle = '#1d7f6e'; ctx.lineWidth = 1.5; ctx.stroke();
+  const ripple = hi > 0 ? (hi - lo) / ((hi + lo) / 2) * 100 : 0;
+  ctx.fillStyle = '#16262c';
+  ctx.font = '11px ui-monospace, monospace';
+  ctx.fillText(`${buildName}  speed ${trace[trace.length-1].toFixed(0)}`
+               + `  ripple ${ripple.toFixed(0)}%`, x0 + 6, y0 + h - 5);
+  ctx.restore();
+}
+
+function frame() {
+  let mv, bo, za;
+  if (demo) {
+    mv = X.cp_play_hint(handle, auxPtr);
+    const a = i32()[auxPtr >> 2];
+    bo = a & 1; za = (a >> 1) & 1;
+  } else {
+    mv = moveIndex();
+    bo = held.has('boost') ? 1 : 0;
+    za = held.has('zap') ? 1 : 0;
+  }
+  X.cp_play_step(handle, mv, bo, za);
+  X.cp_play_render(handle, fb);
+  img.data.set(u8().subarray(fb, fb + W * H * 4));
+  ctx.putImageData(img, 0, 0);
+  const st = readStats();
+  trace.push(st.speed / 10);
+  if (trace.length > TRACE_N) trace.shift();
+  paintTrace();
+  paintHud(st);
+  requestAnimationFrame(frame);
+}
+
+$('boot').remove();
+cv.focus();
+requestAnimationFrame(frame);
+
+/* The module's insides, so a harness outside it can drive the real thing
+ * rather than a copy of it. */
+window.cpore = {
+  X, handle,
+  press: k => held.add(k),
+  release: k => held.delete(k),
+  stats: readStats,
+  moveIndex,
+  loadBuild: (t, n) => loadBuild(t, n),
+  PART,
+  demo: on => { demo = on; held.clear(); },
+};
+
+/* ---- a scripted session, for the harness ----
+ *
+ * ?selftest=1 plays the game the way a person does: it holds keys, lets frames
+ * run, and then asserts that things which should follow from playing actually
+ * did. The point is to test the whole chain - key to action index to
+ * simulation to pixels - rather than any one link, because every link here has
+ * been wrong at some point and only the chain is observable. */
+if (new URLSearchParams(location.search).has('selftest')) {
+  const log = [];
+  const ok = (c, m) => log.push(`${c ? 'ok  ' : 'FAIL'} ${m}`);
+  const wait = n => new Promise(r => {
+    let i = 0;
+    const tick = () => (++i >= n ? r() : requestAnimationFrame(tick));
+    requestAnimationFrame(tick);
+  });
+
+  await wait(5);
+  const start = readStats();
+  ok(start.goal > 0, `stats readable (goal ${start.goal})`);
+
+  /* every key maps to a distinct direction, and no key means drift */
+  held.clear();
+  ok(moveIndex() === 0, 'no key held is drift, not north');
+  const seen = new Set();
+  for (const [k, d] of [['up', 1], ['right', 3], ['down', 5], ['left', 7]]) {
+    held.clear(); held.add(k);
+    seen.add(moveIndex());
+    ok(moveIndex() === d, `${k} maps to direction ${d}`);
+  }
+  held.clear(); held.add('up'); held.add('right');
+  ok(moveIndex() === 2, 'two keys make a diagonal');
+  held.clear();
+
+  /* the frame is a picture, not a blank buffer */
+  await wait(3);
+  const px = ctx.getImageData(0, 0, W, H).data;
+  let lo = 255, hi = 0, sum = 0;
+  for (let i = 0; i < px.length; i += 4 * 97) {
+    const v = (px[i] + px[i + 1] + px[i + 2]) / 3;
+    if (v < lo) lo = v;
+    if (v > hi) hi = v;
+    sum += v;
+  }
+  const mean = sum / (px.length / (4 * 97));
+  ok(hi - lo > 60, `frame has range (${lo|0}..${hi|0})`);
+  ok(mean > 60, `frame is a lit pond, not a dark one (mean ${mean|0})`);
+
+  /* holding a direction actually moves the cell */
+  const before = window.cpore.X.cp_play_world(handle);
+  const p0 = readStats().step;
+  held.add('right');
+  await wait(40);
+  held.clear();
+  const p1 = readStats().step;
+  ok(p1 > p0 + 20, `time advances while playing (${p1 - p0} steps)`);
+
+  /* and playing for a while feeds it: the meter has to be reachable by
+   * something a person could actually do */
+  let best = 0;
+  for (let round = 0; round < 24; round++) {
+    held.clear();
+    held.add(['up', 'right', 'down', 'left'][round % 4]);
+    if (round % 3 === 0) held.add('boost');
+    await wait(25);
+    best = Math.max(best, readStats().dna);
+  }
+  held.clear();
+  const end = readStats();
+  ok(end.plants + end.meat > 0, `eating works while playing (${end.plants + end.meat} eaten)`);
+  ok(end.dna > 0, `the meter moves (${end.dna}/${end.goal})`);
+  ok(end.hp > 0, `still alive, or respawned, after ${end.step} steps`);
+
+  /* both renderers still render */
+  for (const s of STYLES) {
+    X.cp_play_style(handle, STYLE_ID[s]);
+    await wait(2);
+    const d = ctx.getImageData(0, 0, W, H).data;
+    let m = 0;
+    for (let i = 0; i < d.length; i += 4 * 401) m += d[i] + d[i + 1] + d[i + 2];
+    ok(m > 0, `renderer '${s}' draws`);
+  }
+  X.cp_play_style(handle, STYLE_ID.pond);
+
+  const pre = document.createElement('pre');
+  pre.id = 'selftest';
+  pre.style.cssText = 'position:absolute;left:8px;top:8px;color:#0d2b25;'
+    + 'font-size:12px;margin:0;z-index:9;background:#f3f7f8ee;padding:8px 10px;'
+    + 'border:1px solid #b9c8cd;border-radius:3px;line-height:1.5';
+  pre.textContent = log.join('\n');
+  $('stage').appendChild(pre);
+  document.title = log.some(l => l.startsWith('FAIL')) ? 'SELFTEST FAIL' : 'SELFTEST PASS';
+}
+</script>
+</body>
+</html>

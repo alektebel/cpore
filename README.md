@@ -7,18 +7,22 @@ reinforcement learning environment rather than a game.
 
 Dependencies: `libc` and `libm`. No SDL, no OpenGL, no zlib, no stb.
 
-The sim core stays that way on purpose: it is the part the RL loop runs.
-Playing it needs a window and a GPU, so those live one layer out — the
+That screenshot is a renderer written from scratch, and so is the PNG it was
+compressed into. The cell stage draws through `drop`: a linear HDR buffer at
+the output resolution, analytically antialiased primitives, four octaves of
+bloom, a filmic tonemap and a lens pass, with no palette and no upscale
+anywhere in it. The organising idea is darkfield illumination — light a
+specimen obliquely and you see only what it scattered, so the field goes black
+and anything transparent blazes along its edges. It is how pond water is
+actually photographed, and it means a cell reads by its rim rather than its
+fill, which costs one `sqrt` per pixel.
+
+The sim core stays dependency-free on purpose: it is the part the RL loop
+runs. Playing it needs a window and a GPU, so those live one layer out — the
 native game shell (`apps/cpore_game.c` + `src/glview.c`, X11+GLX from the
 stock system headers) presents frames on the GPU while the sim stays
-dependency-free. `make game` runs it; no browser, no install, no WASM.
-
-That screenshot is a pixel-art pipeline written from scratch: the scene is
-rasterised into a small buffer with hard-edged primitives (coverage is
-thresholded at the pixel centre, never blended), quantised to a fixed palette
-with 4x4 ordered dithering, then blown up with nearest-neighbour. The PNG was
-compressed by a DEFLATE implementation in this repo — the small palette also
-cut the file from ~500KB to ~60KB, since few colours suit LZ77 well.
+dependency-free. `make game` runs it; no browser, no install. The other
+pixel-art styles are still there, and `--vis abyss` gets the old look back.
 
 ```
 make && make test && make bench
@@ -29,7 +33,10 @@ make && make test && make bench
 ./build/cpore_game --stage land --seed 7            # play it natively (X11+GL)
 ./build/cpore_tribe --table --seeds 30              # the tribe fork in numbers
 ./build/cpore_space --table                         # the galactic fork in numbers
+./build/cpore_shot --vis abyss --out pixels.png     # the original pixel look
 ```
+
+![a quieter frame](docs/cell_drop.png)
 
 ## Stage 2: aquatic, in 3D
 
@@ -535,9 +542,7 @@ likes seeing new things will choose to go.
 | ![savanna](docs/land_savanna.png) | ![from the air](docs/land_air.png) |
 
 None of this touches the simulation: the 30-seed table came back byte-identical
-after the whole pass. It does cost render time — a 640x360 frame is about eight
-seconds, four times the 320x180 styles, and the terrain marcher is the whole of
-it. Rendering is off the training path entirely, which is the point of having
+after the whole pass. Rendering is off the training path entirely, which is the point of having
 kept `cp4_world_step` a pure function of state all along.
 
 ## Stage 4: civilisation
@@ -806,7 +811,11 @@ src/env.c               RL wrapper: reset/step/observe/save/load + editor entry 
 src/aqua_genome.c       3D body plans: parts, costs, mutation
 src/aqua.c              the aquatic simulation, including the breeding population
 src/aqua_env.c          stage-2 RL wrapper
-src/land_genome.c       land body plans: parts, budgets, styles
+src/land_genome.c       land body plans: parts, budgets, styles, editing
+src/land_edit.c         the editor session ABI: handles, ints, flat arrays
+wasm/shim.c             the whole C runtime the browser build needs
+wasm/cpore-edit.js      the JS side of that ABI
+wasm/editor.html        the creature editor, in a browser
 src/land.c              the creature simulation: four media, nests, impress-or-eat
 src/land_env.c          stage-3 RL wrapper
 src/civ.c               the civilisation simulation: cities, units, doctrines
@@ -818,7 +827,12 @@ src/vec.c               batch stepper: N worlds, one call, flat buffers (the puf
 src/genome_codec.c      share codes: every genome as a pasteable string
 src/codex.c             the discovery codex: first sightings as events
 src/glview.c            native GPU present path (X11+GLX; NOT in libcpore)
-src/render.c            pixel-art rasteriser, five styles, palette-quantised
+src/render.c            pixel-art rasteriser, six styles, palette-quantised
+src/render_cell.c       stage 1's HDR darkfield renderer: the `drop` style
+src/render_terra.c      stage 3's HDR landscape renderer: the `vista` style
+src/hdrcanvas.h         linear float buffer, AA primitives, bloom, film chain
+src/landbody.h          stage-3 genome to round cones, and the three coats
+src/pixfont.h           the 5x7 font, shared by every path
 src/sdfbody.h           the shared SDF body: round cones under a smooth minimum
 src/render3d.c          sphere-impostor z-buffer renderer for stage 2
 src/render_land.c       ray-marched heightfield, sky and creatures for stage 3
@@ -991,15 +1005,316 @@ Full version, including what is deliberately *not* being done and why, in
 5. GPU scene tiers: palette-quantise in shader, then terrain mesh +
    instanced impostors from `cp4_pose_prims()` for the interactive view.
 
+## Rendering: the landscape path
+
+Stage 3 draws through `vista`, which is to the pixel land renderer what `drop`
+is to the pixel cell one — a separate path rather than a seventh palette.
+
+The organising idea is that a landscape is not carried by detail. Almost all of
+the information in a wide shot of real country is in how contrast and
+saturation decay with distance: a ridge two kilometres out is not a smaller
+ridge, it is a flatter, bluer, lower-contrast one, and four of those stacked
+read as depth before anything else does. So the atmosphere is the primary
+drawing tool here, deliberately stronger than physics wants, and it is a
+two-term model — extinction takes the surface's own colour away and takes blue
+away slowest, in-scatter adds what the air is throwing into the beam, blue away
+from the sun and a warm haze toward it. A single lerp toward one fog colour
+cannot do both, which is why a one-term landscape ends in a grey wall. On top
+of that sits mist with a scale height, integrated in closed form, which pools
+in the low ground and is what separates one ridge from the next at dawn.
+
+Three things follow from that, and they are why it is a separate file:
+
+- **Light is posterised, not colour.** The flat look of a stylised landscape
+  comes from banding the *response* to light, per material, which keeps albedo
+  continuous and boundaries clean because they follow the geometry. Banding the
+  finished image instead couples every material to every other one and the
+  boundaries follow the histogram. Grass and foliage band hardest; rock stays
+  nearly continuous, because a cliff in three steps reads as papercraft.
+- **Shadows shift hue.** The shaded side of a hill in daylight is lit by the
+  sky, and the sky is blue. A shadow that only loses value reads as dirt, and
+  is the most reliable way to make an outdoor render look like an indoor one.
+- **Foliage transmits.** A backlit leaf glows, and that single term does more
+  to make a canopy read as a canopy than any amount of silhouette work. On
+  animals the same term uses the distance field's real thickness — one extra
+  evaluation along the light direction, which is a thing almost no engine can
+  afford and this representation gives away.
+
+### Paying for it
+
+The pixel renderer spends **95% of its frame inside `cp4_height`** — 22.6M calls
+for a 640x360 image, about a hundred per pixel, each ten octaves of value noise
+carrying derivatives. That is the wrong algorithm for the shape of the problem:
+a two-dimensional function sampled by three-dimensional ray marching. Sampling
+it once onto a grid around the camera and marching the grid instead costs
+1.05M evaluations, and `height_core` drops from eight seconds to a quarter of
+one. Everything downstream reads the grid too — normals, occlusion, shadow
+rays, the height a tree stands on — so there is one terrain rather than two
+that disagree at the seams.
+
+Two details that were not obvious:
+
+- **Bilinear reconstruction is C0.** The gradient is piecewise constant inside
+  a cell and jumps at every boundary, and the gradient is the normal — so the
+  hills came out as a low-poly model. Smoothstepping the interpolation weights
+  makes it C1 for two extra multiplies and the faceting goes with it.
+- **The tile has to be the terrain, not a copy of it.** Placing grass and trees
+  with `cp4_height` while the ground under them came from the cache put them on
+  two surfaces that differ by whatever the caching smoothed away, so trunks
+  sank and blades floated.
+
+The new bottleneck is the creature distance field, at about 58% of the frame.
+Most of that was self-inflicted: `creature_sdf` blends an albedo alongside the
+distance and that blend costs an `expf` per primitive, so marching with it
+switched on spent fifty transcendentals per sample on a value thrown away
+everywhere except the one point the ray stops at. Marching for distance only
+and paying for colour once, at the hit, plus refusing to march a ray whose
+remaining span inside the bounding sphere is shorter than the distance the
+field reports, plus looping the primitives' own projected extent rather than
+the bounding sphere's — together those take a 1280x720 frame from fifteen
+seconds to nine. That is four times the pixels of the old renderer for slightly
+less time than it took.
+
+## The creature editor's viewport
+
+`--creature` renders one animal from four angles against a studio backdrop,
+with the stat block the parts actually bought. It goes through the same
+continuous-tone path the world does, which is the only promise a viewport has
+to make: what you design is what you get.
+
+```
+./build/cpore_land --creature --style predator --out sheet.png
+./build/cpore_land --gallery 4 --seed 12 --out gallery.png
+```
+
+Underneath is `Cp4Studio`, built for an editor rather than for a still. It
+holds its buffers across frames, and `quality` selects an internal resolution
+and a light-transport budget together, so a caller can draw coarse while the
+mouse is moving and settle when it stops. On this machine, one predator at
+512x512:
+
+| quality | what it does | time | rate |
+| --- | --- | --- | --- |
+| 0 | quarter res, flat shading, contact shadow | 21 ms | 48 fps |
+| 1 | half res, ambient occlusion, transmission | 68 ms | 15 fps |
+| 2 | full res, bloom | 0.23 s | — |
+| 3 | 2x supersampled, self-shadow | 0.95 s | — |
+
+That ladder is what makes direct manipulation feasible without a GPU: drag
+against 0, settle through 1 to 2, export at 3.
+
+Two of those rungs used to be much worse — 0.56 s and 2.2 s — and both for the
+same reason, which is worth stating because it is the mistake this codebase
+keeps almost making. The contact shadow was traced per screen pixel, twelve
+distance-field samples deep, over a disc wider than the animal: about a third
+of the frame, four hundred milliseconds, and growing with the square of the
+output resolution so the export paid four times again. But a contact shadow is
+a smooth function of two variables, x and z on the floor. Sampling it at the
+frequency of the screen — and re-sampling it whenever the screen gets bigger —
+is exactly what the pixel-path terrain marcher was doing to `cp4_height`. It is
+a world-space grid now, 32 to 96 cells across the body by quality, built once a
+frame and bilinear-sampled per pixel, and its cost no longer depends on the
+resolution at all. Which then pays twice: a shadow that costs the same at every
+quality can be on at *every* quality, so the drag frame has one too and a
+creature no longer levitates for a fifth of a second whenever you move it.
+
+The other rung was the creature's own self-shadow, twenty evaluations per lit
+pixel, which used to switch on at the same moment the resolution quadrupled.
+Detail and resolution are separate ladders now; occlusion and transmission do
+most of the reading of a shape, so they land early and stay, and the
+self-shadow waits for the export.
+
+The other half is `cp4_studio_pick`, which answers *which genome slot is under
+this pixel* in about five microseconds. It runs the same march the renderer
+does and stops at the first hit, so picking cannot disagree with what is on
+screen — which is the usual failure of a separate picking representation, and
+the one a user notices immediately. `Prim` carries the genome slot that pushed
+it, stamped by the builder, so a pixel maps back to the gene that drew it.
+
+`cp4_studio_extent` is the same question asked the other way round: *where is
+this slot on screen*, as a centre, a tip and a radius in pixels. The front end
+hangs its drag handles off it. It used to derive them by calling the picker
+over a five-pixel grid and averaging the hits, which is ten thousand ray
+marches — 55 ms — for two points that were already in the primitive list;
+projecting a few dozen endpoints gives the same answer in four microseconds.
+Two details make the answer the right one rather than merely a fast one. Only
+the span of the part that is *outside* the trunk counts, because a part is
+rooted six tenths of a body radius inside it and that buried root is both the
+thickest piece of it and invisible — averaged in, it put the handle a dozen
+pixels inside the flank. And a mirrored part is two pieces of geometry under
+one slot, so the sides are separated and the near one answers; the mean of a
+left horn and a right horn is a point in the middle of the skull where there is
+no horn at all.
+
+### Editing
+
+`cp4_studio_surface` is the inverse: it turns a pixel into *a place on the
+body* — the `seg`, `yaw` and `pitch` that would put a part right there. Pick
+says what you grabbed, surface says where you dropped it, and between them
+that is everything direct manipulation needs from a renderer. Both run against
+the same spine `build_prims4` drew from, extracted into `land_spine` for
+exactly that reason: a second copy that drifted by a degree would put every
+dropped part slightly off the surface it was dropped on, which is the kind of
+wrongness a user feels at once and cannot describe.
+
+On top sit the genome operations — place, move, remove, shape, mirror, paint,
+and the spine handles. They differ from mutation in how they fail. A mutation
+that overruns the budget is normalised and whatever falls off falls off,
+because nobody is watching; a user who drops a part onto a body that cannot
+afford it has to be told no, **and told before anything moves**. Slots are
+stable across a removal for the same reason: an editor holds indices, in a
+selection and in an undo stack, and compacting would silently repoint every
+one of them. `cp4_genome_normalise` compacts once, when the genome stops being
+a document and becomes a creature.
+
+Paint reaches genes that nothing outside the genome could set before. The
+three coats have been in `Cp4Genome` since the stage was written, and
+`cp4_genome_from_action` never touched them — so every animal that did not
+come from the random generator was the same beige with both coats plain.
+
+![built by clicking](docs/editor_made.png)
+
+### The session ABI
+
+Everything above speaks in structs, which is right for C and wrong for
+anything calling in from outside: ctypes and WebAssembly both need a struct
+layout, and a struct layout is a promise this project breaks every time the
+genome grows a gene. So `Cp4Edit` draws the boundary at an opaque handle,
+integers and flat arrays. A Python binding and a browser front end want the
+same surface — open a session, say where the mouse is, get pixels back — which
+is why there is one of these and not two.
+
+```python
+from cpore.env import CreatureEditor
+
+ed = CreatureEditor(560, 560)
+ed.load({"parts": [(2, 0, 0, 0, 128, 0, 128, 0)], "nseg": 5, "girth": 175})
+ed.spine(arch=45)
+
+ed.surface(280, 300)          # (seg, yaw, pitch) under the pointer, or None
+slot = ed.drop(280, 340, "leg")   # mirrored automatically, off the midline
+ed.shape(slot, length=215, bend=75)
+
+v = ed.spine_pick(300, 260)   # grab a vertebra
+ed.spine_drag(v, 300, 200)    # and pull it into a hump
+
+ed.paint(hue=28, sat=220)
+ed.coats(pattern="bands", pattern2="spots")
+ed.save_png("creature.png")
+
+LandEnv(genome=ed.finish())   # and take it for a walk
+```
+
+`python3 python/creature_editor_demo.py` runs exactly that and then test-drives
+the result in the simulation. The editor's own checks are in `make test`: that
+the body is reachable from the viewport, that every surface hit decodes to
+legal genes, that **a dropped part is under the pixel it was dropped on**, that
+the budget is never overrun and says no before anything moves, and that slots
+survive a removal.
+
+### In a browser
+
+![the editor](docs/editor_web.png)
+
+```
+make wasm      # 59KB of WebAssembly
+make serve     # http://127.0.0.1:8731/editor.html
+```
+
+**Every shape is made by dragging**, which is the whole point of imitating this
+particular editor. A part comes off the palette under the cursor, is placed the
+moment it first crosses onto the body and then follows the pointer, so what you
+are dragging is the real thing on the real animal rather than a ghost that will
+be replaced by something slightly different when you let go — and releasing off
+the body takes it away again, so nothing is committed that was not seen. A
+placed part is moved by dragging it, resized by dragging the ring on it,
+lengthened by dragging its tip, and removed by right-clicking. A vertebra drags
+up into a hump and sideways into a belly. The camera orbits by dragging
+anywhere the animal is not.
+
+There is no click-then-click mode anywhere. A mode is a piece of state the user
+has to hold that the screen is not showing them, and the first version of this
+page had one: you armed a part in the palette and then clicked the body. It
+worked and it was wrong, because it is not how the thing it imitates behaves.
+
+The handles come from `cp4_studio_extent`, which projects the selected slot's
+own geometry — so a handle cannot sit where the part is not. The DNA meter and
+the stat block update as you go, and a part you cannot afford is greyed out in
+the palette rather than refused after the fact.
+
+**There is no Emscripten.** clang has had a wasm32 target for years and
+`wasm-ld` ships with lld, so the only thing missing was a C runtime — and the
+parts of one this program uses are an allocator, five memory functions and the
+transcendentals. `wasm/shim.c` is the first two, in about two hundred lines;
+the third are left undefined on purpose so the linker turns them into imports
+and the browser's own `Math` supplies them. Taking on a toolchain that brings
+its own libc, in order to demonstrate that the project does not need one, would
+have been a strange trade. The result is **59KB with six imports and no
+runtime**.
+
+The one hazard in the JS is that growing WebAssembly's linear memory *detaches*
+every `ArrayBuffer` view onto it, and the editor grows memory whenever a
+session opens or a frame allocates. So nothing in `cpore-edit.js` caches a
+view: it remakes one on demand, and every call into C is assumed to have
+invalidated whatever was held before it.
+
+Rendering climbs the studio's quality ladder one rung at a time: quarter
+resolution while the pointer is down, half a heartbeat after it stops, full a
+third of a second after that. Each rung is scheduled rather than run inline, so
+a press during the climb cancels what has not been drawn yet instead of
+queueing behind it, and drag frames are coalesced onto `requestAnimationFrame`
+so the editor draws where the cursor *is* rather than building a queue of
+frames for places it has already left.
+
+That climb replaced a two-rung version that went straight from the drag frame
+to the full one, and the difference is the whole of what "slow" meant here.
+Driving real `PointerEvent`s through the real handlers in headless Chromium, a
+press followed by twelve moves and a release:
+
+| | before | after |
+| --- | --- | --- |
+| `pointerdown` on a part | 845 ms | 1.7 ms |
+| each `pointermove` | 25 ms | 0.2 ms |
+| `pointerup` | 824 ms | 97 ms |
+| **main thread blocked, whole drag** | **1973 ms** | **123 ms** |
+
+Almost none of that was the ray marching. Pressing on a part ran a full
+settle frame *inside the pointerdown handler* and then a grid of ten thousand
+picks to find the handles — for an event that changes no geometry at all and
+needed nothing but the overlay redrawn. The renderer got about three times
+faster; the interaction got sixteen times more responsive, and the gap between
+those two numbers is the point.
+
+The self-test asserts that budget, so the mistake cannot come back quietly.
+
+`editor.html?selftest=1` drives the model the way the pointer handlers do, then
+dispatches real `PointerEvent`s through those handlers — including the whole
+palette drag: press the button, move over the animal, check the part appeared,
+move again, check it followed, release, check it committed and selected. An API
+that works behind a UI that never calls it is the failure a screenshot cannot
+show. It prints its results onto the page, which is how the one above was
+verified.
+
+`python3 wasm/build_standalone.py` folds the module and the WebAssembly into a
+single 120KB document that runs from a `file://` URL with no server and makes
+no outbound request — for handing to someone, or for hosting anywhere with a
+content policy that blocks everything.
+
 ## Visual styles
 
-Six of them, and they are not palette swaps — internal resolution, camera
-scale, dither strength, background value structure and outline treatment all
-move together. `--vis NAME`, or `CporeEnv(vis="c64")` from python. Stages 1
-and 2 default to `abyss`; the land stage defaults to `terra`.
+Eight, and `drop` and `vista` are not among the other six. Six are a pixel-art pipeline and
+are not palette swaps of each other — internal resolution, camera scale,
+dither strength, background value structure and outline treatment all move
+together. `drop` is a separate renderer down a separate path: continuous tone,
+HDR, no palette, no dither, no upscale. `--vis NAME`, or
+`CporeEnv(vis="c64")` from python. Stage 1 defaults to `drop`, stage 3 to
+`vista`, stages 2 and 4 to `abyss` and `terra`; asking a stage for a style it
+cannot render gets that stage's own default back.
 
 | style | resolution | colours | look |
 | --- | --- | --- | --- |
+| `drop` | output res | continuous | darkfield microscopy: black field, translucent bodies, bloom, bokeh, a lens |
+| `vista` | output res | continuous | daylight landscape: banded light, hue-shifted shadow, transmitted foliage, two-term air |
 | `terra` | 640x360 | 48 | daylight land: a six-step sky, two foliage ramps, warm rock |
 | `petri` | 320x180 | 16 | cream paper, ink outlines, muted pigment — the only one with an inverted value structure |
 | `abyss` | 320x180 | 32 | deep water, dithered gradient, dark keylines |
@@ -1014,14 +1329,26 @@ landscapes ended in a grey wall. It is also the only style at 640x360 — one
 animal against open water reads fine at 320x180, but a landscape is ridgelines
 and treelines, and those are the first thing to dissolve.
 
-![petri](docs/hero.png)
+![terra](docs/style_terra.png)
+![petri](docs/style_petri.png)
 ![c64](docs/style_c64.png)
 ![dmg](docs/style_dmg.png)
 ![neon](docs/style_neon.png)
 ![abyss](docs/style_abyss.png)
 
 `--vis-all` renders the identical terminal state in every style, which is the
-only fair way to compare them.
+only fair way to compare them — and the fairest thing it shows is how much of
+the pixel styles' character came from the constraint rather than the palette.
+
+`drop` needed a different renderer rather than a seventh palette, because
+almost nothing in the pixel path survives removing the palette. Coverage is
+thresholded, which reads as deliberate only while every edge sits on the pixel
+grid; the shading is tuned against a fixed set of 32 colours; and the bloom
+and outline passes exist to fight quantisation artefacts that are no longer
+there. What it does share is the 5x7 font, and even that is used differently —
+the pixel path stamps each set bit as a hard square, `drop` stamps it as a soft
+dot, which turns the same table into a dot-matrix instrument readout that
+blooms like the rest of the frame.
 
 Two of these needed structural work rather than a palette:
 
@@ -1037,12 +1364,63 @@ Two of these needed structural work rather than a palette:
 The 160x90 styles cannot fit the full HUD, so they drop to vitals plus the
 placement dial.
 
-## Rendering
+## Rendering: the darkfield path
 
-The renderer is a debug view, not a product, and that shaped the choices. At
-these resolutions there is no room for soft shading, so every cell gets a hard dark
-keyline, a fill and one highlight — without the keyline everything dissolves
-into the water. The player is marked with four corner brackets rather than
+A cell in `drop` is a translucent bag, and the shading is the three things
+light does to one. It is absorbed on the way through, so the thick middle of
+the body is where the background goes away. It scatters off what is suspended
+inside, which is why the interior is worth drawing at all — a nucleus with a
+dense core, vacuoles that breathe on their own phase, and a granulated
+cytoplasm, all hashed off the cell's slot so they are stable for the episode
+and all rotated with its heading, because an interior that stays put while the
+body turns reads as a decal. And it grazes the membrane on the way past, which
+is the whole look: at a grazing angle the path through the membrane is long,
+so the edge of a transparent body is the brightest thing on it.
+
+Four things were not obvious, and three of them were bugs:
+
+- **The fresnel exponent is the load-bearing number in the file.** Written at
+  the 3.4 a 3D fresnel wants, essentially all of the rim term lands in the
+  outermost two percent of the radius — which on a twenty-pixel cell is under
+  one pixel, so the single effect the entire look is built on rendered as
+  nothing. On a projected disc the falloff has to be broad enough to occupy a
+  band the eye can see. The membrane line has the same problem and is held to
+  a minimum width in screen space rather than a fraction of the radius.
+- **An additive buffer cannot draw anything dark.** A pupil, a mandible, the
+  throat of a jet: drawn by adding a dark colour they come out as slightly
+  brighter patches of whatever was behind them. They multiply instead, and the
+  lit parts are added on top — the same two-step the membrane already used.
+  The pupil in particular is the darkest thing on the animal and the reason an
+  eye has any contrast, which is most of why Spore's creatures read at all.
+- **Exposure has to be one number in one place.** Every intensity here is
+  scene-referred against six named reference levels, and how far up the
+  tonemapping curve that set lands is a separate decision at the bottom of the
+  file. Mixed together, changing how bright the frame is means retuning forty
+  constants — which is exactly the hole the first pass fell into.
+- **A smoothstep with its edges reversed is a descending ramp, not an error.**
+  Guarding against `e1 < e0` and returning a constant silently multiplied the
+  whole frame by the far end of the vignette, and cost the image every stop
+  above about 15%. It looked like an art problem for three iterations.
+
+Post is four octaves of bloom before the tonemap — one blur radius gives one
+halo size and reads as a filter, and after the tonemap there is nothing above
+white left to bleed — then a grade, lateral chromatic aberration scaled by
+`r^2`, a vignette and grain. The grain is not optional at this exposure: the
+darkest quarter of the frame covers about six 8-bit codes, and without a
+dither of some kind the condenser cone comes out as contour lines.
+
+Depth of field is per-sprite rather than a screen-space gather. Each cell
+hashes to a position in the drop and carries its own defocus width, which for
+round shapes is both cheaper and closer to a real bokeh disc; defocus also
+costs it brightness and saturation, so a crowded frame still has a foreground.
+The player is always on the focal plane. One 1280x720 frame is about 180 ms.
+
+## Rendering: the pixel path
+
+The pixel renderer is a debug view, not a product, and that shaped the choices.
+At those resolutions there is no room for soft shading, so every cell gets a
+hard dark keyline, a fill and one highlight — without the keyline everything
+dissolves into the water. The player is marked with four corner brackets rather than
 concentric rings, because a ring drawn around a 10px cell is just noise on top
 of the cell. Cells under 4px across skip their appendages entirely and draw as
 blobs; there is nothing to be gained from a 1px spike.
@@ -1053,10 +1431,10 @@ on the membrane, front pointing right. Since the simulation resolves damage,
 armour and thrust against those angles, the dial is a readout of live state,
 not decoration.
 
-The whole file links separately from the sim, so a training build drops it.
+Both renderers link separately from the sim, so a training build drops them.
 
 ## Legal
 
 Mechanics are reimplemented from scratch. No Spore assets, model data, or file
 formats are used, and none should be added. All art here is procedural and
-generated by `src/render.c`.
+generated by the renderers in `src/`.

@@ -7,10 +7,13 @@ BUILD := build
 LIB_SRC := src/rng.c src/genome.c src/world.c src/policy.c src/env.c \
            src/aqua_genome.c src/aqua.c src/aqua_env.c \
            src/land_genome.c src/land.c src/land_env.c \
-           src/civ.c src/civ_env.c \
+           src/civ.c src/civ_env.c src/lineage.c \
            src/tribe.c src/space.c src/space_env.c \
            src/vec.c src/genome_codec.c src/codex.c
-VIS_SRC := src/render.c src/render3d.c src/render_land.c src/render_civ.c src/png.c
+# The editor session lives here and not in LIB_SRC: it drives the studio,
+# so it belongs to the half of the project a training build drops.
+VIS_SRC := src/render.c src/render_cell.c src/render_pond.c src/play.c src/render3d.c src/render_land.c \
+           src/render_terra.c src/render_civ.c src/land_edit.c src/png.c
 LIB_OBJ := $(LIB_SRC:%.c=$(BUILD)/%.o)
 VIS_OBJ := $(VIS_SRC:%.c=$(BUILD)/%.o)
 
@@ -76,22 +79,59 @@ land: $(BUILD)/cpore_land ; @./$(BUILD)/cpore_land --seed 5 --steps 2400 --out $
 civ: $(BUILD)/cpore_civ ; @./$(BUILD)/cpore_civ --seed 4 --out $(BUILD)/civ.png
 tribe: $(BUILD)/cpore_tribe ; @./$(BUILD)/cpore_tribe --seed 5 --out $(BUILD)/tribe.png
 space: $(BUILD)/cpore_space ; @./$(BUILD)/cpore_space --seed 4 --out $(BUILD)/space.png
-play: $(BUILD)/cpore_play ; @./$(BUILD)/cpore_play --seed 23
+play-cell: $(BUILD)/cpore_play ; @./$(BUILD)/cpore_play --seed 23
 game: $(BUILD)/cpore_game ; @./$(BUILD)/cpore_game --seed 7 --stage land
 game-tribe: $(BUILD)/cpore_game ; @./$(BUILD)/cpore_game --seed 7 --stage tribe
 
-# ---- the browser editor ----
-# Needs emscripten on PATH (source ~/emsdk/emsdk_env.sh). Single-threaded on
-# purpose: threads would need COOP/COEP headers and the whole point of this
-# build is that it is a static directory anyone can host.
-EMCC ?= emcc
-web/cpore.js: apps/web.c $(LIB_SRC) $(VIS_SRC) $(HDRS)
-	$(EMCC) -O3 -std=c99 -Iinclude apps/web.c $(LIB_SRC) $(VIS_SRC) -o $@ \
-	  -sMODULARIZE=1 -sEXPORT_NAME=Cpore -sALLOW_MEMORY_GROWTH=1 \
-	  -sENVIRONMENT=web -lm \
-	  -sEXPORTED_RUNTIME_METHODS=UTF8ToString,HEAPU8,HEAPF32
+# ---- WebAssembly ----
+#
+# No Emscripten. clang has had a wasm32 target for years and wasm-ld ships
+# with lld, so the only thing missing is a C runtime - and the parts of one
+# this program actually uses are an allocator, five memory functions and the
+# transcendentals. wasm/shim.c is the first two; the third are left undefined
+# so the linker turns them into imports and the browser's own Math supplies
+# them. Taking on a toolchain that brings its own libc, in order to prove the
+# project does not need one, would have been a strange trade.
+WASM_SRC := src/rng.c src/genome.c src/land_genome.c src/land.c \
+            src/land_edit.c src/render_terra.c wasm/shim.c
+WASM_OBJ := $(WASM_SRC:%.c=$(BUILD)/wasm/%.o)
+WASM_CF  := --target=wasm32 -O2 -std=c99 -nostdlib -ffunction-sections \
+            -fdata-sections -Wall -Wextra -Wno-unused-parameter \
+            -Iwasm/include -Iinclude -D_POSIX_C_SOURCE=200809L
+WASM_EXPORTS := $(shell grep -oE '\bcp4_edit_[a-z_]+' include/cpore/land.h \
+                        | sort -u | sed 's/^/--export=/')
 
-wasm: web/cpore.js
-web: wasm ; @cd web && python3 -m http.server 8123
+$(BUILD)/wasm/%.o: %.c $(HDRS)
+	@mkdir -p $(dir $@)
+	clang $(WASM_CF) -c $< -o $@
 
-clean: ; rm -rf $(BUILD) web/cpore.js web/cpore.wasm
+wasm/cpore.wasm: $(WASM_OBJ)
+	wasm-ld --no-entry --gc-sections --import-undefined \
+	  --export=cp_wasm_alloc --export=cp_wasm_free --export=__heap_base \
+	  --initial-memory=33554432 --max-memory=536870912 \
+	  $(WASM_EXPORTS) -o $@ $(WASM_OBJ)
+	@ls -l $@ | awk '{print "  " $$5 " bytes"}'
+
+# The playable cell stage. Same toolchain, a different set of objects: the
+# stage-1 simulation and both of its continuous-tone renderers, behind the flat
+# play ABI. Nothing here is shared with the editor build except the shim.
+CELL_WASM_SRC := src/rng.c src/genome.c src/world.c src/policy.c src/render.c \
+                 src/render_cell.c src/render_pond.c src/play.c wasm/shim.c
+CELL_WASM_OBJ := $(CELL_WASM_SRC:%.c=$(BUILD)/wasm/%.o)
+CELL_EXPORTS  := $(shell grep -oE '\bcp_play_[a-z_]+' include/cpore/cpore.h \
+                         | sort -u | sed 's/^/--export=/')
+
+wasm/cell.wasm: $(CELL_WASM_OBJ)
+	wasm-ld --no-entry --gc-sections --import-undefined \
+	  --export=cp_wasm_alloc --export=cp_wasm_free --export=__heap_base \
+	  --initial-memory=33554432 --max-memory=536870912 \
+	  $(CELL_EXPORTS) -o $@ $(CELL_WASM_OBJ)
+	@ls -l $@ | awk '{print "  " $$5 " bytes"}'
+
+.PHONY: wasm serve play-cell wasm-web
+wasm: wasm/cpore.wasm wasm/cell.wasm
+play: wasm/cell.wasm ; @echo "http://127.0.0.1:8732/play.html" && cd wasm && python3 -m http.server 8732
+# the page is ES modules and fetches the .wasm, so it needs an origin
+serve: wasm ; @echo "http://127.0.0.1:8731/editor.html" && cd wasm && python3 -m http.server 8731
+
+clean: ; rm -rf $(BUILD) wasm/cpore.wasm wasm/cell.wasm

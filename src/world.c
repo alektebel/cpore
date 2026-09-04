@@ -154,10 +154,20 @@ static void spawn_cell(CpWorld *w, int i, float px, float py, float difficulty)
     float roll = cp_rng_f(&w->rng);
     c->diet = (uint8_t)(roll < 0.45f ? CP_DIET_HERB : (roll < 0.80f ? CP_DIET_CARN : CP_DIET_OMNI));
 
-    /* a spread of sizes: mostly prey, a few things that hunt you */
+    /* A spread of sizes whose *both* ends rise with you.
+     *
+     * The stage is played three times over at three scales, and what makes
+     * that read as a ladder rather than as a difficulty slider is that the
+     * pond keeps its shape around you: there is always something small enough
+     * to swallow and always something big enough to swallow you, and both are
+     * bigger than they were an hour ago. Raising only the top end would turn
+     * growth into a treadmill; raising only the bottom would run the threats
+     * out. Squaring the roll keeps the population mostly prey. */
     float t = cp_rng_f(&w->rng);
     t = t * t;
-    float scale = 0.45f + 1.95f * t + 0.55f * difficulty * t;
+    float lo = 0.45f + 0.55f * difficulty;
+    float hi = 2.40f + 1.60f * difficulty;
+    float scale = lo + (hi - lo) * t;
 
     c->r      = 13.0f * scale;
     c->hp_max = 26.0f * scale * scale;
@@ -260,6 +270,119 @@ void cp_world_reset(CpWorld *w, uint32_t seed, const CpGenome *genome)
 
     cgrid_build(w);
     w->status = CP_RUN;
+}
+
+/* ---------------- the stroke ----------------
+ *
+ * What a propulsor does, rather than how much of it there is.
+ *
+ * Thrust used to be a scalar off the part counts and the beat used to be a
+ * sine the renderer drew, and the two never met: the animation illustrated the
+ * motion instead of causing it. You could watch a flagellum thrash and the
+ * speed would not flicker.
+ *
+ * A stroke has a duty cycle - the fraction of the beat that actually pushes -
+ * and that is where the three propulsors genuinely differ. Cilia are many
+ * small hairs beating out of step with each other, so the sum is nearly
+ * continuous. A flagellum is one whip running a travelling wave, so it pushes
+ * hard through part of the cycle and coasts the rest. A jet is the extreme of
+ * that: a hard pulse and then a refill during which it cannot push at all.
+ *
+ * The normalisation is the load-bearing part. The gain integrates to exactly
+ * one over a cycle whatever the duty, so adding this changes the *texture* of
+ * movement and not the balance - a body's average speed is what it always was,
+ * and nothing downstream had to be retuned. What changes is that a cilia build
+ * glides and a jet build lurches, which is a difference a player can feel and
+ * a policy can learn to time.
+ */
+typedef struct { float rate, duty, puls; } CpStroke;
+
+static CpStroke stroke_of(const CpStats *st)
+{
+    CpStroke s;
+    float cil = (float)st->n[CP_PART_CILIA];
+    float fla = (float)st->n[CP_PART_FLAGELLA];
+    float jet = (float)st->n[CP_PART_JET];
+    float tot = cil + fla + jet;
+    if (tot <= 0.0f) {
+        /* Nothing to beat with. A bare cell still drifts and still has a
+         * phase, so it gets a slow, almost flat stroke rather than a divide
+         * by zero. */
+        s.rate = 0.55f; s.duty = 0.85f; s.puls = 0.10f;
+        return s;
+    }
+    s.rate = (1.40f * cil + 1.00f * fla + 0.55f * jet) / tot;
+    s.duty = (0.90f * cil + 0.45f * fla + 0.28f * jet) / tot;
+    s.puls = (0.12f * cil + 0.75f * fla + 0.95f * jet) / tot;
+    return s;
+}
+
+/* The multiplier on thrust at this point in the beat.
+ *
+ * A raised-cosine window `duty` wide, scaled so its integral over the cycle is
+ * one, then mixed toward flat by `puls`. Mixing toward a constant of exactly
+ * one is what keeps the mean at one for every setting.
+ */
+static float stroke_gain(const CpStroke *s, float phase)
+{
+    float u = phase - floorf(phase);
+    float d = s->duty < 0.05f ? 0.05f : (s->duty > 1.0f ? 1.0f : s->duty);
+    float pulse = 0.0f;
+    if (u < d) pulse = (1.0f - cosf(2.0f * PI * u / d)) / d;
+    return 1.0f + s->puls * (pulse - 1.0f);
+}
+
+/* ---------------- coming back ---------------- */
+
+int cp_world_tier(const CpWorld *w)
+{
+    float t = w->dna / CP_DNA_GOAL;
+    int   k = (int)(t * (float)CP_TIERS);
+    return k < 0 ? 0 : (k > CP_TIERS - 1 ? CP_TIERS - 1 : k);
+}
+
+float cp_world_respawn(CpWorld *w)
+{
+    /* A tier's worth of meter, which is what makes the loss legible: you drop
+     * back to roughly where the last size step began rather than to nothing.
+     * Zeroing it would make one unlucky collision undo an entire run, and
+     * charging nothing would make the predators scenery. */
+    float seg  = CP_DNA_GOAL / (float)CP_TIERS;
+    float lost = seg * 0.45f;
+    if (lost > w->dna) lost = w->dna;
+    w->dna -= lost;
+
+    CpCell *p = &w->player;
+    p->hp   = w->stats.hp_max;
+    p->alive = 1;
+    p->vx = p->vy = 0.0f;
+    p->r = w->stats.radius0 * (1.0f + 0.55f * (w->dna / CP_DNA_GOAL));
+
+    /* Somewhere else, and away from whatever just ate you. Eight tries, then
+     * take what we are given - a respawn that can fail is a respawn that will,
+     * on the one frame the world happens to be crowded. */
+    for (int tries = 0; tries < 8; tries++) {
+        float x = cp_rng_range(&w->rng, 80.0f, CP_WORLD_W - 80.0f);
+        float y = cp_rng_range(&w->rng, 80.0f, CP_WORLD_H - 80.0f);
+        float near = 0.0f;
+        for (int i = 0; i < CP_MAX_CELLS; i++) {
+            const CpCell *c = &w->cells[i];
+            if (!c->alive || c->r < p->r) continue;
+            if (len2(x - c->x, y - c->y) < 260.0f) { near = 1.0f; break; }
+        }
+        if (!near || tries == 7) { p->x = x; p->y = y; break; }
+    }
+
+    /* The generation counter follows the meter back down, so the editor opens
+     * again on the way up rather than being spent. */
+    float gseg = CP_DNA_GOAL / (float)CP_GENERATIONS;
+    int   gen  = (int)(w->dna / gseg);
+    if (gen > CP_GENERATIONS - 1) gen = CP_GENERATIONS - 1;
+    if (gen < w->generation) w->generation = gen;
+
+    w->deaths++;
+    w->status = CP_RUN;
+    return lost;
 }
 
 /* ---------------- npc steering ---------------- */
@@ -445,6 +568,14 @@ void cp_world_step(CpWorld *w, const float act[CP_ACT_DIM])
     /* jets only help if they are mounted behind you - jet_thrust already
      * folds in each nozzle's rearward component */
     float thrust = st->accel * boost + st->jet_thrust * an;
+
+    /* The beat pushes. This is the whole point of the stroke: the phase the
+     * renderer draws the cilia and the flagellum from is the same phase that
+     * decides how hard the body is being driven this instant, so what you see
+     * is the cause of what you feel rather than a picture of it. */
+    CpStroke stk = stroke_of(st);
+    thrust *= stroke_gain(&stk, p->phase);
+
     p->vx += ax * thrust * dt;
     p->vy += ay * thrust * dt;
 
@@ -458,7 +589,9 @@ void cp_world_step(CpWorld *w, const float act[CP_ACT_DIM])
     p->y += p->vy * dt;
     w->dist_travelled += len2(p->vx, p->vy) * dt;
     if (an > 0.05f) p->heading = atan2f(ay, ax);
-    p->phase += dt * (4.0f + 6.0f * an);
+    /* Beat faster when driving harder, and at the rate this propulsor runs
+     * at: cilia flicker, a jet pulses slowly. */
+    p->phase += dt * (4.0f + 6.0f * an) * stk.rate;
 
     p->x = clampf(p->x, p->r, CP_WORLD_W - p->r);
     p->y = clampf(p->y, p->r, CP_WORLD_H - p->r);
@@ -549,6 +682,7 @@ void cp_world_step(CpWorld *w, const float act[CP_ACT_DIM])
     p->r = st->radius0 * (1.0f + 0.55f * (w->dna / CP_DNA_GOAL));
 
     /* ---- player vs npc contact ---- */
+    int held = 0;               /* is a mouth too big to fight on us right now */
     for (int i = 0; i < CP_MAX_CELLS; i++) {
         CpCell *c = &w->cells[i];
         if (!c->alive) continue;
@@ -557,6 +691,40 @@ void cp_world_step(CpWorld *w, const float act[CP_ACT_DIM])
         float rr = p->r + c->r;
         if (d2 > rr * rr || d2 < 1e-8f) continue;
         float d = sqrtf(d2);
+
+        /* ---- swallowing, before anything else ----
+         *
+         * Resolved first because it is not a kind of damage, it is a
+         * different outcome: nothing about armour, spikes or facing applies
+         * to a cell that is simply too big to argue with. The centre test is
+         * what gives the rule its grace - brushing past something enormous is
+         * survivable, swimming into it is not - and it is the same test in
+         * both directions, so what the player can do to a smaller cell is
+         * exactly what a larger one can do to the player. */
+        if (c->r > p->r * CP_GULP && c->diet != CP_DIET_HERB) {
+            /* Held, not touched. The mouth has to stay on you: break contact
+             * inside the window and you got away with it, which is the whole
+             * counterplay this rule has and the reason a fast build is worth
+             * paying for. */
+            held = 1;
+            if (w->gulp_hold >= CP_GULP_HOLD) {
+                p->hp = 0.0f;
+                w->gulped++;
+                w->dmg_taken += p->hp_max;
+                break;                  /* the loop's other business is moot */
+            }
+        }
+        if (p->r > c->r * CP_GULP && st->carn_eff > 0.0f) {
+            /* Worth more than the meat it would have dropped, because
+             * swallowing something whole is the reward for having grown. */
+            w->dna += 3.2f * st->carn_eff;
+            p->hp = clampf(p->hp + 6.0f, 0.0f, p->hp_max);
+            c->alive = 0;               /* eaten, so no corpse to scavenge */
+            w->gulps++;
+            w->kills++;
+            reward += 1.2f;
+            continue;
+        }
 
         float nx = dx / d, ny = dy / d;
         float push = (rr - d) * 0.5f;
@@ -581,8 +749,10 @@ void cp_world_step(CpWorld *w, const float act[CP_ACT_DIM])
             }
         }
         if (c->attack > 0.0f && c->r >= p->r * 0.70f) {
+            /* No swallow multiplier here any more: anything big enough to
+             * swallow you already did, above. What is left is a fight between
+             * cells of comparable size, which is what damage is for. */
             float take = c->attack * (1.0f - def) * dt * 3.0f;
-            if (c->r > p->r * 1.6f && c->diet != CP_DIET_HERB) take *= 2.4f;  /* swallowed */
             p->hp -= take;
             w->dmg_taken += take;
             w->hits_taken++;
@@ -595,6 +765,11 @@ void cp_world_step(CpWorld *w, const float act[CP_ACT_DIM])
         /* their poison works the same way against us */
         if (c->poison > 0.0f && dmg > 0.0f) p->hp -= c->poison * dt * 3.0f;
     }
+
+    /* The hold decays to nothing the instant you are clear, rather than
+     * draining: escaping a mouth should reset the count, not leave you part
+     * way into the next one. */
+    w->gulp_hold = held ? w->gulp_hold + dt : 0.0f;
 
     /* ---- npc vs npc and npc feeding (keeps the pool churning) ---- */
     for (int i = 0; i < CP_MAX_CELLS; i++) {
@@ -735,6 +910,19 @@ void cp_world_observe(const CpWorld *w, float *o)
     o[k++] = (float)w->generation / (float)(CP_GENERATIONS - 1);
     o[k++] = (st->elec_dmg > 0.0f && w->elec_cd <= 0.0f) ? 1.0f : 0.0f;
     o[k++] = st->percep / 620.0f;
+    /* Where the body is in its own stroke.
+     *
+     * Thrust is modulated by the beat, so without this the dynamics are
+     * partially observable in a way they were not before - an agent would see
+     * an unexplained oscillation in its own acceleration and could do nothing
+     * about it. The gain is what actually multiplies thrust; the sine is the
+     * position in the cycle, which is what lets a policy anticipate the next
+     * push rather than only observe the current one. */
+    {
+        CpStroke stk = stroke_of(st);
+        o[k++] = clampf(stroke_gain(&stk, p->phase) - 1.0f, -2.5f, 2.5f);
+        o[k++] = sinf(2.0f * PI * (p->phase - floorf(p->phase)));
+    }
 
     /* --- nearest food, clipped to what this build can actually see ---
      * Eyes are not decoration: an eyeless cell is given a shorter horizon,

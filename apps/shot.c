@@ -50,7 +50,7 @@ int main(int argc, char **argv)
     CpGenome g;
     cp_genome_starter(&g);
     int have_genome = 0;
-    int vis = CP_VIS_ABYSS, vis_all = 0;
+    int vis = CP_VIS_DROP, vis_all = 0;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--seed") && i + 1 < argc)       seed = (uint32_t)strtoul(argv[++i], NULL, 10);

@@ -7,3 +7,12 @@ build/
 gmon.out
 __pycache__/
 *.pyc
+wasm/cpore.wasm
+wasm/editor-standalone.html
+wasm/editor-fragment.html
+docs/creature-creator-artifact.html
+
+# the puffer extension builds in place
+puffer/**/*.so
+puffer/build/
+puffer/*.egg-info/

@@ -87,8 +87,75 @@ of the items below.
 
 ## Next
 
-**8. Slim the HUD.** Two large filled panels eat the corners. Thin
-edge-aligned readouts instead, centre of frame kept clear.
+- ~~**A renderer that is not pixel art.**~~ Two of them. Stage 1 has `drop`, a
+  darkfield microscope plate; stage 3 has `vista`, a landscape where the
+  atmosphere does the drawing. Both are linear HDR at the output resolution
+  with analytic antialiasing, depth of field, four octaves of bloom, a filmic
+  tonemap and a lens pass, and neither has a palette, a dither or an upscale
+  anywhere in it. They share a canvas and a film chain (`hdrcanvas.h`) and
+  nothing else, because a bag of cytoplasm and a hillside disagree about
+  everything between those two ends.
+
+  `vista` also needed the terrain marcher rebuilt: the pixel renderer spent
+  95% of its frame in `cp4_height`, sampling a two-dimensional function with
+  a three-dimensional ray march at a hundred samples per pixel. Caching the
+  field into a grid around the camera and marching that took it from eight
+  seconds to a quarter of one, which is what paid for everything above.
+
+  Stages 2 and 4 are still pixel-only. Stage 2 is the natural next target
+  since it is already lit water, and much of `vista`'s shading model - banded
+  response, hue-shifted ambient, transmission - transfers to it directly.
+
+**8. Slim the HUD.** Done wherever there is a continuous-tone renderer to do
+it in: hairlines and dot matrix, nothing filled, everything pushed to the
+frame edge, and the whole layout in units of the frame so it holds its
+proportion at any output size. Stage 1 puts the vitals in an arc around the
+player; stage 3 keeps them as thin rules in the corner and adds a dial for the
+hour. The two pixel-path HUDs still have their filled panels, and will keep
+them - the readout that suits a 640x360 palette frame is not the one that
+suits a 1280x720 continuous one, which is most of why these are separate
+renderers rather than one with a flag.
+
+**8b. The creature editor.** Everything below the front end is done.
+
+`Cp4Studio` renders one animal through the world's own shading path, holds its
+buffers across frames, and scales resolution and light transport together so a
+caller draws at 60 fps while dragging and settles to a supersampled frame when
+it stops. `cp4_studio_pick` turns a pixel into the genome slot that drew it and
+`cp4_studio_surface` turns one into a place on the body; both run the same
+march as the renderer, off the same `land_spine`, so none of the three can
+disagree about where the animal is. On top of those: place, move, remove,
+shape, mirror, the spine handles, and paint over the three coats. `Cp4Edit`
+wraps the lot in a handle-and-flat-array ABI that ctypes and WebAssembly can
+both call, and `CreatureEditor` is the Python side of it.
+
+The front end exists too: `make wasm && make serve`. Every shape is made by
+dragging, as in the editor it imitates - a part comes off the palette under
+the cursor and follows it until you let go, a placed part is dragged to move,
+its ring dragged to resize and its tip dragged to lengthen, a vertebra dragged
+up to hump and sideways to fatten. No click-then-click mode anywhere.
+`?selftest=1` drives the whole palette drag through the real pointer handlers,
+so the wiring is checked rather than assumed.
+
+And it is responsive now, which it was not. A press, twelve moves and a
+release blocked the main thread for 1973ms; it is 123ms. Most of that was not
+the marcher: pressing on a part ran a full settle frame inside the pointerdown
+handler and then ten thousand ray-marched picks to find its drag handles, for
+an event that changes no geometry. Handles are projected from the primitives
+now (`cp4_studio_extent`, four microseconds), the ladder climbs one rung at a
+time on a timer instead of jumping, and drag frames are coalesced onto the
+animation frame. The renderer itself got about three times faster as well: the
+contact shadow is a world-space grid rather than a per-screen-pixel trace, so
+it stopped costing the square of the resolution, and the creature self-shadow
+waits for the export instead of switching on at the same moment the resolution
+quadruples. The self-test asserts the drag budget so it cannot quietly return.
+
+Still open on the RL side: `cp4_genome_from_action` sets parts, nseg and girth
+and nothing else, so colour, pattern and the spine genes remain unreachable
+from the action space and every animal an agent designs is the same beige with
+plain coats and a straight back. The editor can now set all of them, so the
+work is widening the action head rather than plumbing - but it changes
+CP4_ACT_DIM, which is an RL interface break and wants its own decision.
 
 **9. Make player predation a real selection pressure.** The player killing
 fish already removes genomes from the pool, but weakly. Strengthen it and
@@ -126,17 +193,35 @@ a flier, seasons that move the biome boundaries over an episode. Stage 2 is
 also still a fixed box and should inherit both the resident-window treatment
 and a substrate/current equivalent of biomes.
 
-**13. Articulated physics and learned locomotion.** Bodies do not swim. Thrust
-is applied along a heading and the undulation is a decorative sine disconnected
-from the physics. Needs jointed segments with per-segment fluid drag, then a
+**13. Articulated physics and learned locomotion.** Half done for stage 1.
+
+The beat now drives the body: thrust is modulated by the same phase the
+renderer draws the cilia and flagellum from, so what you see is the cause of
+what you feel rather than a picture of it. A stroke has a duty cycle, and that
+is where the three propulsors genuinely differ - cilia are many hairs out of
+step, so the sum is nearly continuous; a jet is a hard pulse and a refill.
+Holding one direction, measured speed ripple: cilia 0%, flagella 7.6%, jet
+33.8%. The gain integrates to one over a cycle whatever the duty, so this
+changed the texture of movement and not the balance, and nothing downstream
+needed retuning.
+
+What is still missing is the articulation itself. There are no jointed
+segments and no per-segment fluid drag - the body is one disc with a scalar
+thrust that now pulses. Stage 3's walk cycle is still decorative. Beyond that,
+a morphology-conditioned policy (GNN or transformer over the body graph) so one
+controller generalises across body plans, with full articulation for the player
+and nearest N and cheap kinematics for the rest. Needs jointed segments with per-segment fluid drag, then a
 morphology-conditioned policy (GNN or transformer over the body graph) so one
 controller generalises across body plans. Full articulation for the player and
 nearest N, cheap kinematics for the rest.
 
-**14. WASM build and browser editor.** Demoted: the native game
-(`apps/cpore_game.c`) is the play path now, and training happens natively.
-The emscripten target still builds (`make wasm`) for link-sharing, but the
-drag-and-drop browser editor waits until the native game says it is needed.
+- ~~**14. WASM build and browser editor.**~~ Done for the creature editor, and
+  without Emscripten: clang's wasm32 target plus wasm-ld, with a two-hundred
+  line shim supplying the allocator and the memory functions, and the
+  browser's own Math imported for the transcendentals. 57KB, six imports, no
+  runtime. The playable cell stage compiles across the same boundary
+  (`wasm/cell.wasm` behind the flat play ABI). What is not compiled yet is
+  stages 3-6 in the browser - that is more surface but no new problem.
 
 **15. Animated output and an offline path tracer.** APNG is a short step from
 the existing DEFLATE encoder, and stills badly undersell a world whose whole
