@@ -523,3 +523,85 @@ void cp6_vec_observe(const Cp6Batch *v, float *obs)
     for (i = 0; i < v->n; i++)
         cp6_world_observe(&v->w[i], obs + (size_t)i * CP6_OBS_DIM);
 }
+
+/* ================= space ================= */
+
+struct Cp7Batch {
+    Cp7World *w;
+    int n;
+    uint32_t cursor;
+};
+
+Cp7Batch *cp7_vec_create(int n, uint32_t seed)
+{
+    Cp7Batch *v;
+    if (n < 1) n = 1;
+    v = (Cp7Batch *)calloc(1, sizeof(Cp7Batch));
+    if (!v) return NULL;
+    v->w = (Cp7World *)calloc((size_t)n, sizeof(Cp7World));
+    if (!v->w) { free(v); return NULL; }
+    v->n = n;
+    v->cursor = seed;
+    cp7_vec_reset_all(v, seed);
+    return v;
+}
+
+void cp7_vec_free(Cp7Batch *v) { if (v) { free(v->w); free(v); } }
+int cp7_vec_count(const Cp7Batch *v) { return v ? v->n : 0; }
+
+void cp7_vec_reset(Cp7Batch *v, int idx, uint32_t seed, const float *legacy)
+{
+    /* Batch lanes start from an empire that inherited nothing; a legacy is
+     * the single-env path (cp7_env_reset / cp7_world_reset with a legacy). */
+    (void)legacy;
+    if (!v || idx < 0 || idx >= v->n) return;
+    cp7_world_reset(&v->w[idx], seed, NULL);
+}
+
+void cp7_vec_reset_all(Cp7Batch *v, uint32_t seed)
+{
+    int i;
+    if (!v) return;
+    v->cursor = seed;
+    for (i = 0; i < v->n; i++)
+        cp7_vec_reset(v, i, v->cursor++, NULL);
+}
+
+void cp7_vec_step(Cp7Batch *v, const float *acts, float *obs,
+                  float *rew, int32_t *term, int32_t *trunc, int autoreset)
+{
+    int i;
+    if (!v) return;
+    for (i = 0; i < v->n; i++) {
+        Cp7World *w = &v->w[i];
+        cp7_world_step(w, acts + (size_t)i * CP7_ACT_DIM);
+        if (obs) cp7_world_observe(w, obs + (size_t)i * CP7_OBS_DIM);
+        if (rew) rew[i] = w->reward;
+        {
+            int te = (w->status == CP7_LOST || w->status == CP7_WON);
+            int tr = (w->status == CP7_TIMEOUT);
+            if (term) term[i] = te;
+            if (trunc) trunc[i] = tr;
+            if (autoreset && (te || tr)) {
+                cp7_world_reset(w, v->cursor++, NULL);
+                if (obs) cp7_world_observe(w, obs + (size_t)i * CP7_OBS_DIM);
+            }
+        }
+    }
+}
+
+void cp7_vec_greedy(Cp7Batch *v, float *acts)
+{
+    int i;
+    if (!v || !acts) return;
+    for (i = 0; i < v->n; i++)
+        cp7_policy_greedy(&v->w[i], acts + (size_t)i * CP7_ACT_DIM);
+}
+
+void cp7_vec_observe(const Cp7Batch *v, float *obs)
+{
+    int i;
+    if (!v || !obs) return;
+    for (i = 0; i < v->n; i++)
+        cp7_world_observe(&v->w[i], obs + (size_t)i * CP7_OBS_DIM);
+}

@@ -8,14 +8,16 @@ LIB_SRC := src/rng.c src/genome.c src/world.c src/policy.c src/env.c \
            src/aqua_genome.c src/aqua.c src/aqua_env.c \
            src/land_genome.c src/land.c src/land_env.c \
            src/civ.c src/civ_env.c \
-           src/tribe.c src/vec.c src/genome_codec.c src/codex.c
+           src/tribe.c src/space.c src/space_env.c \
+           src/vec.c src/genome_codec.c src/codex.c
 VIS_SRC := src/render.c src/render3d.c src/render_land.c src/render_civ.c src/png.c
 LIB_OBJ := $(LIB_SRC:%.c=$(BUILD)/%.o)
 VIS_OBJ := $(VIS_SRC:%.c=$(BUILD)/%.o)
 
 .PHONY: all clean test bench shot aqua land civ tribe play game lib wasm web
 all: $(BUILD)/cpore_shot $(BUILD)/cpore_aqua $(BUILD)/cpore_land \
-     $(BUILD)/cpore_civ $(BUILD)/cpore_tribe $(BUILD)/cpore_play $(BUILD)/cpore_game \
+     $(BUILD)/cpore_civ $(BUILD)/cpore_tribe $(BUILD)/cpore_space \
+     $(BUILD)/cpore_play $(BUILD)/cpore_game \
      $(BUILD)/cpore_bench $(BUILD)/cpore_test $(BUILD)/libcpore.so
 
 HDRS := $(wildcard include/cpore/*.h) $(wildcard src/*.h)
@@ -46,6 +48,9 @@ $(BUILD)/cpore_civ: apps/civ_shot.c $(HDRS) $(BUILD)/libcpore.a
 $(BUILD)/cpore_tribe: apps/tribe_shot.c $(HDRS) $(BUILD)/libcpore.a
 	$(CC) $(CFLAGS) $< $(BUILD)/libcpore.a -o $@ $(LDLIBS)
 
+$(BUILD)/cpore_space: apps/space_shot.c $(HDRS) $(BUILD)/libcpore.a
+	$(CC) $(CFLAGS) $< $(BUILD)/libcpore.a -o $@ $(LDLIBS)
+
 $(BUILD)/cpore_play: apps/play.c $(HDRS) $(BUILD)/libcpore.a
 	$(CC) $(CFLAGS) $< $(BUILD)/libcpore.a -o $@ $(LDLIBS)
 
@@ -70,6 +75,7 @@ aqua: $(BUILD)/cpore_aqua ; @./$(BUILD)/cpore_aqua --seed 3 --steps 2400 --out $
 land: $(BUILD)/cpore_land ; @./$(BUILD)/cpore_land --seed 5 --steps 2400 --out $(BUILD)/land.png
 civ: $(BUILD)/cpore_civ ; @./$(BUILD)/cpore_civ --seed 4 --out $(BUILD)/civ.png
 tribe: $(BUILD)/cpore_tribe ; @./$(BUILD)/cpore_tribe --seed 5 --out $(BUILD)/tribe.png
+space: $(BUILD)/cpore_space ; @./$(BUILD)/cpore_space --seed 4 --out $(BUILD)/space.png
 play: $(BUILD)/cpore_play ; @./$(BUILD)/cpore_play --seed 23
 game: $(BUILD)/cpore_game ; @./$(BUILD)/cpore_game --seed 7 --stage land
 game-tribe: $(BUILD)/cpore_game ; @./$(BUILD)/cpore_game --seed 7 --stage tribe

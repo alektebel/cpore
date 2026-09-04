@@ -77,10 +77,13 @@ of the items below.
 - ~~**The text face for LLMs.**~~ `python/cpore/textgym.py`: situation
   reports + a verb DSL with frame-skip, JSONL transcripts, fixed-seed
   leaderboard scaffold.
-- ~~**The native game.**~~ `apps/cpore_game.c` + `src/glview.c`: all five
+- ~~**The native game.**~~ `apps/cpore_game.c` + `src/glview.c`: all six
   stages playable in one X11+GL window, GPU-presented, with an editor-lite
   (N), share codes (C) and full-quality photo stills (F). WASM is demoted
   to a legacy target; training and iteration happen natively.
+- ~~**Stage 6: space.**~~ The arc's last stage: a galaxy of systems
+  addressed by the campaign's own seeds, one ship, settle/trade/siege as
+  three measured mechanics, and the civ legacy handed up one scale further.
 
 ## Next
 
@@ -100,13 +103,16 @@ has none — its fish react to what you are, never to what you have done.
 scripted with fixed stats. Give them genomes, energy, breeding and mutation so
 every stage shares one selection machinery.
 
-**11b. Stage 6: space.** The last stage Spore had, and the only one still
-missing. It wants a different shape again — a galaxy of star systems rather
-than one planet — so it is worth doing only once the five that exist are
-properly balanced rather than merely working.
+**11b. Stage 6: space.** ~~The last stage Spore had, and the only one still
+missing.~~ Done: `src/space.c` — a galaxy of systems on the campaign's own
+seeds (the homeworld *is* the stage-3 planet), one ship, seven rival
+empires, and the settle/trade/siege fork measured at 30/30, 20/30 and
+30/30 wins over 30 seeds, each doctrine winning by its own verb. What
+remains open is depth: nebula hazards, empire diplomacy beyond the player,
+and a proper endgame rather than domination at 80%.
 
 **11c. A real campaign wrapper.** ~~All four stages chain today, but only by
-hand in Python~~ Done: `python/cpore/campaign.py` runs the five-stage arc as
+hand in Python~~ Done: `python/cpore/campaign.py` runs the six-stage arc as
 one episode with legacy handed forward. What remains is the fixed-shape
 padded-observation variant that lets one PPO policy train across the arc —
 that is the long-horizon credit-assignment benchmark proper.

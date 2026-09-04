@@ -1,4 +1,5 @@
-"""The campaign: cell -> aqua -> creature -> tribe -> civ as one episode.
+"""The campaign: cell -> aqua -> creature -> tribe -> civ -> space as one
+episode.
 
 Spore's fantasy is the arc, not any single stage. Each stage hands its
 legacy forward through the bridges that already exist in C:
@@ -8,6 +9,7 @@ legacy forward through the bridges that already exist in C:
 - creature -> tribe founds from the survivor's live genome
 - creature -> civ inherits military/economic/religious multipliers
 - tribe -> civ: an allied continent is a richer inheritance
+- civ -> space: the nation's doctrine becomes the empire's strengths
 
 Gymnasium-shaped (reset/step) with a dict observation ``{"stage": name,
 "obs": [...], "t": total_steps}`` so the stage's own dims are preserved -
@@ -19,9 +21,9 @@ arc with the scripted policies and returns the report card.
 
 from __future__ import annotations
 
-from .env import CporeEnv, AquaEnv, LandEnv, TribeEnv, CivEnv
+from .env import CporeEnv, AquaEnv, LandEnv, TribeEnv, CivEnv, SpaceEnv
 
-STAGES = ("cell", "aqua", "land", "tribe", "civ")
+STAGES = ("cell", "aqua", "land", "tribe", "civ", "space")
 
 
 class Campaign:
@@ -32,12 +34,14 @@ class Campaign:
         self.land = LandEnv(seed=seed)
         self.tribe = TribeEnv(seed=seed)
         self.civ = CivEnv(seed=seed)
+        self.space = SpaceEnv(seed=seed)
         self.stage = "cell"
         self.t = 0
         self.report = {}
 
     def close(self):
-        for e in (self.cell, self.aqua, self.land, self.tribe, self.civ):
+        for e in (self.cell, self.aqua, self.land, self.tribe, self.civ,
+                  self.space):
             e.close()
 
     # -- chaining ------------------------------------------------------
@@ -76,6 +80,16 @@ class Campaign:
                     "obs": self.civ.reset(seed=self.seed,
                                           legacy=self.report.get("land_legacy")),
                     "legacy": self.report.get("land_legacy")}
+        if self.stage == "civ":
+            self.report["civ_census"] = self.civ.census()
+            # the nation's own multipliers become the empire's strengths
+            bonus = self.civ.census()["bonus"]
+            legacy = [bonus["religious"], bonus["economic"], bonus["military"]]
+            self.report["space_legacy"] = bonus
+            self.stage = "space"
+            return {"stage": "space",
+                    "obs": self.space.reset(seed=self.seed, legacy=legacy),
+                    "legacy": legacy}
         self.stage = "done"
         return {"stage": "done", "obs": []}
 
@@ -122,8 +136,18 @@ class Campaign:
             o, r, te, tr, i = self.civ.step(action)
             if te or tr:
                 self.report["civ_census"] = self.civ.census()
-                return {"stage": "done", "obs": o}, r, True, False, {}
+                if self.civ.status == "won":
+                    nxt = self._advance()
+                    return nxt, r, False, False, {"advanced": True}
+                return {"stage": "done", "obs": o}, r, True, False, \
+                    {"died": self.civ.status}
             return {"stage": "civ", "obs": o, "t": self.t}, r, False, tr, i
+        if self.stage == "space":
+            o, r, te, tr, i = self.space.step(action)
+            if te or tr:
+                self.report["space_census"] = self.space.census()
+                return {"stage": "done", "obs": o}, r, True, False, {}
+            return {"stage": "space", "obs": o, "t": self.t}, r, False, tr, i
         return {"stage": "done", "obs": []}, 0.0, True, False, {}
 
     # -- scripted full-arc baseline -------------------------------------

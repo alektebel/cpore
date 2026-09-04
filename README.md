@@ -28,6 +28,7 @@ make && make test && make bench
 ./build/cpore_shot --vis-all --out compare.png      # every style, same frame
 ./build/cpore_game --stage land --seed 7            # play it natively (X11+GL)
 ./build/cpore_tribe --table --seeds 30              # the tribe fork in numbers
+./build/cpore_space --table                         # the galactic fork in numbers
 ```
 
 ## Stage 2: aquatic, in 3D
@@ -610,12 +611,57 @@ tribe = TribeEnv(seed=25, genome=land_genome_from_code(code))
 civ = CivEnv(seed=25, legacy=land.legacy())
 ```
 
+## Stage 6: space
+
+![space stage](docs/space.png)
+
+The last stage Spore had, and the last one missing here. The scale changes
+again, and the galaxy is not a new universe: every system carries its own
+seed, and the **homeworld's seed is the campaign seed itself** — the planet
+the creature walked is literally in the sky, addressable by
+`cp7_star_seed(seed, 0)`.
+
+You captain one ship among ~27 systems and seven rival empires, and the
+stage inherits the fork every scale below it: three ways to grow an empire,
+each a different mechanic with a different residue, measured over 30 seeds
+under the scripted captain:
+
+| doctrine | does | wins |
+|---|---|---|
+| settler | pays 90 to settle a free system outright | 30/30, ~190 settled |
+| trader | hauls spice between price spreads; every route buys loyalty with a whole rival empire, whose weakest system joins you intact | 20/30, ~500 buyouts |
+| warlord | sieges a system's defence down; the capture is halved and every power resents it | 30/30, ~600 taken |
+
+Fuel makes distance real (a dry tank leaves you drifting at 12% speed),
+pirates tax undefended systems, and rivals expand on their own — settlers
+found, traders annex with gold, warlords besiege in campaigns with pauses
+(the same campaign pacing the tribe stage learned the hard way). Wealth
+garrisons your worlds automatically, so an empire you cannot afford to
+defend is an empire you will lose. The hull is not death: a wrecked ship
+limps home on emergency cells, poorer — only losing every system ends you,
+which is Spore's rule, not a permadeath one.
+
+What the civilisation stage hands forward is its own doctrine, multiplier
+for multiplier: a military nation is a conquering power, an economic one a
+trading power, a devout one a settling power.
+
+```
+./build/cpore_space --seed 9 --out space.png
+./build/cpore_space --legacy 0.85,0.85,1.55 --every 600 --out frames.png
+./build/cpore_space --table          # all three doctrines x 30 seeds
+```
+
+```python
+space = SpaceEnv(seed=7, legacy=[1.55, 0.85, 0.85])   # or handed from civ
+```
+
 ## The native game
 
-`./build/cpore_game` plays all five stages in one X11+GL window, no browser
-involved. Keys `1-5` switch cell/aqua/creature/tribe/civ live; the arc
-chains, so the tribe founds from the genome you are driving and civ inherits
-its legacy. WASD moves (per-stage verbs on screen via `F1`... in practice:
+`./build/cpore_game` plays all six stages in one X11+GL window, no browser
+involved. Keys `1-6` switch cell/aqua/creature/tribe/civ/space live; the arc
+chains, so the tribe founds from the genome you are driving, civ inherits
+its legacy, and space inherits the nation's doctrine. WASD moves (per-stage
+verbs on screen via `F1`... in practice:
 SPACE bites, E sings, N rebuilds toward the next archetype at the current
 budget, C prints the share code of your body, F takes a full-quality still
 with the screenshot renderer, G toggles the scripted autopilot).
@@ -682,7 +728,7 @@ this project deletes:
 | No scripting API, no headless mode | Sim core is a library with zero I/O |
 | Runs at 1x real time, one instance | ~133k steps/s cell, ~16k land, 64 envs, one thread |
 | A playthrough is tens of hours | An episode is ≤9000 steps (~2s of compute) |
-| Five games with five interfaces | One planet, five rule sets, one campaign env |
+| Five games with five interfaces | One planet, six rule sets, one campaign env |
 | No way to save/restore mid-run | `memcpy`-able POD state, per stage |
 | Creatures trapped in the game | Share codes: any genome is a pasteable string |
 
@@ -766,6 +812,8 @@ src/land_env.c          stage-3 RL wrapper
 src/civ.c               the civilisation simulation: cities, units, doctrines
 src/civ_env.c           stage-4 RL wrapper, and the bridge from stage 3
 src/tribe.c             the tribe simulation: members, stores, tools, raid-or-befriend
+src/space.c             the galactic simulation: systems, ship, empires, settle-trade-siege
+src/space_env.c         stage-6 RL wrapper, and the bridge from stage 4
 src/vec.c               batch stepper: N worlds, one call, flat buffers (the puffer path)
 src/genome_codec.c      share codes: every genome as a pasteable string
 src/codex.c             the discovery codex: first sightings as events
@@ -813,7 +861,7 @@ env = make_puffer_env("land", num_envs=64, seed=0)
 obs, infos = env.reset()               # (64, 170) float32, C writes it directly
 obs, rew, term, trunc, infos = env.step(env.greedy_actions())
 
-from cpore import Campaign             # cell -> aqua -> land -> tribe -> civ
+from cpore import Campaign             # cell -> aqua -> land -> tribe -> civ -> space
 rep = Campaign(seed=25).run_baseline() # one arc, legacy handed forward
 
 from cpore import TextLand             # the LLM face: verbs, not floats
@@ -842,6 +890,7 @@ aquatic          113    46    52k steps/s
 creature         170   106    16k steps/s
 tribe             41     9    543k steps/s
 civ              132    17    1.3M steps/s
+space            137     7    1.5M steps/s
 ```
 
 (raw C cell loop for reference: 144k step-only, 103k step+observe+baseline.)

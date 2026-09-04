@@ -24,6 +24,8 @@ The sim (cell, aquatic, creature, civ), the unbounded procedural planet with
 biomes, rivers and day/night, the 19-part genome, evolving rival species,
 the SDF renderers, the ctypes binding, 25.5k steps/s on the land stage.
 Phase 0 is why every stage below is a bounded amount of work.
+(Since this plan was written, the tribe stage — Phase 4.1 — and the space
+stage have both landed, so the arc runs cell → civ → space end to end.)
 
 ---
 
@@ -264,7 +266,10 @@ in the same table.
 - **Live multiplayer, accounts, any server** — pollination by data gets the
   fantasy at zero cost; a tiny serverless endpoint for code-sharing can be
   reconsidered only if 3.x demand proves it.
-- **The space stage** — after the arc through civ is fun, not before.
+- **Space-stage depth** — the stage itself is built (`src/space.c`: the
+  settle/trade/siege fork measured over 30 seeds, the homeworld addressed by
+  the campaign seed); what waits is the polish pass every other stage got
+  after its first table.
 - **Engine or fidelity pivots** — the pixel-art identity and the WASM
   frame budget are settled decisions (see GAME_DESIGN.md).
 - **Generative-model terrain amplification** — Phase 2-adjacent polish, only

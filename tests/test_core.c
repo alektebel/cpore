@@ -3,6 +3,7 @@
 #include "cpore/land.h"
 #include "cpore/civ.h"
 #include "cpore/tribe.h"
+#include "cpore/space.h"
 #include "cpore/vec.h"
 #include "cpore/codec.h"
 #include "cpore/codex.h"
@@ -1523,6 +1524,145 @@ int main(void)
         }
         CHECK(ok, "redesign: the live cell rebuilds toward the style in budget");
         free(w);
+    }
+
+    /* ================= STAGE 6: SPACE ================= */
+    printf("\n-- space --\n");
+
+    /* Same contract as every other stage: identical seed, identical episode. */
+    {
+        Cp7World *a = (Cp7World *)malloc(sizeof(Cp7World));
+        Cp7World *b = (Cp7World *)malloc(sizeof(Cp7World));
+        cp7_world_reset(a, 71, NULL);
+        cp7_world_reset(b, 71, NULL);
+        int same = 1;
+        for (int t = 0; t < 1500; t++) {
+            float act[CP7_ACT_DIM];
+            cp7_policy_greedy(a, act);
+            cp7_world_step(a, act);
+            cp7_policy_greedy(b, act);
+            cp7_world_step(b, act);
+        }
+        if (memcmp(a, b, sizeof(Cp7World)) != 0) same = 0;
+        CHECK(same, "space: the same seed replays exactly");
+        free(a); free(b);
+    }
+
+    /* A snapshot restores the future exactly, as every stage promises. */
+    {
+        Cp7Env *e = cp7_env_create(72);
+        float obs[CP7_OBS_DIM], act[CP7_ACT_DIM], r;
+        int32_t term, trunc;
+        void *snap = malloc(cp7_env_state_size());
+        memset(act, 0, sizeof(act));
+        for (int t = 0; t < 300; t++) cp7_env_step(e, act, obs, &r, &term, &trunc);
+        cp7_env_save(e, snap);
+        float after[CP7_OBS_DIM], redo[CP7_OBS_DIM];
+        for (int t = 0; t < 200; t++) cp7_env_step(e, act, after, &r, &term, &trunc);
+        cp7_env_load(e, snap);
+        for (int t = 0; t < 200; t++) cp7_env_step(e, act, redo, &r, &term, &trunc);
+        CHECK(memcmp(after, redo, sizeof(after)) == 0,
+              "space: restore reproduces the future exactly");
+        free(snap);
+        cp7_env_free(e);
+    }
+
+    /* Observations stay finite and in range, and episodes always end. */
+    {
+        Cp7World *w = (Cp7World *)malloc(sizeof(Cp7World));
+        float obs[CP7_OBS_DIM];
+        int ok = 1, ended = 0;
+        for (int seed = 0; seed < 6; seed++) {
+            cp7_world_reset(w, (uint32_t)(seed * 23 + 5), NULL);
+            for (int t = 0; t < CP7_MAX_STEPS + 4; t++) {
+                float act[CP7_ACT_DIM];
+                cp7_policy_greedy(w, act);
+                cp7_world_step(w, act);
+                cp7_world_observe(w, obs);
+                for (int i = 0; i < CP7_OBS_DIM; i++)
+                    if (!(obs[i] == obs[i]) || obs[i] < -4.0f || obs[i] > 4.0f)
+                        ok = 0;
+                if (w->status != CP7_RUN) break;
+            }
+            if (w->status != CP7_RUN) ended++;
+        }
+        CHECK(ok, "space: observations are finite and in range");
+        CHECK(ended == 6, "space: every episode reaches a terminal state");
+        free(w);
+    }
+
+    /* THE FORK, ONE MORE TIME. Three doctrines, one galaxy shape per seed:
+     * the settler must grow by settling, the trader by buying systems with
+     * commerce, the warlord by taking them. If only force ever finishes,
+     * the stage is one mechanic wearing three hats. */
+    {
+        int won[3] = { 0, 0, 0 };
+        int32_t verb[3][3];
+        memset(verb, 0, sizeof(verb));
+        for (int k = 0; k < 3; k++) {
+            Cp7Legacy l;
+            for (int b = 0; b < CP7_BONUS_COUNT; b++) l.bonus[b] = 0.85f;
+            l.bonus[k] = 1.55f;
+            for (int s = 0; s < 6; s++) {
+                Cp7World *w = (Cp7World *)malloc(sizeof(Cp7World));
+                cp7_world_reset(w, (uint32_t)(s * 29 + 5), &l);
+                for (int t = 0; t < CP7_MAX_STEPS && w->status == CP7_RUN; t++) {
+                    float act[CP7_ACT_DIM];
+                    cp7_policy_greedy(w, act);
+                    cp7_world_step(w, act);
+                }
+                if (w->status == CP7_WON) won[k]++;
+                verb[k][0] += w->settled;
+                verb[k][1] += w->flipped;
+                verb[k][2] += w->captured;
+                free(w);
+            }
+        }
+        CHECK(won[0] >= 4, "space: a settling species can win by settling");
+        CHECK(won[1] >= 2, "space: a trading species can win by buying loyalty");
+        CHECK(won[2] >= 4, "space: a warlike species can win by conquest");
+        /* each doctrine leans on its own verb more than the others do: a
+         * settler settles more than trader or warlord, and so on. (Once the
+         * frontier runs out everyone takes what is left, so absolute counts
+         * are the wrong test - relative ones are the honest one.) */
+        CHECK(verb[0][0] > verb[1][0] && verb[0][0] > verb[2][0],
+              "space: the settler actually settles");
+        CHECK(verb[1][1] > verb[0][1] && verb[1][1] > verb[2][1],
+              "space: the trader actually trades");
+        CHECK(verb[2][2] > verb[0][2] && verb[2][2] > verb[1][2],
+              "space: the warlord actually conquers");
+    }
+
+    /* The legacy bridge: a military nation arrives a conquering power, a
+     * devout one a settling power - the same handoff civ used to receive. */
+    {
+        Cp5World *cv = (Cp5World *)malloc(sizeof(Cp5World));
+        float leg[CP7_BONUS_COUNT];
+        cp5_world_reset(cv, 9, NULL);
+        /* force the ledger: a warlike nation by hand */
+        cv->nation[CP5_PLAYER].bonus[CP5_MIL] = 1.55f;
+        cv->nation[CP5_PLAYER].bonus[CP5_ECO] = 0.85f;
+        cv->nation[CP5_PLAYER].bonus[CP5_REL] = 0.85f;
+        cp7_legacy_from_civ(cv, leg);
+        CHECK(leg[CP7_ATTACK] > leg[CP7_COLONISE] + 0.3f,
+              "space: a warlike nation arrives a conquering power");
+        cv->nation[CP5_PLAYER].bonus[CP5_MIL] = 0.85f;
+        cv->nation[CP5_PLAYER].bonus[CP5_ECO] = 0.85f;
+        cv->nation[CP5_PLAYER].bonus[CP5_REL] = 1.55f;
+        cp7_legacy_from_civ(cv, leg);
+        CHECK(leg[CP7_COLONISE] > leg[CP7_ATTACK] + 0.3f,
+              "space: a devout nation arrives a settling power");
+        free(cv);
+    }
+
+    /* The homeworld is the campaign's own planet: its star seed is the
+     * galaxy seed, and every other system derives from it deterministically. */
+    {
+        int ok = cp7_star_seed(1234, 0) == 1234;
+        for (int i = 1; i < 40; i++)
+            if (cp7_star_seed(1234, i) == cp7_star_seed(1234, (i * 7) % 40 + 1))
+                ok = 0;
+        CHECK(ok, "space: the homeworld is the campaign planet, addressable");
     }
 
     printf(fails ? "\n%d test(s) failed\n" : "\nall tests passed\n", fails);

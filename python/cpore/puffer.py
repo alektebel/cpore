@@ -119,6 +119,8 @@ _SPECS = {
               "cp5_vec_observe", "cp5_vec_greedy", 132, 17),
     "tribe": ("cp6_vec_create", "cp6_vec_free", "cp6_vec_reset_all", "cp6_vec_step",
               "cp6_vec_observe", "cp6_vec_greedy", 41, 9),
+    "space": ("cp7_vec_create", "cp7_vec_free", "cp7_vec_reset_all", "cp7_vec_step",
+              "cp7_vec_observe", "cp7_vec_greedy", 137, 7),
 }
 
 
@@ -241,11 +243,15 @@ class TribePuffer(CporePuffer):
     _stage = "tribe"
 
 
+class SpacePuffer(CporePuffer):
+    _stage = "space"
+
+
 def make_puffer_env(stage="land", num_envs=16, seed=0, buf=None):
     """Factory: ``make_puffer_env("land", 64)``. Stage in
-    cell/aqua/land/tribe/civ."""
+    cell/aqua/land/tribe/civ/space."""
     cls = {"cell": CellPuffer, "aqua": AquaPuffer, "land": LandPuffer,
-           "tribe": TribePuffer, "civ": CivPuffer}[stage]
+           "tribe": TribePuffer, "civ": CivPuffer, "space": SpacePuffer}[stage]
     return cls(num_envs=num_envs, seed=seed, buf=buf)
 
 

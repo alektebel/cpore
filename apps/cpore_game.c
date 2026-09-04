@@ -2,13 +2,14 @@
  *
  *   ./build/cpore_game [--stage land] [--seed 7] [--genome CP4-...] [--scale 3]
  *
- * One process, five stages: 1-5 switch cell/aqua/land/tribe/civ live, and the
- * arc chains - the tribe founds from your live land genome, civ inherits its
- * legacy, so playing upward is the campaign. Zero design head during play, so
- * the scripted designer rebuilds you at generation boundaries exactly as it
- * does for an RL policy; N opens the editor-lite (rebuild toward an
- * archetype at the current budget), C prints the share code of the body you
- * are driving, F takes a full-quality still with the screenshot renderer.
+ * One process, six stages: 1-6 switch cell/aqua/land/tribe/civ/space live,
+ * and the arc chains - the tribe founds from your live land genome, civ
+ * inherits its legacy, space inherits the nation's doctrine, so playing
+ * upward is the campaign. Zero design head during play, so the scripted
+ * designer rebuilds you at generation boundaries exactly as it does for an
+ * RL policy; N opens the editor-lite (rebuild toward an archetype at the
+ * current budget), C prints the share code of the body you are driving, F
+ * takes a full-quality still with the screenshot renderer.
  *
  * Rendering: cell/aqua use their real CPU renderers (fast tiers); land,
  * tribe and civ play on a GPU-presented top-down map computed at half res
@@ -20,13 +21,16 @@
  * Cell: WASD steer, SPACE burst, E zap.  Aqua: A/D yaw, W thrust, R/F pitch,
  *   SPACE bite.  Tribe: LEFT/RIGHT pick rival, UP/DOWN stance, G/Y/U
  *   workforce presets, N build hut.  Civ: Z/X/C doctrine, arrows+ENTER focus.
- * Global: 1-5 stage, R restart, F photo, C share code, ESC quit.
+ * Space: WASD thrust, SPACE trade, E colonise, Q attack, R resupply,
+ *   T cycle upgrade track.
+ * Global: 1-6 stage, R restart, F photo, C share code, ESC quit.
  */
 #include "cpore/cpore.h"
 #include "cpore/aqua.h"
 #include "cpore/land.h"
 #include "cpore/civ.h"
 #include "cpore/tribe.h"
+#include "cpore/space.h"
 #include "cpore/codec.h"
 #include "cpore/codex.h"
 #include "cpore/glview.h"
@@ -55,7 +59,8 @@ typedef struct {
     Cp4World l;
     Cp6World t;
     Cp5World c;
-    int stage;               /* 0 cell 1 aqua 2 land 3 tribe 4 civ */
+    Cp7World s;
+    int stage;               /* 0 cell 1 aqua 2 land 3 tribe 4 civ 5 space */
     uint32_t seed;
     int auto_pilot;
     int style_sel;           /* editor-lite archetype cursor */
@@ -65,6 +70,7 @@ typedef struct {
     int trib_hut;
     int civ_focus;
     int civ_doctrine;
+    int space_dial;          /* ship upgrade track cursor */
     CpdxCodex codex;
     char banner[128];
     int banner_t;
@@ -215,10 +221,15 @@ static void draw_civ(Game *g, uint8_t *fb)
     }
 }
 
+static void draw_space(Game *g, uint8_t *fb)
+{
+    cp7_render(&g->s, fb, FW, FH);
+}
+
 static void hud(Game *g, uint8_t *fb, double fps)
 {
     char buf[160];
-    const char *stg[5] = { "CELL", "AQUA", "CREATURE", "TRIBE", "CIV" };
+    const char *stg[6] = { "CELL", "AQUA", "CREATURE", "TRIBE", "CIV", "SPACE" };
     buf[0] = '\0';
     if (g->stage == 0) {
         static const char *st[] = { "ALIVE", "DIED", "EVOLVED", "TIMEOUT" };
@@ -238,10 +249,17 @@ static void hud(Game *g, uint8_t *fb, double fps)
         snprintf(buf, sizeof(buf), "%s fps %.0f members %.0f stores %.0f allied %d razed %d %s",
                  stg[g->stage], fps, (double)p->members, (double)p->stores,
                  g->t.allied, g->t.razed, g->auto_pilot ? "AUTO" : "");
-    } else {
+    } else if (g->stage == 4) {
         snprintf(buf, sizeof(buf), "%s fps %.0f cities %d money %.0f %s", stg[g->stage],
                  fps, g->c.nation[CP5_PLAYER].cities,
                  (double)g->c.nation[CP5_PLAYER].money, g->auto_pilot ? "AUTO" : "");
+    } else {
+        static const char *DN[4] = { "engine", "cargo", "weapons", "hull" };
+        snprintf(buf, sizeof(buf), "%s fps %.0f stars %d money %.0f fuel %.0f hull %.0f dial %s %s",
+                 stg[g->stage], fps, g->s.empire[CP7_PLAYER].stars,
+                 (double)g->s.empire[CP7_PLAYER].money,
+                 (double)g->s.ship.fuel, (double)g->s.ship.hull,
+                 DN[g->space_dial], g->auto_pilot ? "AUTO" : "");
     }
     cp_px_text(fb, FW, FH, 4, FH - 12, 1, buf, 1.0f, 1.0f, 1.0f, 1.0f);
     if (g->banner_t > 0) {
@@ -265,6 +283,15 @@ static void reset_stage(Game *g, int stage)
         cp5_legacy_from_world(&g->l, leg);
         for (int a = 0; a < 3; a++) lg.bonus[a] = leg[a];
         cp5_world_reset(&g->c, g->seed, &lg);
+    }
+    /* space inherits the nation's own doctrine multipliers: the empire you
+     * grew in civ is the power you reach the stars with */
+    else if (stage == 5) {
+        float leg[CP7_BONUS_COUNT];
+        Cp7Legacy lg;
+        cp7_legacy_from_civ(&g->c, leg);
+        for (int b = 0; b < CP7_BONUS_COUNT; b++) lg.bonus[b] = leg[b];
+        cp7_world_reset(&g->s, g->seed, &lg);
     }
 }
 
@@ -310,11 +337,17 @@ static void photo(Game *g)
         snprintf(path, sizeof(path), "game_tribe_%u.png", g->seed);
         { uint8_t *hi = malloc(640 * 360 * 4);
           cp6_render(&g->t, hi, 640, 360); cp_png_write(path, hi, 640, 360); free(hi); }
-    } else {
+    } else if (g->stage == 4) {
         uint8_t *hi = malloc(640 * 360 * 4);
         snprintf(path, sizeof(path), "game_civ_%u.png", g->seed);
         cp5_render_styled(&g->c, hi, 640, 360, CP_VIS_ABYSS);
         cp_png_write(path, hi, 640, 360);
+        free(hi);
+    } else {
+        uint8_t *hi = malloc(1280 * 720 * 4);
+        snprintf(path, sizeof(path), "game_space_%u.png", g->seed);
+        cp7_render(&g->s, hi, 1280, 720);
+        cp_png_write(path, hi, 1280, 720);
         free(hi);
     }
     snprintf(g->banner, sizeof(g->banner), "saved %s", path);
@@ -340,10 +373,10 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--stage") && i + 1 < argc) {
             const char *s = argv[++i];
             stage = (!strcmp(s, "cell")) ? 0 : (!strcmp(s, "aqua")) ? 1 : (!strcmp(s, "tribe")) ? 3
-                    : (!strcmp(s, "civ")) ? 4 : 2;
+                    : (!strcmp(s, "civ")) ? 4 : (!strcmp(s, "space")) ? 5 : 2;
         } else if (!strcmp(argv[i], "--genome") && i + 1 < argc) genome_arg = argv[++i];
         else if (!strcmp(argv[i], "--scale") && i + 1 < argc) scale = atoi(argv[++i]);
-        else { printf("usage: cpore_game [--stage cell|aqua|land|tribe|civ] [--seed N] [--genome CODE] [--scale K]\n"); return 1; }
+        else { printf("usage: cpore_game [--stage cell|aqua|land|tribe|civ|space] [--seed N] [--genome CODE] [--scale K]\n"); return 1; }
     }
 
     memset(&g, 0, sizeof(g));
@@ -360,6 +393,11 @@ int main(int argc, char **argv)
         cp5_legacy_from_world(&g.l, leg);
         for (int a = 0; a < 3; a++) lg.bonus[a] = leg[a];
         cp5_world_reset(&g.c, seed, &lg);
+    }
+    {
+        Cp7Legacy lg;
+        cp7_legacy_from_civ(&g.c, lg.bonus);
+        cp7_world_reset(&g.s, seed, &lg);
     }
     /* a pasted share code applies to the opening stage's body */
     if (genome_arg) {
@@ -382,7 +420,7 @@ int main(int argc, char **argv)
 
     clock_gettime(CLOCK_MONOTONIC, &ts);
     last = ts.tv_sec + ts.tv_nsec * 1e-9;
-    printf("cpore native game: 1-5 stage, N redesign, C share code, F photo, G autopilot, ESC quit\n");
+    printf("cpore native game: 1-6 stage, N redesign, C share code, F photo, G autopilot, ESC quit\n");
 
     while (1) {
         float dt;
@@ -394,6 +432,7 @@ int main(int argc, char **argv)
         if (pressed['3']) reset_stage(&g, 2);
         if (pressed['4']) reset_stage(&g, 3);
         if (pressed['5']) reset_stage(&g, 4);
+        if (pressed['6']) reset_stage(&g, 5);
         if (pressed['t']) reset_stage(&g, g.stage);
         if (pressed['g']) { g.auto_pilot = !g.auto_pilot; printf("autopilot %s\n", g.auto_pilot ? "on" : "off"); }
         if (pressed['c']) share_code(&g);
@@ -503,6 +542,23 @@ int main(int argc, char **argv)
                         act[CP5_APPROACH_COUNT + g.civ_focus] = 1.0f;
                 }
                 cp5_world_step(&g.c, act);
+            } else if (g.stage == 5 && g.s.status == CP7_RUN) {
+                float act[CP7_ACT_DIM] = { 0 };
+                static const float DIAL[4] = { -0.75f, -0.25f, 0.25f, 0.75f };
+                if (g.auto_pilot) cp7_policy_greedy(&g.s, act);
+                else {
+                    if (down['a'] || down[K_LEFT]) act[CP7_V_THRUST] -= 1.0f;
+                    if (down['d'] || down[K_RIGHT]) act[CP7_V_THRUST] += 1.0f;
+                    if (down['w'] || down[K_UP]) act[CP7_V_THRUST + 1] += 1.0f;
+                    if (down['s'] || down[K_DOWN]) act[CP7_V_THRUST + 1] -= 1.0f;
+                    if (down[32]) act[CP7_V_TRADE] = 1.0f;      /* space: trade */
+                    if (down['e']) act[CP7_V_COLONISE] = 1.0f;
+                    if (down['q']) act[CP7_V_ATTACK] = 1.0f;
+                    if (down['r']) act[CP7_V_RESUPPLY] = 1.0f;
+                    if (pressed['t']) g.space_dial = (g.space_dial + 1) % 4;
+                    act[CP7_V_UPGRADE] = DIAL[g.space_dial];
+                }
+                cp7_world_step(&g.s, act);
             }
         }
         /* B is edge-triggered for nest: re-fire not needed; pressed[] was
@@ -516,7 +572,8 @@ int main(int argc, char **argv)
             if ((frame % 3) == 0) cp3_render_styled(&g.a, fb, FW, FH, CP_VIS_ABYSS);
         } else if (g.stage == 2) draw_land(&g, fb);
         else if (g.stage == 3) draw_tribe(&g, fb);
-        else draw_civ(&g, fb);
+        else if (g.stage == 4) draw_civ(&g, fb);
+        else draw_space(&g, fb);
         /* keep last aqua frame rather than black between throttled renders */
         {
             static uint8_t aqua_fb[FW * FH * 4];

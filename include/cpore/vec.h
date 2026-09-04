@@ -21,6 +21,7 @@
 #include "cpore/land.h"
 #include "cpore/civ.h"
 #include "cpore/tribe.h"
+#include "cpore/space.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -105,6 +106,21 @@ void      cp6_vec_step(Cp6Batch *v, const float *acts, float *obs,
                        int autoreset);
 void      cp6_vec_observe(const Cp6Batch *v, float *obs);
 void      cp6_vec_greedy(Cp6Batch *v, float *acts);
+
+/* ---- space batch ---- */
+typedef struct Cp7Batch Cp7Batch;
+
+Cp7Batch *cp7_vec_create(int n, uint32_t seed);
+void      cp7_vec_free(Cp7Batch *v);
+int       cp7_vec_count(const Cp7Batch *v);
+void      cp7_vec_reset(Cp7Batch *v, int idx, uint32_t seed,
+                        const float *legacy);
+void      cp7_vec_reset_all(Cp7Batch *v, uint32_t seed);
+void      cp7_vec_step(Cp7Batch *v, const float *acts, float *obs,
+                       float *rew, int32_t *term, int32_t *trunc,
+                       int autoreset);
+void      cp7_vec_observe(const Cp7Batch *v, float *obs);
+void      cp7_vec_greedy(Cp7Batch *v, float *acts);
 
 #ifdef __cplusplus
 }
