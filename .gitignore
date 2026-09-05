@@ -16,3 +16,6 @@ docs/creature-creator-artifact.html
 puffer/**/*.so
 puffer/build/
 puffer/*.egg-info/
+
+# generated meshes: derived from the fields, not source
+*.stl

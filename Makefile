@@ -11,12 +11,12 @@ LIB_SRC := src/rng.c src/genome.c src/world.c src/policy.c src/env.c \
 # The editor session lives here and not in LIB_SRC: it drives the studio,
 # so it belongs to the half of the project a training build drops.
 VIS_SRC := src/render.c src/render_cell.c src/render_pond.c src/play.c src/render3d.c src/render_land.c \
-           src/render_terra.c src/render_civ.c src/land_edit.c src/png.c
+           src/render_terra.c src/render_civ.c src/land_edit.c src/stl.c src/png.c
 LIB_OBJ := $(LIB_SRC:%.c=$(BUILD)/%.o)
 VIS_OBJ := $(VIS_SRC:%.c=$(BUILD)/%.o)
 
 .PHONY: all clean test bench shot aqua land civ lib
-all: $(BUILD)/cpore_shot $(BUILD)/cpore_aqua $(BUILD)/cpore_land \
+all: $(BUILD)/cpore_shot $(BUILD)/cpore_aqua $(BUILD)/cpore_land $(BUILD)/cpore_stl \
      $(BUILD)/cpore_civ $(BUILD)/cpore_bench $(BUILD)/cpore_test $(BUILD)/libcpore.so
 
 HDRS := $(wildcard include/cpore/*.h) $(wildcard src/*.h)
@@ -37,6 +37,9 @@ $(BUILD)/cpore_shot: apps/shot.c $(HDRS) $(BUILD)/libcpore.a
 
 $(BUILD)/cpore_aqua: apps/aqua_shot.c $(HDRS) $(BUILD)/libcpore.a
 	$(CC) $(CFLAGS) $< $(BUILD)/libcpore.a -o $@ $(LDLIBS)
+
+$(BUILD)/cpore_stl: apps/stl_dump.c $(HDRS) $(BUILD)/libcpore.a
+	$(CC) $(CFLAGS) -Iinclude $< $(BUILD)/libcpore.a -lm -o $@
 
 $(BUILD)/cpore_land: apps/land_shot.c $(HDRS) $(BUILD)/libcpore.a
 	$(CC) $(CFLAGS) $< $(BUILD)/libcpore.a -o $@ $(LDLIBS)

@@ -381,6 +381,23 @@ void cp4_render(const Cp4World *w, uint8_t *rgba, int width, int height);
 /* Stage 3's continuous-tone renderer: a cached heightfield marched into a
  * linear HDR buffer at the output resolution, with the atmosphere doing the
  * drawing. Reachable through cp4_render_styled with CP_VIS_VISTA. */
+/* ---- mesh export ----
+ *
+ * The field stays the source of truth. These emit a derived artifact for tools
+ * that only speak triangles - a slicer, a DCC package, a viewer - which is the
+ * one direction that dependency can safely run: change a part's code and the
+ * STL regenerates, edit the STL and nothing here notices.
+ *
+ * `res` is grid cells along the longest axis; 0 takes a sensible default.
+ * Returns the triangle count, or 0 on failure. Binary STL carries no colour,
+ * units or materials by the format's own design, so a caller who wants those
+ * wants a different exporter. */
+int cp4_stl_creature(const char *path, const Cp4Genome *g, int res);
+/* One part on its own, recentred on the origin. Built on a minimal body and
+ * then filtered to that slot, because a part's geometry depends on where it
+ * mounts - a leg reaches the ground from the flank it sprouts on. */
+int cp4_stl_part(const char *path, int part_type, int res);
+
 void cp4_render_vista(const Cp4World *w, uint8_t *rgba, int width, int height);
 void cp4_render_styled(const Cp4World *w, uint8_t *rgba, int width, int height,
                        int style);
