@@ -1129,23 +1129,62 @@ static Cp4Vert spine_extend(const Cp4Vert *a, const Cp4Vert *b)
     return o;
 }
 
+/* Grow the chain by one point at one end, then refit it into the range.
+ *
+ * Extrapolating alone is not enough, and the failure is silent. `along`
+ * saturates at +-127, so on a default two-point body the first nose vertebra
+ * is placed at 192, clamps to 127 - which is where the old nose already sits -
+ * and every subsequent one lands on top of it. Grown five times, a spine came
+ * back with seven vertebrae at four distinct positions, three pairs of them
+ * sharing a pixel. Nothing errored: the animal really did get longer, because
+ * its world length grows with the point count. The points simply stopped
+ * spreading out along it, so the editor drew one long bone with a knot at each
+ * end instead of a column.
+ *
+ * The new point is therefore placed in float, and if the chain no longer fits
+ * every `along` is scaled by the same factor - which keeps the shape exactly
+ * and only changes how the points are spaced inside it. */
 int cp4_genome_spine_add(Cp4Genome *g, int front)
 {
     if (!g) return -1;
     int n = clampi(g->nseg, 2, CP4_MAX_SEG);
     if (n >= CP4_MAX_SEG) return -1;
+
+    Cp4Vert v[CP4_MAX_SEG];
+    float   al[CP4_MAX_SEG];
+    int     m = 0;
+
     if (front) {
-        for (int i = n; i > 0; i--) g->spine[i] = g->spine[i - 1];
-        g->spine[0] = spine_extend(&g->spine[1], &g->spine[2]);
-        /* Everything moved one index up the body, so everything mounted on it
-         * moves with it. This is why the header promises that extending one
-         * end does not slide a part off the other. */
+        v[m] = spine_extend(&g->spine[0], &g->spine[1]);
+        al[m] = 2.0f * (float)g->spine[0].along - (float)g->spine[1].along;
+        m++;
+        for (int i = 0; i < n; i++, m++) { v[m] = g->spine[i]; al[m] = g->spine[i].along; }
+    } else {
+        for (int i = 0; i < n; i++, m++) { v[m] = g->spine[i]; al[m] = g->spine[i].along; }
+        v[m] = spine_extend(&g->spine[n - 1], &g->spine[n - 2]);
+        al[m] = 2.0f * (float)g->spine[n - 1].along - (float)g->spine[n - 2].along;
+        m++;
+    }
+
+    float mx = 0.0f;
+    for (int i = 0; i < m; i++) {
+        float a = al[i] < 0.0f ? -al[i] : al[i];
+        if (a > mx) mx = a;
+    }
+    float k = mx > 127.0f ? 127.0f / mx : 1.0f;
+    for (int i = 0; i < m; i++) {
+        g->spine[i] = v[i];
+        g->spine[i].along = (int8_t)clampi((int)(al[i] * k), -127, 127);
+    }
+
+    /* Everything moved one index up the body, so everything mounted on it
+     * moves with it. This is why the header promises that extending one end
+     * does not slide a part off the other. */
+    if (front)
         for (int i = 0; i < CP4_MAX_PARTS; i++)
             if (g->part[i].type != CP4_NONE)
                 g->part[i].seg = (uint8_t)clampi(g->part[i].seg + 1, 0, n);
-    } else {
-        g->spine[n] = spine_extend(&g->spine[n - 1], &g->spine[n - 2]);
-    }
+
     g->nseg = (uint8_t)(n + 1);
     return n + 1;
 }

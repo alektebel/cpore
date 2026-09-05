@@ -209,40 +209,67 @@ function overlay() {
   if (drag === null && selected !== null) outlineSelected();
 }
 
+/* The spine's own colours. Light blue, and deliberately not the editor's teal
+ * accent: everything else on the page that is teal is a control you press, and
+ * the spine is a thing you take hold of. Giving it its own hue is what stops
+ * the vertebrae reading as more buttons. */
+const SPINE_INK  = '#7cc4ff';   /* the bones                        */
+const SPINE_EDGE = '#a9d9ff';   /* the ring round a vertebra        */
+const SPINE_HOT  = '#e6f4ff';   /* the one under the pointer        */
+const SPINE_DARK = 'rgba(4,12,24,.62)';   /* casing, for pale animals */
+
 /* The spine, drawn over the animal it belongs to.
  *
- * The cord first, then a bead per control point, then the two end controls.
+ * Segments, not a line. Drawing it as one polyline through every point was
+ * quicker and said the wrong thing: a spine is a chain of bones between
+ * vertebrae, and a single unbroken stroke reads as a guide-line laid across
+ * the animal with beads sitting on it. Each pair of points therefore gets its
+ * own bone, trimmed clear of the vertebra at both ends, so the gaps do the
+ * telling - how many segments there are, and which two a given bone joins, is
+ * then visible without counting beads.
+ *
  * Everything comes out of spinePoints(), which is the same projection the
  * renderer used for the pixels underneath - a second projection here would be
  * a second chance to disagree with the picture, and a handle that sits a few
  * pixels off the body is the one editor bug nobody can diagnose by looking. */
+const BEAD_R = 5.0;
+const BONE_GAP = 4.5;           /* clear air between a bone and its vertebra */
+
 function drawSpine() {
   const p = spinePts;
   if (p.length < 2) return;
+  const held = drag && drag.kind === 'spine' ? drag.vert : null;
   ctx.save();
+  ctx.lineCap = 'round';
 
-  /* A dark casing under the bright cord, so it reads on a pale animal as
-   * well as on a dark one. */
-  for (const [w, c] of [[4.5, 'rgba(6,9,11,.55)'], [2, '#6fd6c4']]) {
-    ctx.lineWidth = w; ctx.strokeStyle = c;
-    ctx.beginPath();
-    let pen = false;
-    for (const q of p) {
-      if (!q) { pen = false; continue; }
-      if (pen) ctx.lineTo(q.x, q.y); else { ctx.moveTo(q.x, q.y); pen = true; }
+  /* One bone per pair. The dark casing goes under each bone rather than under
+   * the whole chain, or the gaps fill with casing and there are no gaps. */
+  for (let i = 0; i + 1 < p.length; i++) {
+    const a = p[i], b = p[i + 1];
+    if (!a || !b) continue;
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const len = Math.hypot(dx, dy);
+    if (len < 2) continue;
+    /* Trim by a bead and a gap at each end - but never more than a third of
+     * the bone, so two vertebrae dragged close together still show something
+     * between them instead of the segment vanishing. */
+    const t = Math.min(BEAD_R + BONE_GAP, len * 0.33) / len;
+    const ax = a.x + dx * t, ay = a.y + dy * t;
+    const bx = b.x - dx * t, by = b.y - dy * t;
+    for (const [w, c] of [[6.0, SPINE_DARK], [3.0, SPINE_INK]]) {
+      ctx.lineWidth = w; ctx.strokeStyle = c;
+      ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
     }
-    ctx.stroke();
   }
 
-  const held = drag && drag.kind === 'spine' ? drag.vert : null;
   p.forEach((q, i) => {
     if (!q) return;
     const hot = i === held || i === hoverVert;
     ctx.beginPath();
-    ctx.arc(q.x, q.y, hot ? 7 : 4.5, 0, 7);
-    ctx.fillStyle = i === held ? '#dffaf4' : hot ? '#9fe3d6' : '#0b0e11';
+    ctx.arc(q.x, q.y, hot ? 7.5 : BEAD_R, 0, 7);
+    ctx.fillStyle = i === held ? SPINE_HOT : hot ? SPINE_EDGE : '#0a1420';
     ctx.fill();
-    ctx.lineWidth = 1.6; ctx.strokeStyle = '#6fd6c4';
+    ctx.lineWidth = 1.8; ctx.strokeStyle = hot ? SPINE_HOT : SPINE_EDGE;
     ctx.stroke();
   });
 
@@ -277,20 +304,25 @@ function endArrows() {
 
 let arrowHot = null;
 
+/* Both arrows are the spine's own light blue, so they read as part of the
+ * column rather than as two unrelated buttons parked at its ends. What tells
+ * them apart is the pair a reader already has: which way each one points, and
+ * solid for the one that adds against hollow for the one that takes away. */
 function drawArrow(a) {
   const grow = a.kind === 'grow';
-  const s = grow ? 9 : 7;
+  const s = grow ? 9 : 7.5;
   const px = -a.dy, py = a.dx;          /* perpendicular */
+  const hot = arrowHot === a.kind + a.front;
   ctx.beginPath();
   ctx.moveTo(a.x + a.dx * s, a.y + a.dy * s);
   ctx.lineTo(a.x - a.dx * s * 0.6 + px * s * 0.8, a.y - a.dy * s * 0.6 + py * s * 0.8);
   ctx.lineTo(a.x - a.dx * s * 0.6 - px * s * 0.8, a.y - a.dy * s * 0.6 - py * s * 0.8);
   ctx.closePath();
-  const hot = arrowHot === a.kind + a.front;
-  ctx.fillStyle = grow ? (hot ? '#dffaf4' : '#6fd6c4') : (hot ? '#f0a89c' : '#0b0e11');
+  ctx.fillStyle = grow ? (hot ? SPINE_HOT : SPINE_INK)
+                       : (hot ? 'rgba(230,244,255,.35)' : 'rgba(4,12,24,.62)');
   ctx.fill();
-  ctx.lineWidth = 1.4;
-  ctx.strokeStyle = grow ? '#0b0e11' : '#e2604f';
+  ctx.lineWidth = 1.6;
+  ctx.strokeStyle = hot ? SPINE_HOT : SPINE_EDGE;
   ctx.stroke();
 }
 

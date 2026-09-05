@@ -1505,6 +1505,35 @@ int main(void)
                 CHECK(cp4_genome_spine_remove(&g, 0) == was_n,
                       "editor: the spine shrinks back to where it started");
 
+                /* Grown repeatedly, the points have to keep spreading out.
+                 *
+                 * They did not. `along` saturates at +-127, so every nose
+                 * vertebra after the first was placed past the end, clamped
+                 * onto the one already there, and sat on the same pixel -
+                 * seven vertebrae at four positions, with nothing erroring and
+                 * the animal genuinely getting longer, so only the picture
+                 * said anything was wrong. */
+                {
+                    Cp4Genome q;
+                    cp4_genome_clear(&q);
+                    cp4_genome_spine_default(&q, 2);
+                    for (int k = 0; k < 5; k++) cp4_genome_spine_add(&q, k & 1);
+                    int distinct = 0;
+                    for (int a = 0; a < q.nseg; a++) {
+                        int dup = 0;
+                        for (int b2 = 0; b2 < a; b2++)
+                            if (q.spine[b2].along == q.spine[a].along) dup = 1;
+                        if (!dup) distinct++;
+                    }
+                    CHECK(q.nseg == 7 && distinct == 7,
+                          "editor: growing the spine spreads the vertebrae, not stacks them");
+                    /* and they stay in order along the body */
+                    int ordered = 1;
+                    for (int a = 0; a + 1 < q.nseg; a++)
+                        if (q.spine[a].along <= q.spine[a + 1].along) ordered = 0;
+                    CHECK(ordered, "editor: a grown spine still runs nose to tail");
+                }
+
                 /* Two points is the floor: an animal with one vertebra has no
                  * length, and everything downstream divides by nseg - 1. */
                 Cp4Genome tiny = g;
