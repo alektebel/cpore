@@ -23,6 +23,7 @@
 #include "cpore/lineage.h"
 
 #include <string.h>
+#include <math.h>
 
 static uint8_t u8f(float v)
 {
@@ -32,6 +33,8 @@ static uint8_t u8f(float v)
 }
 
 static int imaxi(int a, int b) { return a > b ? a : b; }
+
+static int clampi8(int v) { return v < -127 ? -127 : (v > 127 ? 127 : v); }
 
 /* ------------------------------------------------------------------ *
  * starting points
@@ -161,7 +164,30 @@ void cp_lineage_from_land(CpLineage *l, const Cp4Genome *g)
     l->sat = g->sat; l->val = g->val;
     l->pattern = g->pattern; l->pscale = g->pscale;
     l->nseg = g->nseg; l->girth = g->girth;
-    l->arch = g->arch; l->sweep = g->sweep;
+    /* Stage 3's spine is a set of points rather than an arch and a sweep, so
+     * the lineage's two shape genes are measured off it instead of copied:
+     * how far the middle of the body rides above the nose-to-tail line, and
+     * how far to one side. That is what arch and sweep meant, and it is the
+     * part of a dragged shape the other stages can still express - a hump and
+     * a dropped neck on the same animal average out to neither, which is the
+     * honest answer when the receiving stage has one number for both. */
+    {
+        int n = g->nseg < 2 ? 2 : (g->nseg > CP4_MAX_SEG ? CP4_MAX_SEG : g->nseg);
+        float up = 0.0f, side = 0.0f, w = 0.0f;
+        for (int i = 0; i < n; i++) {
+            float t = (float)i / (float)(n - 1);
+            float bend = sinf(3.14159265f * t);
+            up   += (float)g->spine[i].up   * bend;
+            side += (float)g->spine[i].side * bend;
+            w    += bend * bend;
+        }
+        if (w < 1e-3f) w = 1e-3f;
+        /* Least-squares fit of a single sine, then into the aquatic scales:
+         * stage 3 stores 1.6 body radii per 127, stage 2's arch is 1.5 and
+         * its sweep 1.2. */
+        l->arch  = (int8_t)clampi8((int)(up   / w * (1.6f / 1.5f)));
+        l->sweep = (int8_t)clampi8((int)(side / w * (1.6f / 1.2f)));
+    }
     l->stages = (uint8_t)imaxi(l->stages, 3);
 }
 
@@ -432,9 +458,25 @@ void cp_lineage_to_land(const CpLineage *l, Cp4Genome *g, int budget, CpRng *r)
     g->sat = l->sat; g->val = l->val;
     g->pattern = (uint8_t)(l->pattern % CP4_PAT_COUNT);
     g->pscale = l->pscale;
-    if (l->nseg >= 2) g->nseg = (uint8_t)(l->nseg > CP4_MAX_SEG ? CP4_MAX_SEG : l->nseg);
-    g->girth = l->girth;
-    g->arch = l->arch; g->sweep = l->sweep;
+    /* Through cp4_genome_spine, which relays the designer's curve onto the
+     * lineage's point count rather than truncating it - the thickness the
+     * archetype chose is the shape of the animal and there is no reason for a
+     * longer body to lose it. */
+    cp4_genome_spine(g, l->nseg >= 2 ? l->nseg : -1, l->girth);
+    /* Then bow it. Stage 3 has no arch gene to assign; a bow is what you get
+     * by pushing every control point off the axis by a sine, which is what
+     * arch and sweep were computing at draw time before the points existed. */
+    {
+        int n = g->nseg < 2 ? 2 : (g->nseg > CP4_MAX_SEG ? CP4_MAX_SEG : g->nseg);
+        for (int i = 0; i < n; i++) {
+            float t = (float)i / (float)(n - 1);
+            float bend = sinf(3.14159265f * t);
+            int up   = (int)((float)l->arch  * bend * (1.5f / 1.6f));
+            int side = (int)((float)l->sweep * bend * (1.2f / 1.6f));
+            g->spine[i].up   = (int8_t)clampi8(g->spine[i].up   + up);
+            g->spine[i].side = (int8_t)clampi8(g->spine[i].side + side);
+        }
+    }
 
     {
         int d = diet_of(l);

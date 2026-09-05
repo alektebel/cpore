@@ -83,22 +83,107 @@ void cp4_genome_clear(Cp4Genome *g)
     memset(g, 0, sizeof(*g));
     g->nseg = 3;
     g->girth = 130;
-    g->prof[0] = 130; g->prof[1] = 195; g->prof[2] = 160; g->prof[3] = 85;
+    cp4_genome_spine_default(g, g->nseg);
     g->hue = 30; g->hue2 = 130; g->hue3 = 200; g->sat = 150; g->val = 175;
     g->pattern = CP4_PAT_PLAIN; g->pscale = 120;
     g->pattern2 = CP4_PAT_PLAIN; g->pscale2 = 170;
     for (int i = 0; i < CP4_MAX_PARTS; i++) { g->part[i].len = 128; g->part[i].bend = 0; }
 }
 
+/* Lay out a straight body of even thickness.
+ *
+ * `along` runs +127 at the nose to -127 at the tail, which is the same
+ * direction the old formula's `along` ran, so nothing downstream had to learn
+ * a new sign. The default thickness tapers a little at both ends because a
+ * capsule with flat ends reads as a pill rather than an animal, and the very
+ * first thing anyone does in the editor is drag it into something else. */
+void cp4_genome_spine_default(Cp4Genome *g, int nseg)
+{
+    if (!g) return;
+    if (nseg < 2) nseg = 2;
+    if (nseg > CP4_MAX_SEG) nseg = CP4_MAX_SEG;
+    g->nseg = (uint8_t)nseg;
+    for (int i = 0; i < nseg; i++) {
+        float t = (float)i / (float)(nseg - 1);        /* 0 nose .. 1 tail */
+        float bulge = 0.55f + 0.45f * sinf(3.14159265f * t);
+        g->spine[i].along = (int8_t)(127.0f - 254.0f * t);
+        g->spine[i].side  = 0;
+        g->spine[i].up    = 0;
+        g->spine[i].rad   = (uint8_t)(bulge * 200.0f);
+    }
+    for (int i = nseg; i < CP4_MAX_SEG; i++) {
+        g->spine[i].along = 0; g->spine[i].side = 0;
+        g->spine[i].up = 0;    g->spine[i].rad = 0;
+    }
+}
+
+static int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+/* Sample the spine at a fractional point index, so it can be relaid at a
+ * different count without losing the shape someone dragged into it. */
+static Cp4Vert spine_at(const Cp4Genome *g, float x, int n)
+{
+    if (x < 0.0f) x = 0.0f;
+    if (x > (float)(n - 1)) x = (float)(n - 1);
+    int i = (int)x;
+    if (i > n - 2) i = n - 2;
+    float f = x - (float)i;
+    const Cp4Vert *a = &g->spine[i], *b = &g->spine[i + 1];
+    Cp4Vert o;
+    o.along = (int8_t)((float)a->along + (float)(b->along - a->along) * f);
+    o.side  = (int8_t)((float)a->side  + (float)(b->side  - a->side ) * f);
+    o.up    = (int8_t)((float)a->up    + (float)(b->up    - a->up   ) * f);
+    o.rad   = (uint8_t)((float)a->rad  + (float)((int)b->rad - (int)a->rad) * f);
+    return o;
+}
+
+/* The four-station thickness curve the genome used to carry, resampled onto
+ * the control points.
+ *
+ * The archetypes below were tuned as a prof[] curve and there is no reason to
+ * retune them: this is a change of representation, not a change of animal. The
+ * curve is evaluated at each point's own t and stored as that point's
+ * thickness, which is exactly what cp4_profile used to work out on the fly. */
+static void spine_prof(Cp4Genome *g, int a, int b, int c, int d)
+{
+    const int st[4] = { a, b, c, d };
+    int n = g->nseg < 2 ? 2 : (g->nseg > CP4_MAX_SEG ? CP4_MAX_SEG : g->nseg);
+    for (int i = 0; i < n; i++) {
+        float t = (float)i / (float)(n - 1);
+        float x = t * 3.0f;
+        int   k = (int)x;
+        if (k > 2) k = 2;
+        float f = x - (float)k, sm = f * f * (3.0f - 2.0f * f);
+        float v = (float)st[k] + (float)(st[k + 1] - st[k]) * sm;
+        g->spine[i].rad = (uint8_t)clampi((int)(v + 0.5f), 0, 255);
+    }
+}
+
+/* One vertebra lifted off the axis. `v` is in the units the old rise[] gene
+ * used - 0.85 body radii per 127 - and `up` is in 1.6 of them, so preserving
+ * an archetype's silhouette is a constant. */
+static void spine_rise(Cp4Genome *g, int i, int v)
+{
+    if (i < 0 || i >= CP4_MAX_SEG) return;
+    g->spine[i].up = (int8_t)clampi((int)((float)v * (0.85f / 1.6f)), -127, 127);
+}
+
+/* Thickness at normalised position t, interpolated between control points.
+ *
+ * This used to evaluate a four-station curve held in prof[]. It reads the
+ * points the editor actually edits now, so what the profile says and what a
+ * dragged vertebra says can no longer disagree - there is only one of them. */
 float cp4_profile(const Cp4Genome *g, float t)
 {
     if (t < 0.0f) t = 0.0f;
     if (t > 1.0f) t = 1.0f;
-    float x = t * 3.0f;
+    int n = g->nseg < 2 ? 2 : (g->nseg > CP4_MAX_SEG ? CP4_MAX_SEG : g->nseg);
+    float x = t * (float)(n - 1);
     int i = (int)x;
-    if (i > 2) i = 2;
+    if (i > n - 2) i = n - 2;
     float f = x - (float)i;
-    float a = (float)g->prof[i] / 255.0f, b = (float)g->prof[i + 1] / 255.0f;
+    float a = (float)g->spine[i].rad / 255.0f;
+    float b = (float)g->spine[i + 1].rad / 255.0f;
     float sm = f * f * (3.0f - 2.0f * f);
     /* Kept narrower than the aquatic profile. Water holds a blob up; on land
      * a body two and a half times its own nominal radius just drags. */
@@ -317,8 +402,13 @@ void cp4_genome_normalise(Cp4Genome *g, int budget)
 void cp4_genome_random(Cp4Genome *g, CpRng *r, int budget)
 {
     cp4_genome_clear(g);
-    g->nseg = (uint8_t)(2 + cp_rng_int(r, CP4_MAX_SEG - 1));
+    /* Two to eight, not two to sixteen. The point count is a shape control an
+     * editor drags, and the generator wants animals rather than centipedes -
+     * uniform over the whole range put most random bodies at ten-plus points,
+     * which all read as the same worm whatever else their genes said. */
+    g->nseg = (uint8_t)(2 + cp_rng_int(r, 7));
     g->girth = (uint8_t)(70 + cp_rng_int(r, 170));
+    cp4_genome_spine_default(g, g->nseg);
     for (int i = 0; i < CP4_MAX_PARTS; i++) {
         if (cp_rng_f(r) < 0.28f) continue;
         g->part[i].type   = (uint8_t)(1 + cp_rng_int(r, CP4_PART_COUNT - 1));
@@ -330,11 +420,30 @@ void cp4_genome_random(Cp4Genome *g, CpRng *r, int budget)
         g->part[i].len    = (uint8_t)(40 + cp_rng_int(r, 216));
         g->part[i].bend   = (int8_t)(cp_rng_int(r, 128) - 64);
     }
-    for (int i = 0; i < 4; i++) g->prof[i] = (uint8_t)cp_rng_int(r, 256);
-    for (int i = 0; i < CP4_MAX_SEG; i++) g->lump[i] = (int8_t)(cp_rng_int(r, 97) - 48);
-    for (int i = 0; i < CP4_MAX_SEG; i++) g->rise[i] = (int8_t)(cp_rng_int(r, 81) - 40);
-    g->arch  = (int8_t)(cp_rng_int(r, 128) - 64);
-    g->sweep = (int8_t)(cp_rng_int(r, 80) - 40);
+    /* A whole-body bow, and then noise on top of it.
+     *
+     * Both halves are needed. Independent noise on up to sixteen points
+     * averages out to no curve at all, so bodies came out straight with a
+     * wobble; a bow with no noise gives every animal of a given seed the same
+     * smooth arc. The bow is what arch and sweep used to be - one sine over
+     * the whole length - except that it is now baked into the points rather
+     * than added to them at draw time, which is the whole reason a vertebra
+     * can be dragged afterwards. */
+    {
+        float bow  = (float)(cp_rng_int(r, 101) - 50) / 127.0f * 1.3f;
+        float lean = (float)(cp_rng_int(r, 81) - 40)  / 127.0f * 0.9f;
+        int n = g->nseg;
+        for (int i = 0; i < n; i++) {
+            float t = n > 1 ? (float)i / (float)(n - 1) : 0.0f;
+            float bend = sinf(3.14159265f * t);
+            int up   = (int)((bow  * bend / 1.6f) * 127.0f) + cp_rng_int(r, 41) - 20;
+            int side = (int)((lean * bend / 1.6f) * 127.0f) + cp_rng_int(r, 25) - 12;
+            int rad  = (int)g->spine[i].rad + cp_rng_int(r, 97) - 48;
+            g->spine[i].up   = (int8_t)clampi(up, -127, 127);
+            g->spine[i].side = (int8_t)clampi(side, -127, 127);
+            g->spine[i].rad  = (uint8_t)clampi(rad, 12, 255);
+        }
+    }
     g->hue   = (uint8_t)cp_rng_int(r, 256);
     g->hue2  = (uint8_t)cp_rng_int(r, 256);
     g->hue3  = (uint8_t)cp_rng_int(r, 256);
@@ -352,21 +461,30 @@ void cp4_genome_random(Cp4Genome *g, CpRng *r, int budget)
 
 void cp4_genome_mutate(Cp4Genome *g, CpRng *r, int budget, float rate)
 {
+    /* Growing or shrinking through the editor's own add/remove, so a mutated
+     * lineage lays its new vertebra out the same way a dragged one does -
+     * extrapolated off the end - rather than inheriting whatever was left in
+     * the array slot beyond the old count. */
     if (cp_rng_f(r) < rate * 0.5f) {
-        int d = cp_rng_int(r, 2) ? 1 : -1;
-        int n = g->nseg + d;
-        g->nseg = (uint8_t)(n < 2 ? 2 : (n > CP4_MAX_SEG ? CP4_MAX_SEG : n));
+        if (cp_rng_int(r, 2)) cp4_genome_spine_add(g, cp_rng_int(r, 2));
+        else                  cp4_genome_spine_remove(g, cp_rng_int(r, 2));
     }
     if (cp_rng_f(r) < rate) g->girth = (uint8_t)(g->girth + cp_rng_int(r, 41) - 20);
-    for (int i = 0; i < 4; i++)
-        if (cp_rng_f(r) < rate) g->prof[i] = (uint8_t)(g->prof[i] + cp_rng_int(r, 61) - 30);
-    for (int i = 0; i < CP4_MAX_SEG; i++)
-        if (cp_rng_f(r) < rate * 0.7f) g->lump[i] = (int8_t)(g->lump[i] + cp_rng_int(r, 41) - 20);
-    if (cp_rng_f(r) < rate) g->arch  = (int8_t)(g->arch + cp_rng_int(r, 33) - 16);
-    if (cp_rng_f(r) < rate) g->sweep = (int8_t)(g->sweep + cp_rng_int(r, 25) - 12);
+    /* The spine mutates a point at a time now. It used to mutate four profile
+     * stations, a per-segment lump and a per-segment rise - six knobs onto
+     * three axes - and every one of them is a control point's own business. */
+    for (int i = 0; i < g->nseg && i < CP4_MAX_SEG; i++) {
+        if (cp_rng_f(r) < rate)
+            g->spine[i].rad = (uint8_t)clampi((int)g->spine[i].rad
+                                              + cp_rng_int(r, 61) - 30, 12, 255);
+        if (cp_rng_f(r) < rate * 0.7f)
+            g->spine[i].up = (int8_t)clampi(g->spine[i].up
+                                            + cp_rng_int(r, 33) - 16, -127, 127);
+        if (cp_rng_f(r) < rate * 0.5f)
+            g->spine[i].side = (int8_t)clampi(g->spine[i].side
+                                              + cp_rng_int(r, 25) - 12, -127, 127);
+    }
     if (cp_rng_f(r) < rate) g->hue   = (uint8_t)(g->hue + cp_rng_int(r, 25) - 12);
-    for (int i = 0; i < CP4_MAX_SEG; i++)
-        if (cp_rng_f(r) < rate * 0.7f) g->rise[i] = (int8_t)(g->rise[i] + cp_rng_int(r, 33) - 16);
     if (cp_rng_f(r) < rate * 0.6f) g->hue2 = (uint8_t)(g->hue2 + cp_rng_int(r, 41) - 20);
     if (cp_rng_f(r) < rate * 0.5f) g->hue3 = (uint8_t)(g->hue3 + cp_rng_int(r, 49) - 24);
     if (cp_rng_f(r) < rate * 0.25f) g->pattern2 = (uint8_t)cp_rng_int(r, CP4_PAT_COUNT);
@@ -448,7 +566,11 @@ void cp4_genome_from_action(Cp4Genome *g, const float *d, int budget)
     if (nv > 1.0f) nv = 1.0f;
     if (gv < -1.0f) gv = -1.0f;
     if (gv > 1.0f) gv = 1.0f;
-    g->nseg  = (uint8_t)(2 + (int)((nv + 1.0f) * 0.5f * (float)(CP4_MAX_SEG - 2) + 0.5f));
+    /* Through spine_default, not by assigning nseg: the points beyond the
+     * cleared body's three are zeroed, and a vertebra at along 0 rad 0 is a
+     * pinch in the middle of the animal rather than a longer one. */
+    cp4_genome_spine_default(
+        g, 2 + (int)((nv + 1.0f) * 0.5f * (float)(CP4_MAX_SEG - 2) + 0.5f));
     g->girth = (uint8_t)(50 + (int)((gv + 1.0f) * 0.5f * 190.0f));
     cp4_genome_normalise(g, budget);
 }
@@ -502,8 +624,8 @@ void cp4_genome_autodesign(Cp4Genome *g, CpRng *r, int budget, int style)
     case CP4_STYLE_PREDATOR:
         g->hue = 8; g->hue2 = 200; g->sat = 175; g->val = 150;
         g->pattern = CP4_PAT_STRIPES; g->pscale = 130;
-        g->prof[0] = 105; g->prof[1] = 200; g->prof[2] = 140; g->prof[3] = 60;
-        g->rise[0] = 26; g->rise[2] = -14;      /* shoulders up, hips down */
+        spine_prof(g, 105, 200, 140, 60);
+        spine_rise(g, 0, 26); spine_rise(g, 2, -14); /* shoulders up, hips down */
         BUYM(CP4_MOUTH_C, 0, 0, 0, 0);
         BUYL(CP4_LEG, 0, 60, -40, 1, 190, 62);
         BUYL(CP4_LEG, 2, 60, -40, 1, 150, 48);
@@ -518,9 +640,9 @@ void cp4_genome_autodesign(Cp4Genome *g, CpRng *r, int budget, int style)
     case CP4_STYLE_CHARMER:
         g->hue = 190; g->hue2 = 40; g->sat = 200; g->val = 190;
         g->pattern = CP4_PAT_SPOTS; g->pscale = 160;
-        g->prof[0] = 140; g->prof[1] = 190; g->prof[2] = 175; g->prof[3] = 90;
+        spine_prof(g, 140, 190, 175, 90);
         g->hue3 = 210; g->pattern2 = CP4_PAT_RINGS; g->pscale2 = 190;
-        g->rise[1] = 30;
+        spine_rise(g, 1, 30);
         BUYM(CP4_MOUTH_G, 0, 0, 0, 0);
         BUYL(CP4_LEG, 0, 60, -40, 1, 175, 55);
         BUYM(CP4_VOICE, 0, 0, 25, 0);
@@ -534,11 +656,11 @@ void cp4_genome_autodesign(Cp4Genome *g, CpRng *r, int budget, int style)
     default: /* grazer */
         g->hue = 60; g->hue2 = 20; g->sat = 140; g->val = 165;
         g->pattern = CP4_PAT_MOTTLE; g->pscale = 140;
-        g->prof[0] = 125; g->prof[1] = 210; g->prof[2] = 180; g->prof[3] = 75;
+        spine_prof(g, 125, 210, 180, 75);
         /* Eyes before feet. In a world with no edges, range is the scarcest
          * resource a generalist has - a grazer that cannot see across the
          * resident ring spends the run walking past its own food. */
-        g->rise[0] = 34;                        /* a raised neck to browse with */
+        spine_rise(g, 0, 34);                   /* a raised neck to browse with */
         BUYM(CP4_MOUTH_G, 0, 0, 0, 0);
         BUYL(CP4_LEG, 0, 60, -40, 1, 200, 44);
         BUYM(CP4_EYE, 0, 34, 30, 1);
@@ -556,8 +678,8 @@ void cp4_genome_autodesign(Cp4Genome *g, CpRng *r, int budget, int style)
          * because a swimmer without them is on a timer. */
         g->hue = 130; g->hue2 = 96; g->sat = 185; g->val = 175;
         g->pattern = CP4_PAT_COUNTER; g->pscale = 120;
-        g->prof[0] = 120; g->prof[1] = 185; g->prof[2] = 165; g->prof[3] = 70;
-        g->nseg = 4; spent += 5;
+        cp4_genome_spine_default(g, 4); spent += 5;
+        spine_prof(g, 120, 185, 165, 70);
         BUYM(CP4_MOUTH_G, 0, 0, 0, 0);
         BUYL(CP4_FIN, 1, 64, 0, 1, 190, 20);
         BUYM(CP4_GILL, 0, 96, 10, 1);
@@ -573,7 +695,7 @@ void cp4_genome_autodesign(Cp4Genome *g, CpRng *r, int budget, int style)
          * three segments and spends nothing on plate. */
         g->hue = 20; g->hue2 = 170; g->sat = 200; g->val = 200;
         g->pattern = CP4_PAT_BANDS; g->pscale = 150;
-        g->prof[0] = 110; g->prof[1] = 165; g->prof[2] = 140; g->prof[3] = 60;
+        spine_prof(g, 110, 165, 140, 60);
         g->girth = 95;
         BUYM(CP4_MOUTH_G, 0, 0, 0, 0);
         BUYL(CP4_WING, 1, 64, 20, 1, 230, 30);
@@ -588,7 +710,7 @@ void cp4_genome_autodesign(Cp4Genome *g, CpRng *r, int budget, int style)
         /* Squat, armoured and clawed. Slow above ground and safe below it. */
         g->hue = 25; g->hue2 = 210; g->sat = 130; g->val = 140;
         g->pattern = CP4_PAT_RINGS; g->pscale = 175;
-        g->prof[0] = 150; g->prof[1] = 205; g->prof[2] = 180; g->prof[3] = 95;
+        spine_prof(g, 150, 205, 180, 95);
         g->girth = 175;
         BUYM(CP4_MOUTH_G, 0, 0, 0, 0);
         BUYM(CP4_DIGGER, 0, 40, -25, 1);
@@ -679,16 +801,14 @@ void cp4_genome_stats(const Cp4Genome *g, Cp4Stats *o)
     /* How high the trunk rides.
      *
      * This has to clear the *widest* part of the body, not the nominal radius:
-     * the profile genes scale each segment by up to 1.4 and the lump genes add
-     * another 40%, so a stand computed off o->radius alone leaves a fat build
-     * ploughing through the dirt with its legs invisible underneath it. More
-     * legs stand you taller, which is also what makes a long-legged build read
-     * as fast. */
+     * a control point can be twice as thick as its neighbours, so a stand
+     * computed off o->radius alone leaves a fat build ploughing through the
+     * dirt with its legs invisible underneath it. More legs stand you taller,
+     * which is also what makes a long-legged build read as fast. */
     float widest = 0.0f;
     for (int i = 0; i < nseg; i++) {
         float t = nseg > 1 ? (float)i / (float)(nseg - 1) : 0.0f;
-        int li = i < CP4_MAX_SEG ? i : CP4_MAX_SEG - 1;
-        float r = cp4_profile(g, t) * (1.0f + (float)g->lump[li] / 127.0f * 0.40f);
+        float r = cp4_profile(g, t);
         if (r > widest) widest = r;
     }
     if (widest < 0.35f) widest = 0.35f;
@@ -933,24 +1053,111 @@ void cp4_genome_coats(Cp4Genome *g, int pattern, int pscale,
 }
 
 /* ---- the spine, as numbers ----
- * The same three genes cp4_studio_spine_drag writes, for callers that have a
- * value rather than a gesture. */
-void cp4_genome_spine(Cp4Genome *g, int nseg, int girth, int arch, int sweep)
+ * The same points cp4_studio_spine_move writes, for callers that have a value
+ * rather than a gesture. */
+
+/* Parts hold a vertebra index, so anything that changes what the indices mean
+ * has to carry them with it or the head slides down the body. */
+static void parts_remap(Cp4Genome *g, int old_n, int new_n)
 {
-    if (!g) return;
-    if (nseg >= 0) {
-        if (nseg < 2) nseg = 2;
-        if (nseg > CP4_MAX_SEG) nseg = CP4_MAX_SEG;
-        g->nseg = (uint8_t)nseg;
+    if (old_n < 2 || new_n < 2) return;
+    for (int i = 0; i < CP4_MAX_PARTS; i++) {
+        if (g->part[i].type == CP4_NONE) continue;
+        int s = (int)((float)g->part[i].seg / (float)(old_n - 1)
+                      * (float)(new_n - 1) + 0.5f);
+        g->part[i].seg = (uint8_t)clampi(s, 0, new_n - 1);
     }
-    if (girth >= 0) g->girth = (uint8_t)(girth > 255 ? 255 : girth);
-    if (arch  > -1000) g->arch  = (int8_t)(arch  > 127 ? 127 : (arch  < -127 ? -127 : arch));
-    if (sweep > -1000) g->sweep = (int8_t)(sweep > 127 ? 127 : (sweep < -127 ? -127 : sweep));
 }
 
-void cp4_genome_vertebra(Cp4Genome *g, int i, int rise, int lump)
+void cp4_genome_spine(Cp4Genome *g, int nseg, int girth)
+{
+    if (!g) return;
+    if (girth >= 0) g->girth = (uint8_t)(girth > 255 ? 255 : girth);
+    if (nseg < 0) return;
+    nseg = clampi(nseg, 2, CP4_MAX_SEG);
+    int old = clampi(g->nseg, 2, CP4_MAX_SEG);
+    if (nseg == old) { g->nseg = (uint8_t)nseg; return; }
+
+    /* Relay evenly along the existing curve rather than truncating or
+     * appending. Truncating an eight-point body to four threw away the half of
+     * it past the shoulders; resampling gives back the same animal at a
+     * different resolution, which is what a count control has to mean once the
+     * points are the shape. */
+    Cp4Vert tmp[CP4_MAX_SEG];
+    for (int i = 0; i < nseg; i++)
+        tmp[i] = spine_at(g, (float)i / (float)(nseg - 1) * (float)(old - 1), old);
+    for (int i = 0; i < nseg; i++) g->spine[i] = tmp[i];
+    for (int i = nseg; i < CP4_MAX_SEG; i++) {
+        g->spine[i].along = 0; g->spine[i].side = 0;
+        g->spine[i].up = 0;    g->spine[i].rad = 0;
+    }
+    parts_remap(g, old, nseg);
+    g->nseg = (uint8_t)nseg;
+}
+
+void cp4_genome_vertebra(Cp4Genome *g, int i, int along, int side, int up, int rad)
 {
     if (!g || i < 0 || i >= CP4_MAX_SEG) return;
-    if (rise > -1000) g->rise[i] = (int8_t)(rise > 127 ? 127 : (rise < -127 ? -127 : rise));
-    if (lump > -1000) g->lump[i] = (int8_t)(lump > 127 ? 127 : (lump < -127 ? -127 : lump));
+    g->spine[i].along = (int8_t)clampi(along, -127, 127);
+    g->spine[i].side  = (int8_t)clampi(side,  -127, 127);
+    g->spine[i].up    = (int8_t)clampi(up,    -127, 127);
+    g->spine[i].rad   = (uint8_t)clampi(rad, 0, 255);
+}
+
+/* Extrapolate one point past `a`, continuing the direction a came from b in.
+ *
+ * The new vertebra has to land somewhere the user was already pointing, which
+ * is along the line the last two points make. Thickness tapers rather than
+ * copying: growing a tail out of a barrel-chested animal at full girth looks
+ * like a second body, and the point is immediately draggable anyway. */
+static Cp4Vert spine_extend(const Cp4Vert *a, const Cp4Vert *b)
+{
+    Cp4Vert o;
+    o.along = (int8_t)clampi(2 * a->along - b->along, -127, 127);
+    o.side  = (int8_t)clampi(2 * a->side  - b->side,  -127, 127);
+    o.up    = (int8_t)clampi(2 * a->up    - b->up,    -127, 127);
+    o.rad   = (uint8_t)clampi((int)((float)a->rad * 0.72f), 12, 255);
+    return o;
+}
+
+int cp4_genome_spine_add(Cp4Genome *g, int front)
+{
+    if (!g) return -1;
+    int n = clampi(g->nseg, 2, CP4_MAX_SEG);
+    if (n >= CP4_MAX_SEG) return -1;
+    if (front) {
+        for (int i = n; i > 0; i--) g->spine[i] = g->spine[i - 1];
+        g->spine[0] = spine_extend(&g->spine[1], &g->spine[2]);
+        /* Everything moved one index up the body, so everything mounted on it
+         * moves with it. This is why the header promises that extending one
+         * end does not slide a part off the other. */
+        for (int i = 0; i < CP4_MAX_PARTS; i++)
+            if (g->part[i].type != CP4_NONE)
+                g->part[i].seg = (uint8_t)clampi(g->part[i].seg + 1, 0, n);
+    } else {
+        g->spine[n] = spine_extend(&g->spine[n - 1], &g->spine[n - 2]);
+    }
+    g->nseg = (uint8_t)(n + 1);
+    return n + 1;
+}
+
+int cp4_genome_spine_remove(Cp4Genome *g, int front)
+{
+    if (!g) return -1;
+    int n = clampi(g->nseg, 2, CP4_MAX_SEG);
+    if (n <= 2) return -1;
+    if (front) {
+        for (int i = 0; i + 1 < n; i++) g->spine[i] = g->spine[i + 1];
+        for (int i = 0; i < CP4_MAX_PARTS; i++)
+            if (g->part[i].type != CP4_NONE)
+                g->part[i].seg = (uint8_t)clampi(g->part[i].seg - 1, 0, n - 2);
+    } else {
+        for (int i = 0; i < CP4_MAX_PARTS; i++)
+            if (g->part[i].type != CP4_NONE)
+                g->part[i].seg = (uint8_t)clampi(g->part[i].seg, 0, n - 2);
+    }
+    g->spine[n - 1].along = 0; g->spine[n - 1].side = 0;
+    g->spine[n - 1].up = 0;    g->spine[n - 1].rad = 0;
+    g->nseg = (uint8_t)(n - 1);
+    return n - 1;
 }

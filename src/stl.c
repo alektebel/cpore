@@ -343,7 +343,7 @@ int cp4_stl_part(const char *path, int part_type, int res)
 
     Cp4Genome g;
     cp4_genome_clear(&g);
-    cp4_genome_spine(&g, 4, 150, 0, 0);
+    cp4_genome_spine(&g, 4, 150);
     int slot = cp4_genome_place(&g, part_type, 2, 64, 0, 0,
                                 CP4_GEN_BUDGET[CP4_GENERATIONS - 1]);
     if (slot < 0) return 0;

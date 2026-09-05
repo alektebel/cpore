@@ -583,8 +583,7 @@ int main(void)
             int nseg = g.nseg < 2 ? 2 : g.nseg;
             for (int k = 0; k < nseg; k++) {
                 float t = nseg > 1 ? (float)k / (float)(nseg - 1) : 0.0f;
-                int li = k < CP4_MAX_SEG ? k : CP4_MAX_SEG - 1;
-                float rr = cp4_profile(&g, t) * (1.0f + (float)g.lump[li] / 127.0f * 0.40f);
+                float rr = cp4_profile(&g, t);
                 if (rr > widest) widest = rr;
             }
             if (st.stand > st.radius * widest) clears++;
@@ -1353,7 +1352,7 @@ int main(void)
 
             Cp4Genome g;
             cp4_genome_clear(&g);
-            cp4_genome_spine(&g, 4, 150, 20, 0);
+            cp4_genome_spine(&g, 4, 150);
             cp4_genome_place(&g, CP4_MOUTH_C, 0, 0, 0, 0, BUDGET);
 
             /* the body is reachable, and every answer is in range */
@@ -1449,14 +1448,96 @@ int main(void)
                 for (int x = 0; x < N; x += 4) {
                     vert = cp4_studio_spine_pick(st, &g, &v, x, y, 8.0f);
                     if (vert >= 0) {
-                        int8_t was = g.rise[vert];
-                        cp4_studio_spine_drag(st, &g, &v, vert, x, y - 30);
-                        CHECK(g.rise[vert] != was,
-                              "editor: dragging a vertebra moves its rise gene");
+                        Cp4Vert was = g.spine[vert];
+                        cp4_studio_spine_move(st, &g, &v, vert, x, y - 30);
+                        CHECK(g.spine[vert].along != was.along
+                              || g.spine[vert].side != was.side
+                              || g.spine[vert].up != was.up,
+                              "editor: dragging a vertebra moves its control point");
                         break;
                     }
                 }
             CHECK(vert >= 0, "editor: spine handles are grabbable from the viewport");
+
+            /* Every control point projects to a pixel, and the pick agrees
+             * with the projection. Two ways of asking where a vertebra is on
+             * screen is two chances to disagree, which is exactly the bug
+             * where handles float a few pixels off the body. */
+            {
+                int32_t pts[CP4_MAX_SEG * 2];
+                int np = cp4_studio_spine_points(st, &g, &v, pts);
+                CHECK(np == g.nseg,
+                      "editor: the spine projects one screen point per vertebra");
+                int agree = 0, on = 0;
+                for (int i = 0; i < np; i++) {
+                    if (pts[2 * i] < 0 || pts[2 * i] >= N ||
+                        pts[2 * i + 1] < 0 || pts[2 * i + 1] >= N) continue;
+                    on++;
+                    if (cp4_studio_spine_pick(st, &g, &v, pts[2 * i],
+                                              pts[2 * i + 1], 6.0f) == i) agree++;
+                }
+                CHECK(on > 0 && agree == on,
+                      "editor: picking a projected vertebra returns that vertebra");
+            }
+
+            /* Growing and shrinking the spine from the ends.
+             *
+             * The promise the header makes is that a part stays on the
+             * vertebra it was put on, so adding at the nose has to carry every
+             * mount index up with it - otherwise extending the neck slides the
+             * head down the back. */
+            {
+                int slot = -1;
+                for (int i = 0; i < CP4_MAX_PARTS; i++)
+                    if (g.part[i].type != CP4_NONE) { slot = i; break; }
+                int was_n = g.nseg, was_seg = slot >= 0 ? g.part[slot].seg : 0;
+
+                CHECK(cp4_genome_spine_add(&g, 0) == was_n + 1,
+                      "editor: the spine grows a vertebra at the tail");
+                CHECK(slot < 0 || g.part[slot].seg == was_seg,
+                      "editor: growing the tail leaves head parts where they were");
+                CHECK(cp4_genome_spine_add(&g, 1) == was_n + 2,
+                      "editor: the spine grows a vertebra at the nose");
+                CHECK(slot < 0 || g.part[slot].seg == was_seg + 1,
+                      "editor: growing the nose carries its parts along with it");
+
+                cp4_genome_spine_remove(&g, 1);
+                CHECK(cp4_genome_spine_remove(&g, 0) == was_n,
+                      "editor: the spine shrinks back to where it started");
+
+                /* Two points is the floor: an animal with one vertebra has no
+                 * length, and everything downstream divides by nseg - 1. */
+                Cp4Genome tiny = g;
+                cp4_genome_spine(&tiny, 2, -1);
+                CHECK(cp4_genome_spine_remove(&tiny, 0) == -1 && tiny.nseg == 2,
+                      "editor: the spine refuses to shrink below two points");
+                /* and CP4_MAX_SEG is the ceiling */
+                cp4_genome_spine(&tiny, CP4_MAX_SEG, -1);
+                CHECK(cp4_genome_spine_add(&tiny, 0) == -1
+                      && tiny.nseg == CP4_MAX_SEG,
+                      "editor: the spine refuses to grow past its maximum");
+            }
+
+            /* Changing the count relays the curve rather than truncating it:
+             * a body dragged into a hump is still humped at a different
+             * resolution. */
+            {
+                Cp4Genome h;
+                cp4_genome_clear(&h);
+                cp4_genome_spine(&h, 5, 150);
+                cp4_genome_vertebra(&h, 2, h.spine[2].along, 0, 90, 220);
+                float was = cp4_profile(&h, 0.5f);
+                int up_was = h.spine[2].up;
+                cp4_genome_spine(&h, 9, -1);
+                CHECK(h.nseg == 9, "editor: the spine resamples to a new count");
+                CHECK(fabsf(cp4_profile(&h, 0.5f) - was) < 0.08f,
+                      "editor: resampling keeps the body's thickness");
+                int peak = 0;
+                for (int i = 0; i < h.nseg; i++)
+                    if (h.spine[i].up > h.spine[peak].up) peak = i;
+                CHECK(h.spine[peak].up > up_was * 3 / 4 && peak > 2 && peak < 6,
+                      "editor: resampling keeps the hump where it was");
+            }
 
             /* paint reaches genes that nothing outside the genome could */
             cp4_genome_paint(&g, 150, 20, 210, 220, 200);

@@ -44,6 +44,7 @@ export const STAT_NAMES = ['speed', 'accel', 'turn', 'jump', 'grip', 'hp',
 
 const MAX_PARTS = 16;
 const PART_FIELDS = 8;
+const MAX_SEG = 16;
 
 export class CreatureEditor {
   /* `source` is a URL, an ArrayBuffer or a Response - whatever the caller has.
@@ -71,6 +72,7 @@ export class CreatureEditor {
      * reach it, and re-found rather than cached for the reason above. */
     this.fbPtr = this.x.cp_wasm_alloc(width * height * 4);
     this.i32Ptr = this.x.cp_wasm_alloc(MAX_PARTS * PART_FIELDS * 4);
+    this.spinePtr = this.x.cp_wasm_alloc(MAX_SEG * 2 * 4);
     this.f32Ptr = this.x.cp_wasm_alloc(64 * 4);
     this.image = new ImageDataLike(width, height);
   }
@@ -172,10 +174,37 @@ export class CreatureEditor {
     const v = this.x.cp4_edit_spine_pick(this.handle, x | 0, y | 0, grab);
     return v < 0 ? null : v;
   }
-  spineDrag(vert, x, y) { return !!this.x.cp4_edit_spine_drag(this.handle, vert, x | 0, y | 0); }
+  /* Drag a control point to a pixel. All three axes, because the point is
+   * the answer now - there is no longer a gene that can only say "higher". */
+  spineMove(vert, x, y) { return !!this.x.cp4_edit_spine_move(this.handle, vert, x | 0, y | 0); }
   spineGirth(vert, amount) { return !!this.x.cp4_edit_spine_girth(this.handle, vert, amount); }
-  spine({ nseg = -1, girth = -1, arch = -2000, sweep = -2000 } = {}) {
-    this.x.cp4_edit_spine_set(this.handle, nseg, girth, arch, sweep);
+
+  /* [{x, y}, ...] for every control point, in canvas pixels, so the overlay
+   * never has to project anything itself. A point behind the camera comes
+   * back as null in its own slot rather than being dropped, or the i-th entry
+   * would stop being the i-th vertebra. */
+  spinePoints() {
+    const n = this.x.cp4_edit_spine_points(this.handle, this.spinePtr);
+    const m = this.i32(), b = this.spinePtr >> 2, out = [];
+    for (let i = 0; i < n; i++) {
+      const x = m[b + 2 * i], y = m[b + 2 * i + 1];
+      out.push(x === -32768 ? null : { x, y });
+    }
+    return out;
+  }
+
+  /* Grow or shrink from one end. Growing costs DNA and can be refused, which
+   * is why it answers with the new count or null rather than a boolean. */
+  spineAdd(front = false) {
+    const n = this.x.cp4_edit_spine_add(this.handle, front ? 1 : 0);
+    return n < 0 ? null : n;
+  }
+  spineRemove(front = false) {
+    const n = this.x.cp4_edit_spine_remove(this.handle, front ? 1 : 0);
+    return n < 0 ? null : n;
+  }
+  spine({ nseg = -1, girth = -1 } = {}) {
+    this.x.cp4_edit_spine_set(this.handle, nseg, girth);
     return this;
   }
 
@@ -218,7 +247,7 @@ export class CreatureEditor {
   body() {
     this.x.cp4_edit_body(this.handle, this.i32Ptr);
     const m = this.i32(), b = this.i32Ptr >> 2;
-    const k = ['nseg', 'girth', 'arch', 'sweep', 'hue', 'hue2', 'hue3', 'sat',
+    const k = ['nseg', 'girth', 'hue', 'hue2', 'hue3', 'sat',
                'val', 'pattern', 'pscale', 'pattern2', 'pscale2'];
     return Object.fromEntries(k.map((n, i) => [n, m[b + i]]));
   }

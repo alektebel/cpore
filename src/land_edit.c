@@ -83,7 +83,7 @@ void cp4_edit_load(Cp4Edit *e, const int32_t *parts, int32_t nseg, int32_t girth
             e->g.part[i].bend   = (int8_t)(p[7] > 127 ? 127 : (p[7] < -127 ? -127 : p[7]));
         }
     }
-    cp4_genome_spine(&e->g, nseg, girth, -2000, -2000);
+    cp4_genome_spine(&e->g, nseg, girth);
 }
 
 void cp4_edit_random(Cp4Edit *e, uint32_t seed)
@@ -219,10 +219,10 @@ int32_t cp4_edit_spine_pick(Cp4Edit *e, int32_t x, int32_t y, float grab_px)
     return cp4_studio_spine_pick(e->studio, &e->g, &e->view, (int)x, (int)y, grab_px);
 }
 
-int32_t cp4_edit_spine_drag(Cp4Edit *e, int32_t vert, int32_t x, int32_t y)
+int32_t cp4_edit_spine_move(Cp4Edit *e, int32_t vert, int32_t x, int32_t y)
 {
     if (!e) return 0;
-    return cp4_studio_spine_drag(e->studio, &e->g, &e->view, (int)vert, (int)x, (int)y);
+    return cp4_studio_spine_move(e->studio, &e->g, &e->view, (int)vert, (int)x, (int)y);
 }
 
 int32_t cp4_edit_spine_girth(Cp4Edit *e, int32_t vert, float amount)
@@ -230,10 +230,33 @@ int32_t cp4_edit_spine_girth(Cp4Edit *e, int32_t vert, float amount)
     return e ? cp4_studio_spine_girth(&e->g, (int)vert, amount) : 0;
 }
 
-void cp4_edit_spine_set(Cp4Edit *e, int32_t nseg, int32_t girth,
-                        int32_t arch, int32_t sweep)
+int32_t cp4_edit_spine_points(Cp4Edit *e, int32_t *out)
 {
-    if (e) cp4_genome_spine(&e->g, (int)nseg, (int)girth, (int)arch, (int)sweep);
+    if (!e || !out) return 0;
+    return cp4_studio_spine_points(e->studio, &e->g, &e->view, out);
+}
+
+/* Growing the spine costs DNA - five a point, the same as it always has - so
+ * unlike a drag it can be refused. The front end gets -1 and shows the budget
+ * bar going red rather than silently building an animal it cannot afford. */
+int32_t cp4_edit_spine_add(Cp4Edit *e, int32_t front)
+{
+    if (!e) return -1;
+    Cp4Genome t = e->g;
+    if (cp4_genome_spine_add(&t, (int)front) < 0) return -1;
+    if (cp4_genome_cost(&t) > e->budget) return -1;
+    e->g = t;
+    return e->g.nseg;
+}
+
+int32_t cp4_edit_spine_remove(Cp4Edit *e, int32_t front)
+{
+    return e ? cp4_genome_spine_remove(&e->g, (int)front) : -1;
+}
+
+void cp4_edit_spine_set(Cp4Edit *e, int32_t nseg, int32_t girth)
+{
+    if (e) cp4_genome_spine(&e->g, (int)nseg, (int)girth);
 }
 
 void cp4_edit_paint(Cp4Edit *e, int32_t hue, int32_t hue2, int32_t hue3,
@@ -278,16 +301,21 @@ void cp4_edit_genome(const Cp4Edit *e, int32_t *out)
     }
 }
 
-/* nseg, girth, arch, sweep, then hue/hue2/hue3/sat/val, then the two coats */
-void cp4_edit_body(const Cp4Edit *e, int32_t *out /* 13 */)
+/* nseg, girth, then hue/hue2/hue3/sat/val, then the two coats.
+ *
+ * arch and sweep used to sit at 2 and 3. They were the two genes that bowed
+ * the whole body at once, and the spine's control points say everything they
+ * said and a great deal they could not, so they are gone rather than kept as
+ * dead entries - a readout that reports a gene nobody writes is worse than a
+ * shorter readout. */
+void cp4_edit_body(const Cp4Edit *e, int32_t *out /* 11 */)
 {
     if (!e || !out) return;
     out[0] = e->g.nseg;     out[1] = e->g.girth;
-    out[2] = e->g.arch;     out[3] = e->g.sweep;
-    out[4] = e->g.hue;      out[5] = e->g.hue2;   out[6] = e->g.hue3;
-    out[7] = e->g.sat;      out[8] = e->g.val;
-    out[9] = e->g.pattern;  out[10] = e->g.pscale;
-    out[11] = e->g.pattern2; out[12] = e->g.pscale2;
+    out[2] = e->g.hue;      out[3] = e->g.hue2;   out[4] = e->g.hue3;
+    out[5] = e->g.sat;      out[6] = e->g.val;
+    out[7] = e->g.pattern;  out[8] = e->g.pscale;
+    out[9] = e->g.pattern2; out[10] = e->g.pscale2;
 }
 
 /* The stat block, in the order a readout would list it. Fixed layout on

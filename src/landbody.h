@@ -88,27 +88,32 @@ static void land_spine(const Cp4Beast *b, LandSpine *s)
     float R = b->s.radius, L = b->s.length;
     s->R = R; s->L = L;
 
-    float arch  = (float)b->g.arch  / 127.0f * R * 1.3f;
-    float sweep = (float)b->g.sweep / 127.0f * R * 0.9f;
-
+    /* The spine is read, not computed.
+     *
+     * It used to be a formula - one arch over the whole body, a per-vertebra
+     * rise, a sweep to one side - and a vertebra's position was therefore
+     * derived from three genes rather than stored anywhere. That is fine for a
+     * generator and impossible for an editor: "drag this one wherever you
+     * like" has nowhere to write the answer down. So the genome carries the
+     * points and this walks them.
+     *
+     * The scales are the contract the header states: `along` spans half the
+     * body length per 127, `side` and `up` 1.6 body radii. Everything the old
+     * formula could say, a set of points can still say; everything a set of
+     * points can say, the formula could not. */
     for (int i = 0; i < nseg; i++) {
         float t = (float)i / (float)(nseg - 1);
-        float along = (0.5f - t) * L;
-        float bend = sinf(LB_PI * t);
+        const Cp4Vert *cp = &b->g.spine[i];
+        float along = (float)cp->along / 127.0f * 0.5f * L;
+        float side  = (float)cp->side  / 127.0f * R * 1.6f;
+        float rise  = (float)cp->up    / 127.0f * R * 1.6f;
         /* a walking animal sways, it does not undulate - a tenth of the
          * amplitude the fish use */
         float sway = sinf(b->phase * 0.5f - t * 1.4f) * R * 0.10f;
-        /* arch is one curve over the whole body; rise is what each vertebra
-         * does on its own, which is how you get a hump, a dropped neck or a
-         * raised tail root out of the same three genes */
-        int ri = i < CP4_MAX_SEG ? i : CP4_MAX_SEG - 1;
-        float rise = (float)b->g.rise[ri] / 127.0f * R * 0.85f;
         s->pos[i] = add(add(add(cv(b->p), mul(s->fwd, along)),
-                            mul(s->right, sway + sweep * bend)),
-                        mul(s->up, arch * bend + rise));
-        int li = i < CP4_MAX_SEG ? i : CP4_MAX_SEG - 1;
-        s->rad[i] = R * cp4_profile(&b->g, t)
-                      * (1.0f + (float)b->g.lump[li] / 127.0f * 0.40f);
+                            mul(s->right, sway + side)),
+                        mul(s->up, rise));
+        s->rad[i] = R * cp4_profile(&b->g, t);
         if (s->rad[i] < R * 0.15f) s->rad[i] = R * 0.15f;
     }
 }

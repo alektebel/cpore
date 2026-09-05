@@ -515,6 +515,7 @@ LAND_STYLES = ("grazer", "predator", "charmer", "swimmer", "flyer", "burrower")
 MEDIA = ("ground", "water", "air", "under")
 LAND_MAX_PARTS = 16
 LAND_PART_FIELDS = 8
+LAND_MAX_SEG = 16
 
 
 def land_genome(parts, nseg=3, girth=130):
@@ -587,10 +588,16 @@ def _bind_edit(lib):
     lib.cp4_edit_mirror.restype = c_int32
     lib.cp4_edit_spine_pick.argtypes = [c_void_p, c_int32, c_int32, c_float]
     lib.cp4_edit_spine_pick.restype = c_int32
-    lib.cp4_edit_spine_drag.argtypes = [c_void_p, c_int32, c_int32, c_int32]
-    lib.cp4_edit_spine_drag.restype = c_int32
+    lib.cp4_edit_spine_move.argtypes = [c_void_p, c_int32, c_int32, c_int32]
+    lib.cp4_edit_spine_move.restype = c_int32
     lib.cp4_edit_spine_girth.argtypes = [c_void_p, c_int32, c_float]
-    lib.cp4_edit_spine_set.argtypes = [c_void_p, c_int32, c_int32, c_int32, c_int32]
+    lib.cp4_edit_spine_points.argtypes = [c_void_p, POINTER(c_int32)]
+    lib.cp4_edit_spine_points.restype = c_int32
+    lib.cp4_edit_spine_add.argtypes = [c_void_p, c_int32]
+    lib.cp4_edit_spine_add.restype = c_int32
+    lib.cp4_edit_spine_remove.argtypes = [c_void_p, c_int32]
+    lib.cp4_edit_spine_remove.restype = c_int32
+    lib.cp4_edit_spine_set.argtypes = [c_void_p, c_int32, c_int32]
     lib.cp4_edit_paint.argtypes = [c_void_p, c_int32, c_int32, c_int32, c_int32, c_int32]
     lib.cp4_edit_coats.argtypes = [c_void_p, c_int32, c_int32, c_int32, c_int32]
     lib.cp4_edit_cost.argtypes = [c_void_p]
@@ -642,7 +649,8 @@ class CreatureEditor:
         self.width, self.height = int(width), int(height)
         self._fb = (c_uint8 * (self.width * self.height * 4))()
         self._parts = (c_int32 * (LAND_MAX_PARTS * LAND_PART_FIELDS))()
-        self._body = (c_int32 * 13)()
+        self._body = (c_int32 * 11)()
+        self._spine = (c_int32 * (LAND_MAX_SEG * 2))()
         self._stats = (c_float * len(EDIT_STATS))()
 
     def close(self):
@@ -756,15 +764,31 @@ class CreatureEditor:
         v = self._lib.cp4_edit_spine_pick(self._h, int(x), int(y), float(grab))
         return None if v < 0 else v
 
-    def spine_drag(self, vert, x, y):
-        return bool(self._lib.cp4_edit_spine_drag(self._h, int(vert), int(x), int(y)))
+    def spine_move(self, vert, x, y):
+        """Drag one control point to a pixel, on the plane facing the camera."""
+        return bool(self._lib.cp4_edit_spine_move(self._h, int(vert), int(x), int(y)))
 
     def spine_girth(self, vert, amount):
         return bool(self._lib.cp4_edit_spine_girth(self._h, int(vert), float(amount)))
 
-    def spine(self, nseg=-1, girth=-1, arch=-2000, sweep=-2000):
-        self._lib.cp4_edit_spine_set(self._h, int(nseg), int(girth),
-                                     int(arch), int(sweep))
+    def spine_points(self):
+        """[(x, y), ...] for every control point, in output pixels."""
+        n = self._lib.cp4_edit_spine_points(self._h, self._spine)
+        return [(int(self._spine[2 * i]), int(self._spine[2 * i + 1]))
+                for i in range(n)]
+
+    def spine_add(self, front=False):
+        """Grow the spine at one end. Returns the new count, or None if the
+        DNA budget or CP4_MAX_SEG said no."""
+        n = self._lib.cp4_edit_spine_add(self._h, 1 if front else 0)
+        return None if n < 0 else int(n)
+
+    def spine_remove(self, front=False):
+        n = self._lib.cp4_edit_spine_remove(self._h, 1 if front else 0)
+        return None if n < 0 else int(n)
+
+    def spine(self, nseg=-1, girth=-1):
+        self._lib.cp4_edit_spine_set(self._h, int(nseg), int(girth))
         return self
 
     # ---- paint ----
@@ -805,7 +829,7 @@ class CreatureEditor:
 
     def body(self):
         self._lib.cp4_edit_body(self._h, self._body)
-        k = ("nseg", "girth", "arch", "sweep", "hue", "hue2", "hue3",
+        k = ("nseg", "girth", "hue", "hue2", "hue3",
              "sat", "val", "pattern", "pscale", "pattern2", "pscale2")
         return dict(zip(k, (int(x) for x in self._body)))
 

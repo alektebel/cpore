@@ -34,7 +34,14 @@ extern "C" {
 #define CP4_MAX_FLORA   560   /* must exceed TARGET_FLORA, plus carcasses */
 #define CP4_MAX_NESTS      7
 #define CP4_MAX_PARTS     16
-#define CP4_MAX_SEG        6
+/* Sixteen, not six.
+ *
+ * The spine is a thing you drag now, and six points gave the add/remove
+ * control four positions of travel - enough to look like a stub rather than a
+ * control. Sixteen is enough to shape a neck, a hump and a tail root
+ * independently, and costs sixty-four bytes in a genome that sits inside a
+ * 45KB world struct. */
+#define CP4_MAX_SEG       16
 #define CP4_FCELL      150.0f   /* flora hash cell, a little over a sight step */
 #define CP4_FGRID      2048     /* buckets; must be a power of two */
 
@@ -100,16 +107,31 @@ enum { CP4_PAT_PLAIN = 0, CP4_PAT_BANDS, CP4_PAT_SPOTS, CP4_PAT_COUNTER,
        CP4_PAT_STRIPES, CP4_PAT_MOTTLE, CP4_PAT_GRADIENT, CP4_PAT_RINGS,
        CP4_PAT_COUNT };
 
+/* One point on the spine.
+ *
+ * The spine used to be a formula - position was computed from arch, sweep and
+ * a per-segment rise, and a vertebra's location was therefore *derived* and
+ * had nowhere to be written down. That is fine for a generator and impossible
+ * for an editor: "drag this vertebra wherever you like" needs somewhere to put
+ * the answer.
+ *
+ * So the curve is gone and these are the spine. along/side/up are the point's
+ * position in the body's own frame: `along` in units of half the body length
+ * per 127, `side` and `up` in units of 1.6 body radii per 127. `rad` is how
+ * thick the animal is there, which is what the old prof[] and lump[] were
+ * between them - one number per point rather than a four-station curve plus a
+ * per-segment nudge, because with sixteen points you can simply say it. */
+typedef struct {
+    int8_t  along;
+    int8_t  side;
+    int8_t  up;
+    uint8_t rad;
+} Cp4Vert;
+
 typedef struct {
     Cp4Part part[CP4_MAX_PARTS];
     uint8_t nseg, girth;
-    uint8_t prof[4];
-    int8_t  lump[CP4_MAX_SEG];
-    /* Per-segment height, so the spine can rise and dip along its length
-     * rather than only arching as one curve. A hump, a dropped neck and a
-     * raised tail root are all the same three bytes. */
-    int8_t  rise[CP4_MAX_SEG];
-    int8_t  arch, sweep;
+    Cp4Vert spine[CP4_MAX_SEG];
     /* Three coats, as in Spore: a base, a marking and a detail over the top,
      * each with its own pattern. Two colours and one pattern gave a space
      * where every animal was a body and one stripe. */
@@ -151,6 +173,10 @@ void  cp4_genome_mutate(Cp4Genome *g, CpRng *r, int budget, float rate);
 void  cp4_genome_stats(const Cp4Genome *g, Cp4Stats *out);
 void  cp4_genome_from_action(Cp4Genome *g, const float *design, int budget);
 void  cp4_genome_autodesign(Cp4Genome *g, CpRng *r, int budget, int style);
+/* Body radius multiplier at normalised position t along the spine.
+ * Interpolates the control points' own thickness now rather than evaluating a
+ * four-station curve, so callers are unchanged but the answer comes from the
+ * thing the editor actually edits. */
 float cp4_profile(const Cp4Genome *g, float t);
 void  cp4_genome_colour(const Cp4Genome *g, float *rgb, float *rgb2, float *rgb3);
 /* Six archetypes, not three. The first three decide how you fill the DNA
@@ -456,9 +482,18 @@ int        cp4_studio_extent(Cp4Studio *s, const Cp4Genome *g,
  * is grabbable from just outside the silhouette. */
 int        cp4_studio_spine_pick(Cp4Studio *s, const Cp4Genome *g,
                                  const Cp4View *v, int px, int py, float grab_px);
-int        cp4_studio_spine_drag(Cp4Studio *s, Cp4Genome *g, const Cp4View *v,
+/* Drag a control point anywhere in the plane facing the camera. This is the
+ * whole reason the spine stopped being a formula: the answer has somewhere to
+ * go. Returns 0 if the index is out of range. */
+int        cp4_studio_spine_move(Cp4Studio *s, Cp4Genome *g, const Cp4View *v,
                                  int vert, int px, int py);
+/* Thicken or thin one point. */
 int        cp4_studio_spine_girth(Cp4Genome *g, int vert, float amount);
+/* Every control point projected to screen pixels, as x,y pairs, so a front end
+ * can draw the spine without a second projection of its own. Returns how many
+ * were written; out needs room for CP4_MAX_SEG pairs. */
+int        cp4_studio_spine_points(Cp4Studio *s, const Cp4Genome *g,
+                                   const Cp4View *v, int32_t *out);
 
 /* ---- editing a genome ----
  *
@@ -495,8 +530,20 @@ int  cp4_genome_mirror(Cp4Genome *g, int slot, int on, int budget);
 void cp4_genome_paint(Cp4Genome *g, int hue, int hue2, int hue3, int sat, int val);
 void cp4_genome_coats(Cp4Genome *g, int pattern, int pscale,
                       int pattern2, int pscale2);
-void cp4_genome_spine(Cp4Genome *g, int nseg, int girth, int arch, int sweep);
-void cp4_genome_vertebra(Cp4Genome *g, int i, int rise, int lump);
+/* Set the point count and the global thickness scale. Growing or shrinking
+ * the count relays the spine evenly, so a caller that only wants "longer"
+ * gets a sensible body rather than a pile of points at the origin. */
+void cp4_genome_spine(Cp4Genome *g, int nseg, int girth);
+/* Set one control point. Any argument outside its range is clamped. */
+void cp4_genome_vertebra(Cp4Genome *g, int i, int along, int side, int up, int rad);
+/* Lay out `nseg` points evenly along a straight body of default thickness. */
+void cp4_genome_spine_default(Cp4Genome *g, int nseg);
+/* Add or drop a point at one end. `front` picks which end. Returns the new
+ * point count, or -1 if it would leave fewer than two or exceed CP4_MAX_SEG.
+ * Parts stay attached to the vertebra they were on, so extending the tail does
+ * not slide a head part down the body. */
+int  cp4_genome_spine_add(Cp4Genome *g, int front);
+int  cp4_genome_spine_remove(Cp4Genome *g, int front);
 
 /* ---- the editor session ABI ----
  *
@@ -544,10 +591,14 @@ int32_t  cp4_edit_remove(Cp4Edit *e, int32_t slot);
 int32_t  cp4_edit_shape(Cp4Edit *e, int32_t slot, int32_t scale, int32_t len, int32_t bend);
 int32_t  cp4_edit_mirror(Cp4Edit *e, int32_t slot, int32_t on);
 int32_t  cp4_edit_spine_pick(Cp4Edit *e, int32_t x, int32_t y, float grab_px);
-int32_t  cp4_edit_spine_drag(Cp4Edit *e, int32_t vert, int32_t x, int32_t y);
+int32_t  cp4_edit_spine_move(Cp4Edit *e, int32_t vert, int32_t x, int32_t y);
 int32_t  cp4_edit_spine_girth(Cp4Edit *e, int32_t vert, float amount);
-void     cp4_edit_spine_set(Cp4Edit *e, int32_t nseg, int32_t girth,
-                            int32_t arch, int32_t sweep);
+/* Screen positions of the control points, x,y pairs, CP4_MAX_SEG of room. */
+int32_t  cp4_edit_spine_points(Cp4Edit *e, int32_t *out);
+/* Add or drop a point at an end; returns the new count or -1. */
+int32_t  cp4_edit_spine_add(Cp4Edit *e, int32_t front);
+int32_t  cp4_edit_spine_remove(Cp4Edit *e, int32_t front);
+void     cp4_edit_spine_set(Cp4Edit *e, int32_t nseg, int32_t girth);
 void     cp4_edit_paint(Cp4Edit *e, int32_t hue, int32_t hue2, int32_t hue3,
                         int32_t sat, int32_t val);
 void     cp4_edit_coats(Cp4Edit *e, int32_t pattern, int32_t pscale,
@@ -557,7 +608,8 @@ int32_t  cp4_edit_cost(const Cp4Edit *e);
 int32_t  cp4_edit_budget_get(const Cp4Edit *e);
 int32_t  cp4_edit_can_afford(const Cp4Edit *e, int32_t type, int32_t mirror);
 void     cp4_edit_genome(const Cp4Edit *e, int32_t *out /* MAX_PARTS*8 */);
-void     cp4_edit_body(const Cp4Edit *e, int32_t *out /* 13 */);
+/* nseg, girth, hue, hue2, hue3, sat, val, pattern, pscale, pattern2, pscale2 */
+void     cp4_edit_body(const Cp4Edit *e, int32_t *out /* 11 */);
 int32_t  cp4_edit_stat_count(void);
 void     cp4_edit_stats(const Cp4Edit *e, float *out /* cp4_edit_stat_count() */);
 /* Hand the finished animal to the simulation: compacts slots once, at the
