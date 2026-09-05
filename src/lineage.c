@@ -183,10 +183,10 @@ void cp_lineage_from_land(CpLineage *l, const Cp4Genome *g)
         }
         if (w < 1e-3f) w = 1e-3f;
         /* Least-squares fit of a single sine, then into the aquatic scales:
-         * stage 3 stores 1.6 body radii per 127, stage 2's arch is 1.5 and
-         * its sweep 1.2. */
-        l->arch  = (int8_t)clampi8((int)(up   / w * (1.6f / 1.5f)));
-        l->sweep = (int8_t)clampi8((int)(side / w * (1.6f / 1.2f)));
+         * stage 3 stores CP4_SPINE_OFF body radii per 127, stage 2's arch is
+         * 1.5 and its sweep 1.2. */
+        l->arch  = (int8_t)clampi8((int)(up   / w * (CP4_SPINE_OFF / 1.5f)));
+        l->sweep = (int8_t)clampi8((int)(side / w * (CP4_SPINE_OFF / 1.2f)));
     }
     l->stages = (uint8_t)imaxi(l->stages, 3);
 }
@@ -471,8 +471,8 @@ void cp_lineage_to_land(const CpLineage *l, Cp4Genome *g, int budget, CpRng *r)
         for (int i = 0; i < n; i++) {
             float t = (float)i / (float)(n - 1);
             float bend = sinf(3.14159265f * t);
-            int up   = (int)((float)l->arch  * bend * (1.5f / 1.6f));
-            int side = (int)((float)l->sweep * bend * (1.2f / 1.6f));
+            int up   = (int)((float)l->arch  * bend * (1.5f / CP4_SPINE_OFF));
+            int side = (int)((float)l->sweep * bend * (1.2f / CP4_SPINE_OFF));
             g->spine[i].up   = (int8_t)clampi8(g->spine[i].up   + up);
             g->spine[i].side = (int8_t)clampi8(g->spine[i].side + side);
         }

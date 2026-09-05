@@ -92,11 +92,16 @@ void cp4_genome_clear(Cp4Genome *g)
 
 /* Lay out a straight body of even thickness.
  *
- * `along` runs +127 at the nose to -127 at the tail, which is the same
- * direction the old formula's `along` ran, so nothing downstream had to learn
- * a new sign. The default thickness tapers a little at both ends because a
- * capsule with flat ends reads as a pill rather than an animal, and the very
- * first thing anyone does in the editor is drag it into something else. */
+ * `along` runs +64 at the nose to -64 at the tail rather than the full +-127,
+ * which is the same length the old formula produced and leaves half the range
+ * spare on purpose: dragging a nose vertebra forward has to be able to make
+ * the animal longer, and at the edge of the range it could only ever be
+ * refused. A body can now be stretched to about twice its default reach before
+ * the clamp is reached, which is where adding a vertebra takes over.
+ *
+ * The default thickness tapers a little at both ends because a capsule with
+ * flat ends reads as a pill rather than an animal, and the very first thing
+ * anyone does in the editor is drag it into something else. */
 void cp4_genome_spine_default(Cp4Genome *g, int nseg)
 {
     if (!g) return;
@@ -106,7 +111,7 @@ void cp4_genome_spine_default(Cp4Genome *g, int nseg)
     for (int i = 0; i < nseg; i++) {
         float t = (float)i / (float)(nseg - 1);        /* 0 nose .. 1 tail */
         float bulge = 0.55f + 0.45f * sinf(3.14159265f * t);
-        g->spine[i].along = (int8_t)(127.0f - 254.0f * t);
+        g->spine[i].along = (int8_t)(64.0f - 128.0f * t);
         g->spine[i].side  = 0;
         g->spine[i].up    = 0;
         g->spine[i].rad   = (uint8_t)(bulge * 200.0f);
@@ -160,12 +165,13 @@ static void spine_prof(Cp4Genome *g, int a, int b, int c, int d)
 }
 
 /* One vertebra lifted off the axis. `v` is in the units the old rise[] gene
- * used - 0.85 body radii per 127 - and `up` is in 1.6 of them, so preserving
- * an archetype's silhouette is a constant. */
+ * used - 0.85 body radii per 127 - and `up` is in CP4_SPINE_OFF of them, so
+ * preserving an archetype's silhouette is a constant. */
 static void spine_rise(Cp4Genome *g, int i, int v)
 {
     if (i < 0 || i >= CP4_MAX_SEG) return;
-    g->spine[i].up = (int8_t)clampi((int)((float)v * (0.85f / 1.6f)), -127, 127);
+    g->spine[i].up = (int8_t)clampi((int)((float)v * (0.85f / CP4_SPINE_OFF)),
+                                    -127, 127);
 }
 
 /* Thickness at normalised position t, interpolated between control points.
@@ -432,12 +438,15 @@ void cp4_genome_random(Cp4Genome *g, CpRng *r, int budget)
     {
         float bow  = (float)(cp_rng_int(r, 101) - 50) / 127.0f * 1.3f;
         float lean = (float)(cp_rng_int(r, 81) - 40)  / 127.0f * 0.9f;
+        /* bow and lean are in body radii, as arch and sweep were */
         int n = g->nseg;
         for (int i = 0; i < n; i++) {
             float t = n > 1 ? (float)i / (float)(n - 1) : 0.0f;
             float bend = sinf(3.14159265f * t);
-            int up   = (int)((bow  * bend / 1.6f) * 127.0f) + cp_rng_int(r, 41) - 20;
-            int side = (int)((lean * bend / 1.6f) * 127.0f) + cp_rng_int(r, 25) - 12;
+            int up   = (int)((bow  * bend / CP4_SPINE_OFF) * 127.0f)
+                     + cp_rng_int(r, 41) - 20;
+            int side = (int)((lean * bend / CP4_SPINE_OFF) * 127.0f)
+                     + cp_rng_int(r, 25) - 12;
             int rad  = (int)g->spine[i].rad + cp_rng_int(r, 97) - 48;
             g->spine[i].up   = (int8_t)clampi(up, -127, 127);
             g->spine[i].side = (int8_t)clampi(side, -127, 127);

@@ -97,16 +97,17 @@ static void land_spine(const Cp4Beast *b, LandSpine *s)
      * like" has nowhere to write the answer down. So the genome carries the
      * points and this walks them.
      *
-     * The scales are the contract the header states: `along` spans half the
-     * body length per 127, `side` and `up` 1.6 body radii. Everything the old
-     * formula could say, a set of points can still say; everything a set of
-     * points can say, the formula could not. */
+     * The scales are the contract the header states, and they are named there
+     * rather than written out here so the drag cannot convert a pixel with one
+     * number while this reads it back with another. Everything the old formula
+     * could say, a set of points can still say; everything a set of points can
+     * say, the formula could not. */
     for (int i = 0; i < nseg; i++) {
         float t = (float)i / (float)(nseg - 1);
         const Cp4Vert *cp = &b->g.spine[i];
-        float along = (float)cp->along / 127.0f * 0.5f * L;
-        float side  = (float)cp->side  / 127.0f * R * 1.6f;
-        float rise  = (float)cp->up    / 127.0f * R * 1.6f;
+        float along = (float)cp->along / 127.0f * L * CP4_SPINE_ALONG;
+        float side  = (float)cp->side  / 127.0f * R * CP4_SPINE_OFF;
+        float rise  = (float)cp->up    / 127.0f * R * CP4_SPINE_OFF;
         /* a walking animal sways, it does not undulate - a tenth of the
          * amplitude the fish use */
         float sway = sinf(b->phase * 0.5f - t * 1.4f) * R * 0.10f;

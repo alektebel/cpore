@@ -591,6 +591,7 @@ def _bind_edit(lib):
     lib.cp4_edit_spine_move.argtypes = [c_void_p, c_int32, c_int32, c_int32]
     lib.cp4_edit_spine_move.restype = c_int32
     lib.cp4_edit_spine_girth.argtypes = [c_void_p, c_int32, c_float]
+    lib.cp4_edit_frame_hold.argtypes = [c_void_p, c_int32]
     lib.cp4_edit_spine_points.argtypes = [c_void_p, POINTER(c_int32)]
     lib.cp4_edit_spine_points.restype = c_int32
     lib.cp4_edit_spine_add.argtypes = [c_void_p, c_int32]
@@ -770,6 +771,11 @@ class CreatureEditor:
 
     def spine_girth(self, vert, amount):
         return bool(self._lib.cp4_edit_spine_girth(self._h, int(vert), float(amount)))
+
+    def frame_hold(self, on=True):
+        """Freeze the viewport's automatic framing for the length of a drag."""
+        self._lib.cp4_edit_frame_hold(self._h, 1 if on else 0)
+        return self
 
     def spine_points(self):
         """[(x, y), ...] for every control point, in output pixels."""

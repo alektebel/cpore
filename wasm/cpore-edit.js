@@ -179,6 +179,11 @@ export class CreatureEditor {
   spineMove(vert, x, y) { return !!this.x.cp4_edit_spine_move(this.handle, vert, x | 0, y | 0); }
   spineGirth(vert, amount) { return !!this.x.cp4_edit_spine_girth(this.handle, vert, amount); }
 
+  /* Hold the viewport's automatic framing still. Called on pointerdown and
+   * released on pointerup, so what you drag stays under the cursor instead of
+   * being chased by the camera re-fitting to the body you are changing. */
+  frameHold(on) { this.x.cp4_edit_frame_hold(this.handle, on ? 1 : 0); return this; }
+
   /* [{x, y}, ...] for every control point, in canvas pixels, so the overlay
    * never has to project anything itself. A point behind the camera comes
    * back as null in its own slot rather than being dropped, or the i-th entry

@@ -116,8 +116,8 @@ enum { CP4_PAT_PLAIN = 0, CP4_PAT_BANDS, CP4_PAT_SPOTS, CP4_PAT_COUNTER,
  * the answer.
  *
  * So the curve is gone and these are the spine. along/side/up are the point's
- * position in the body's own frame: `along` in units of half the body length
- * per 127, `side` and `up` in units of 1.6 body radii per 127. `rad` is how
+ * position in the body's own frame, in the units CP4_SPINE_ALONG and
+ * CP4_SPINE_OFF below give per 127. `rad` is how
  * thick the animal is there, which is what the old prof[] and lump[] were
  * between them - one number per point rather than a four-station curve plus a
  * per-segment nudge, because with sixteen points you can simply say it. */
@@ -127,6 +127,25 @@ typedef struct {
     int8_t  up;
     uint8_t rad;
 } Cp4Vert;
+
+/* How far a control point reaches at the full +-127: `along` in body lengths,
+ * `side` and `up` in body radii.
+ *
+ * Named rather than repeated, because four places have to agree about them -
+ * the skeleton builder, the editor's drag, the mesh exporter's view of the
+ * body and the lineage's arch conversion - and a drag that converts a pixel
+ * with one number while the renderer reads it back with another puts the
+ * vertebra somewhere other than where it was dropped, which looks like the
+ * editor ignoring the mouse.
+ *
+ * Four radii, not the 1.6 the first cut used. That was the reach the old arch
+ * gene had and it is the wrong bar: an arch bows a whole body a little, and a
+ * dragged vertebra is asked to make a neck, a hump or a dropped belly, none of
+ * which fit inside one and a half body widths. At 1.6 a drag ran into the
+ * clamp about a third of the way to the pointer and simply stopped following
+ * it, with nothing on screen to say why. */
+#define CP4_SPINE_ALONG  1.0f
+#define CP4_SPINE_OFF    4.0f
 
 typedef struct {
     Cp4Part part[CP4_MAX_PARTS];
@@ -489,6 +508,14 @@ int        cp4_studio_spine_move(Cp4Studio *s, Cp4Genome *g, const Cp4View *v,
                                  int vert, int px, int py);
 /* Thicken or thin one point. */
 int        cp4_studio_spine_girth(Cp4Genome *g, int vert, float amount);
+/* Freeze the viewport's automatic framing for the length of a gesture.
+ *
+ * The camera fits itself to the animal every frame, so a drag that makes the
+ * body bigger is answered by the frame pulling back - and the thing being
+ * dragged falls behind the cursor by however much the shot just shrank. Hold
+ * it while a pointer is down and release on the way up, which is also the
+ * moment re-framing is what the user wants. */
+void       cp4_studio_frame_hold(Cp4Studio *s, int on);
 /* Every control point projected to screen pixels, as x,y pairs, so a front end
  * can draw the spine without a second projection of its own. Returns how many
  * were written; out needs room for CP4_MAX_SEG pairs. */
@@ -593,6 +620,8 @@ int32_t  cp4_edit_mirror(Cp4Edit *e, int32_t slot, int32_t on);
 int32_t  cp4_edit_spine_pick(Cp4Edit *e, int32_t x, int32_t y, float grab_px);
 int32_t  cp4_edit_spine_move(Cp4Edit *e, int32_t vert, int32_t x, int32_t y);
 int32_t  cp4_edit_spine_girth(Cp4Edit *e, int32_t vert, float amount);
+/* Hold the viewport's framing still for the length of a drag. */
+void     cp4_edit_frame_hold(Cp4Edit *e, int32_t on);
 /* Screen positions of the control points, x,y pairs, CP4_MAX_SEG of room. */
 int32_t  cp4_edit_spine_points(Cp4Edit *e, int32_t *out);
 /* Add or drop a point at an end; returns the new count or -1. */

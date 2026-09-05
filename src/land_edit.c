@@ -230,6 +230,11 @@ int32_t cp4_edit_spine_girth(Cp4Edit *e, int32_t vert, float amount)
     return e ? cp4_studio_spine_girth(&e->g, (int)vert, amount) : 0;
 }
 
+void cp4_edit_frame_hold(Cp4Edit *e, int32_t on)
+{
+    if (e) cp4_studio_frame_hold(e->studio, (int)on);
+}
+
 int32_t cp4_edit_spine_points(Cp4Edit *e, int32_t *out)
 {
     if (!e || !out) return 0;

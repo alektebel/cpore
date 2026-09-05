@@ -94,14 +94,14 @@
 <div id="stage">
   <header>
     <h1>Creature Creator</h1>
-    <p>Drag a part onto the animal to place it, drag it again to move it, drag
-       the ring to resize and the tip to lengthen. Drag a vertebra up to hump
-       the spine or sideways to fatten it. Every shape is made by dragging;
-       the panels are for the colours and the numbers.</p>
+    <p>You start with a blob. Hover it and its spine appears: hold any vertebra
+       and carry it wherever you like, or press an arrow at either end to grow
+       the body a vertebra or take one away. Then drag parts on. Every shape is
+       made by dragging; the panels are for the colours and the numbers.</p>
   </header>
   <canvas id="view" width="512" height="512" tabindex="0"
           aria-label="creature viewport"></canvas>
-  <div id="hint">drag a part onto the animal &middot; drag the animal to turn it</div>
+  <div id="hint">hover the blob to see its spine &middot; drag the backdrop to turn it</div>
   <div id="boot">loading&hellip;</div>
 </div>
 
@@ -110,11 +110,13 @@
   <div class="row"><span id="dna">0 / 0</span><span id="nparts">0 parts</span></div>
   <div class="meter"><i id="dnabar" style="width:0"></i></div>
   <h2>Body</h2>
-  <label>segments <b id="lseg"></b></label>
-  <input type="range" id="nseg" min="2" max="6" step="1">
+  <!-- No arch and no sweep. They were the two genes that bowed the whole body
+       at once, and they are gone: the spine is a set of points you drag, which
+       says everything they said and a great deal they could not. The vertebra
+       count is a readout rather than a slider for the same reason - the arrows
+       on the spine's own ends are the control. -->
+  <div class="row"><span>vertebrae</span><span id="lseg">2</span></div>
   <label>girth</label><input type="range" id="girth" min="60" max="255">
-  <label>arch</label><input type="range" id="arch" min="-127" max="127">
-  <label>sweep</label><input type="range" id="sweep" min="-127" max="127">
   <h2>Paint</h2>
   <label>base hue</label><input type="range" id="hue" min="0" max="255">
   <label>marking hue</label><input type="range" id="hue2" min="0" max="255">
@@ -142,8 +144,18 @@ let frame = null;      /* the last rendered frame, for redrawing the overlay */
 let selPanel = null;   /* what the selection panel is currently showing */
 let pending = 0;       /* the animation frame a drag redraw is queued on */
 let carrying = null;   /* a part being dragged off the palette */
-const HINT = 'drag a part onto the animal &middot; drag the animal to turn it';
+const HINT = 'hover the blob to see its spine &middot; drag the backdrop to turn it';
 let handles = null;    /* screen handles for the selected part */
+
+/* ---- the spine, as an overlay ----
+ *
+ * It appears on hover and is the primary thing you manipulate, so it is cached
+ * rather than re-derived: spinePoints() rebuilds the body and projects it, and
+ * the hover handler runs on every pointermove. The cache is refilled by paint(),
+ * which is the only thing that can change where a vertebra is on screen. */
+let spinePts = [];     /* [{x, y} | null] per control point, in canvas pixels */
+let spineOn = false;   /* is the pointer over the animal, so the spine shows  */
+let hoverVert = null;  /* the vertebra under the pointer, if any              */
 
 /* ---- drawing ----
  *
@@ -176,6 +188,11 @@ function paint(q) {
    * necessary - the module hands back the same buffer every time. */
   frame = new ImageData(new Uint8ClampedArray(img.data), N, N);
   settleQ = q;
+  /* Refilled here and nowhere else. A vertebra's screen position can only
+   * change when the body or the camera does, and both of those end in a
+   * paint - so the hover handler, which runs per pointermove, never has to
+   * rebuild the animal to find out where the handles are. */
+  spinePts = ed.spinePoints();
   overlay();
 }
 
@@ -188,7 +205,102 @@ function paint(q) {
 function overlay() {
   if (!frame) return;
   ctx.putImageData(frame, 0, 0);
+  if (spineOn || (drag && drag.kind === 'spine')) drawSpine();
   if (drag === null && selected !== null) outlineSelected();
+}
+
+/* The spine, drawn over the animal it belongs to.
+ *
+ * The cord first, then a bead per control point, then the two end controls.
+ * Everything comes out of spinePoints(), which is the same projection the
+ * renderer used for the pixels underneath - a second projection here would be
+ * a second chance to disagree with the picture, and a handle that sits a few
+ * pixels off the body is the one editor bug nobody can diagnose by looking. */
+function drawSpine() {
+  const p = spinePts;
+  if (p.length < 2) return;
+  ctx.save();
+
+  /* A dark casing under the bright cord, so it reads on a pale animal as
+   * well as on a dark one. */
+  for (const [w, c] of [[4.5, 'rgba(6,9,11,.55)'], [2, '#6fd6c4']]) {
+    ctx.lineWidth = w; ctx.strokeStyle = c;
+    ctx.beginPath();
+    let pen = false;
+    for (const q of p) {
+      if (!q) { pen = false; continue; }
+      if (pen) ctx.lineTo(q.x, q.y); else { ctx.moveTo(q.x, q.y); pen = true; }
+    }
+    ctx.stroke();
+  }
+
+  const held = drag && drag.kind === 'spine' ? drag.vert : null;
+  p.forEach((q, i) => {
+    if (!q) return;
+    const hot = i === held || i === hoverVert;
+    ctx.beginPath();
+    ctx.arc(q.x, q.y, hot ? 7 : 4.5, 0, 7);
+    ctx.fillStyle = i === held ? '#dffaf4' : hot ? '#9fe3d6' : '#0b0e11';
+    ctx.fill();
+    ctx.lineWidth = 1.6; ctx.strokeStyle = '#6fd6c4';
+    ctx.stroke();
+  });
+
+  if (held === null) for (const a of endArrows()) drawArrow(a);
+  ctx.restore();
+}
+
+/* Two controls at each end of the cord: an outward chevron that grows the
+ * spine by a vertebra and an inward one that takes it away. They sit on the
+ * line the last two points make, so they point where the body is going rather
+ * than at a fixed screen angle - which is what makes them still read as "this
+ * end" after the turntable has been spun round. */
+const ARROW_GRAB = 13;
+function endArrows() {
+  const p = spinePts;
+  if (p.length < 2) return [];
+  const out = [];
+  for (const [e, nb, front] of [[0, 1, 1], [p.length - 1, p.length - 2, 0]]) {
+    const a = p[e], b = p[nb];
+    if (!a || !b) continue;
+    let ux = a.x - b.x, uy = a.y - b.y;
+    const len = Math.hypot(ux, uy);
+    if (len < 1) continue;
+    ux /= len; uy /= len;
+    out.push({ x: a.x + ux * 15, y: a.y + uy * 15, dx: -ux, dy: -uy,
+               kind: 'shrink', front });
+    out.push({ x: a.x + ux * 37, y: a.y + uy * 37, dx: ux, dy: uy,
+               kind: 'grow', front });
+  }
+  return out;
+}
+
+let arrowHot = null;
+
+function drawArrow(a) {
+  const grow = a.kind === 'grow';
+  const s = grow ? 9 : 7;
+  const px = -a.dy, py = a.dx;          /* perpendicular */
+  ctx.beginPath();
+  ctx.moveTo(a.x + a.dx * s, a.y + a.dy * s);
+  ctx.lineTo(a.x - a.dx * s * 0.6 + px * s * 0.8, a.y - a.dy * s * 0.6 + py * s * 0.8);
+  ctx.lineTo(a.x - a.dx * s * 0.6 - px * s * 0.8, a.y - a.dy * s * 0.6 - py * s * 0.8);
+  ctx.closePath();
+  const hot = arrowHot === a.kind + a.front;
+  ctx.fillStyle = grow ? (hot ? '#dffaf4' : '#6fd6c4') : (hot ? '#f0a89c' : '#0b0e11');
+  ctx.fill();
+  ctx.lineWidth = 1.4;
+  ctx.strokeStyle = grow ? '#0b0e11' : '#e2604f';
+  ctx.stroke();
+}
+
+function arrowAt(x, y) {
+  let best = null, bd = ARROW_GRAB * ARROW_GRAB;
+  for (const a of endArrows()) {
+    const d = (x - a.x) ** 2 + (y - a.y) ** 2;
+    if (d < bd) { bd = d; best = a; }
+  }
+  return best;
 }
 
 function draw(moving) {
@@ -280,8 +392,8 @@ function refresh() {
    * to, which reads as the slider fighting you. */
   const set = (id, v) => { const el = $(id); if (el !== document.activeElement) el.value = v; };
   const b = ed.body();
-  set('nseg', b.nseg); $('lseg').textContent = b.nseg;
-  set('girth', b.girth); set('arch', b.arch); set('sweep', b.sweep);
+  $('lseg').textContent = b.nseg;
+  set('girth', b.girth);
   set('hue', b.hue); set('hue2', b.hue2); set('hue3', b.hue3);
   set('sat', b.sat); set('val', b.val);
   set('pattern', b.pattern); set('pattern2', b.pattern2);
@@ -337,10 +449,43 @@ function hint(t) { $('hint').innerHTML = t; }
  * What a press means is asked of the model rather than tracked in the UI:
  * handle, then vertebra, then part, then orbit. Nothing here remembers a mode.
  */
+/* Canvas pixels from a pointer event, and back again.
+ *
+ * getBoundingClientRect() measures the *border* box, and this canvas has a 1px
+ * border and is free to be scaled down by the layout - so reading a pointer
+ * straight off the rect puts every click about a pixel out and slightly
+ * mis-scaled. A pixel does not matter in the middle of a body and is the whole
+ * question at its silhouette, where it is the difference between the part and
+ * the backdrop behind it: a right-click on the very edge of a horn removed
+ * nothing, repeatably, and looked like the picker being wrong.
+ *
+ * The insets are cached because getComputedStyle is not cheap and this runs on
+ * every pointermove, and dropped on resize because that is when they change. */
+let _inset = null;
+function insets() {
+  if (!_inset) {
+    const s = getComputedStyle(cv);
+    _inset = { l: parseFloat(s.borderLeftWidth) || 0,
+               r: parseFloat(s.borderRightWidth) || 0,
+               t: parseFloat(s.borderTopWidth) || 0,
+               b: parseFloat(s.borderBottomWidth) || 0 };
+  }
+  return _inset;
+}
+addEventListener('resize', () => { _inset = null; });
+
 function xy(e) {
-  const r = cv.getBoundingClientRect();
-  return [Math.round((e.clientX - r.left) * N / r.width),
-          Math.round((e.clientY - r.top) * N / r.height)];
+  const r = cv.getBoundingClientRect(), i = insets();
+  const w = (r.width - i.l - i.r) || N, h = (r.height - i.t - i.b) || N;
+  return [Math.round((e.clientX - r.left - i.l) * N / w),
+          Math.round((e.clientY - r.top - i.t) * N / h)];
+}
+
+/* The exact inverse, so a harness can aim at a canvas pixel and land on it. */
+function clientOf(x, y) {
+  const r = cv.getBoundingClientRect(), i = insets();
+  const w = (r.width - i.l - i.r) || N, h = (r.height - i.t - i.b) || N;
+  return [r.left + i.l + x * w / N, r.top + i.t + y * h / N];
 }
 
 const HANDLE_R = 9;
@@ -375,9 +520,52 @@ function select(slot) {
   handles = slot === null ? null : findHandles(slot);
 }
 
+/* Is the spine showing, and what is under the pointer?
+ *
+ * The spine appears whenever the pointer is over the animal or over one of the
+ * spine's own controls, which is what makes it feel like a property of the
+ * creature rather than a mode you switch on. Returns whether anything the
+ * overlay draws has changed, so the caller can skip a redraw. */
+const VERT_GRAB = 13;
+function updateHover(x, y) {
+  const wasOn = spineOn, wasV = hoverVert, wasA = arrowHot;
+  const a = arrowAt(x, y);
+  const v = a ? null : ed.spinePick(x, y, VERT_GRAB);
+  spineOn = !!a || v !== null || !!ed.surface(x, y);
+  hoverVert = spineOn ? v : null;
+  arrowHot = a ? a.kind + a.front : null;
+  return spineOn !== wasOn || hoverVert !== wasV || arrowHot !== wasA;
+}
+
 cv.addEventListener('pointerdown', e => {
   const [x, y] = xy(e);
   cv.setPointerCapture(e.pointerId);
+  /* Touch has no hover, so the press has to establish it. Without this the
+   * arrows and the vertebrae are unreachable on a tablet - they would only
+   * exist after a move that had already been interpreted as an orbit. */
+  updateHover(x, y);
+
+  /* The spine's own controls come first. They sit outside the silhouette on
+   * purpose - an end arrow that could only be pressed where the body already
+   * is would be a control for growing a body you cannot grow. */
+  /* Freeze the framing for the length of the gesture. The camera fits itself
+   * to the animal, so without this a drag that makes the body bigger is
+   * answered by the shot pulling back, and what you are dragging falls behind
+   * the cursor - which reads as the editor half-ignoring the mouse. */
+  ed.frameHold(true);
+
+  const arrow = arrowAt(x, y);
+  if (arrow) {
+    const n = arrow.kind === 'grow' ? ed.spineAdd(!!arrow.front)
+                                    : ed.spineRemove(!!arrow.front);
+    const end = arrow.front ? 'nose' : 'tail';
+    hint(n === null
+      ? (arrow.kind === 'grow' ? 'no DNA for another vertebra' : 'two vertebrae is the minimum')
+      : `${arrow.kind === 'grow' ? 'grew' : 'shortened'} the ${end} &middot; <b>${n}</b> vertebrae`);
+    select(null);
+    draw(false);
+    return;
+  }
 
   const h = handleAt(x, y);
   if (h) {
@@ -386,10 +574,12 @@ cv.addEventListener('pointerdown', e => {
     hint(h === 'reach' ? 'pull to lengthen' : 'pull to resize');
     return;
   }
-  const vert = ed.spinePick(x, y, 13);
+  const vert = ed.spinePick(x, y, VERT_GRAB);
   if (vert !== null) {
     drag = { kind: 'spine', vert, x, y };
-    hint(`vertebra <b>${vert}</b> &middot; up to hump, sideways to fatten`);
+    hoverVert = vert;
+    hint(`carrying vertebra <b>${vert}</b> &middot; let go to drop it`);
+    overlay();
     return;
   }
   const slot = ed.pick(x, y);
@@ -409,9 +599,16 @@ cv.addEventListener('pointerdown', e => {
 cv.addEventListener('pointermove', e => {
   const [x, y] = xy(e);
   if (!drag) {
-    cv.style.cursor = handleAt(x, y) ? 'nwse-resize'
-                    : ed.spinePick(x, y, 13) !== null ? 'ns-resize'
+    const changed = updateHover(x, y);
+    cv.style.cursor = arrowHot ? 'pointer'
+                    : handleAt(x, y) ? 'nwse-resize'
+                    : hoverVert !== null ? 'grab'
                     : ed.pick(x, y) !== null ? 'grab' : 'move';
+    /* Repaint the overlay only when it would look different. A pointermove
+     * over an unchanged hover state is most of them, and putImageData of a
+     * 512-square frame on every one of those is a megabyte of copying for a
+     * picture nobody can tell from the last. */
+    if (changed) overlay();
     return;
   }
   if (drag.kind === 'orbit') {
@@ -420,12 +617,11 @@ cv.addEventListener('pointermove', e => {
   } else if (drag.kind === 'part') {
     ed.move(drag.slot, x, y);
   } else if (drag.kind === 'spine') {
-    /* Vertical is the hump the gene actually stores; horizontal is girth at
-     * that vertebra, which is the other thing you would reach for while
-     * holding a piece of the spine. */
-    ed.spineDrag(drag.vert, x, y);
-    ed.spineGirth(drag.vert, (x - drag.x) * 0.006);
-    drag.x = x;
+    /* Carry it. All three axes, on the plane facing the camera, so the
+     * vertebra goes where the pointer goes and stays under it - which is what
+     * "drag it wherever you like" has to mean. Turn the turntable and drag
+     * again to move it in the axis the last view was flat in. */
+    ed.spineMove(drag.vert, x, y);
   } else if (handles) {
     /* Pull away from the part's middle to grow it. Distance rather than a
      * raw axis, so it works whichever way round the camera is. */
@@ -439,6 +635,7 @@ cv.addEventListener('pointermove', e => {
 });
 
 const release = () => {
+  ed.frameHold(false);
   if (!drag) return;
   const wasPart = drag.kind !== 'orbit';
   drag = null;
@@ -448,12 +645,33 @@ const release = () => {
 cv.addEventListener('pointerup', release);
 cv.addEventListener('pointercancel', release);
 
+/* Take the spine away when the pointer leaves, or it hangs over an animal
+ * nobody is touching and stops reading as a response to the hover. */
+cv.addEventListener('pointerleave', () => {
+  if (drag) return;
+  if (spineOn || hoverVert !== null || arrowHot !== null) {
+    spineOn = false; hoverVert = null; arrowHot = null;
+    overlay();
+  }
+});
+
 cv.addEventListener('wheel', e => {
   e.preventDefault();
   /* Over a part, the wheel resizes it; anywhere else it moves the camera.
    * Spore resizes with the wheel and so does this, and the disambiguation is
    * the same question the press asks. */
   const [x, y] = xy(e);
+  /* Over a vertebra it thickens the body there. This is where fattening one
+   * point went when the drag started using all three axes for position: you
+   * cannot spend the horizontal on girth once horizontal means "move it
+   * sideways", and the wheel is already the resize verb everywhere else. */
+  const vert = ed.spinePick(x, y, VERT_GRAB);
+  if (vert !== null) {
+    ed.spineGirth(vert, e.deltaY < 0 ? 0.10 : -0.10);
+    hoverVert = vert; spineOn = true;
+    draw(true);
+    return;
+  }
   const slot = ed.pick(x, y);
   if (slot !== null) {
     const p = ed.parts().find(q => q.slot === slot);
@@ -475,6 +693,7 @@ cv.addEventListener('wheel', e => {
  */
 function carryStart(type, e) {
   carrying = { type, slot: null };
+  ed.frameHold(true);
   hint(`drop <b>${PARTS[type]}</b> on the body`);
   document.body.style.cursor = 'copy';
   e.preventDefault();
@@ -482,10 +701,8 @@ function carryStart(type, e) {
 
 addEventListener('pointermove', e => {
   if (!carrying) return;
-  const r = cv.getBoundingClientRect();
-  const inside = e.clientX >= r.left && e.clientX <= r.right
-              && e.clientY >= r.top && e.clientY <= r.bottom;
   const [x, y] = xy(e);
+  const inside = x >= 0 && x < N && y >= 0 && y < N;
   if (inside && ed.surface(x, y)) {
     if (carrying.slot === null) {
       const slot = ed.drop(x, y, carrying.type);
@@ -500,6 +717,7 @@ addEventListener('pointermove', e => {
 
 addEventListener('pointerup', () => {
   if (!carrying) return;
+  ed.frameHold(false);
   document.body.style.cursor = '';
   if (carrying.slot === null) hint('nothing placed &mdash; drop it on the animal');
   else { select(carrying.slot); hint(`placed <b>${PARTS[carrying.type]}</b>`); }
@@ -565,10 +783,7 @@ function buildPanels() {
     $(id).innerHTML = PATTERNS.map((p, i) => `<option value="${i}">${p}</option>`).join('');
 
   const live = (id, f) => $(id).addEventListener('input', e => { f(+e.target.value); draw(true); });
-  live('nseg',  v => { ed.spine({ nseg: v }); $('lseg').textContent = v; });
   live('girth', v => ed.spine({ girth: v }));
-  live('arch',  v => ed.spine({ arch: v }));
-  live('sweep', v => ed.spine({ sweep: v }));
   live('hue',   v => ed.paint({ hue: v }));
   live('hue2',  v => ed.paint({ hue2: v }));
   live('hue3',  v => ed.paint({ hue3: v }));
@@ -599,7 +814,16 @@ try {
      </div>`;
   throw err;
 }
-ed.loadStyle('predator');
+/* A blob, not a predator.
+ *
+ * The editor used to open on a finished archetype, which is a fine gallery and
+ * a poor invitation: the first thing you do with a finished animal is undo
+ * somebody else's decisions. Two vertebrae and no parts is the smallest thing
+ * that is still a body, and every control on the page - the arrows, the
+ * vertebrae, the palette - is a way of adding to it. The archetypes are still
+ * one press away in the panel for anyone who wants a running start. */
+ed.load([], 2, 235);
+ed.paint({ hue: 24, hue2: 140, hue3: 205, sat: 165, val: 200 });
 buildPanels();
 draw(false);
 $('boot').remove();
@@ -608,7 +832,10 @@ $('boot').remove();
  * so a test driving it from the page has no other way in - and a test that has
  * to be written inside the thing it tests can only ever check what the author
  * remembered to expose. */
-window.cpore = { ed, get quality() { return settleQ; }, get selected() { return selected; } };
+window.cpore = { ed, clientOf, endArrows,
+                 get quality() { return settleQ; },
+                 get selected() { return selected; },
+                 get spine() { return spinePts; } };
 
 /* A scripted session, for the harness: ?selftest=1 drives the model the way
  * the pointer handlers do, then dispatches real PointerEvents so the wiring
@@ -652,13 +879,58 @@ if (new URLSearchParams(location.search).has('selftest')) {
   ed.orbit(0.4, 0.1);
   ok(Math.abs(ed.getView().azimuth - v0 - 0.4) < 1e-4, 'orbit() moves the camera');
 
+  /* ---- the spine ----
+   *
+   * Four checks, because the spine is now the primary thing this editor is
+   * for. They run against the model first; the pointer events that reach the
+   * same code are further down.
+   */
+  {
+    const pts = ed.spinePoints();
+    ok(pts.length === ed.body().nseg,
+       `spinePoints(): ${pts.length} points for ${ed.body().nseg} vertebrae`);
+    const on = pts.filter(q => q && q.x > 0 && q.x < N && q.y > 0 && q.y < N);
+    const agree = on.filter((q, i) => ed.spinePick(q.x, q.y, 6) !== null).length;
+    ok(on.length > 0 && agree === on.length,
+       `spinePick() finds all ${on.length} on-screen vertebrae where they draw`);
+  }
+
   let vert = null;
   for (let y = 0; y < N && vert === null; y += 6)
     for (let x = 0; x < N; x += 6) {
       vert = ed.spinePick(x, y, 10);
-      if (vert !== null) { ed.spineDrag(vert, x, y - 50); break; }
+      if (vert !== null) {
+        /* Holding the frame, exactly as a pointerdown does. Without it the
+         * camera re-fits to the body being changed and the vertebra lands
+         * short of the cursor - which is a real effect worth a test of its
+         * own, not a reason to loosen this one. */
+        ed.frameHold(true);
+        const before = ed.spinePoints()[vert];
+        ed.spineMove(vert, x + 60, y - 50);
+        const after = ed.spinePoints()[vert];
+        /* It has to end up near where it was dragged to, not merely somewhere
+         * else. The old drag wrote one axis and threw the rest of the gesture
+         * away, which moved the vertebra and still failed this. */
+        ok(Math.hypot(after.x - (x + 60), after.y - (y - 50)) < 24,
+           `spineMove(): carried vertebra ${vert} to the pointer `
+           + `(${Math.hypot(after.x - before.x, after.y - before.y).toFixed(0)}px)`);
+        ed.frameHold(false);
+        break;
+      }
     }
   ok(vert !== null, `spinePick(): grabbed vertebra ${vert}`);
+
+  {
+    const n0 = ed.body().nseg;
+    ok(ed.spineAdd(false) === n0 + 1 && ed.body().nseg === n0 + 1,
+       `spineAdd(): ${n0} -> ${ed.body().nseg} vertebrae`);
+    ok(ed.spineRemove(false) === n0, 'spineRemove(): and back again');
+    /* Two is the floor and it has to be refused rather than clamped, or the
+     * arrow reports success on a press that did nothing. */
+    ed.spine({ nseg: 2 });
+    ok(ed.spineRemove(false) === null && ed.body().nseg === 2,
+       'spineRemove(): refuses to go below two vertebrae');
+  }
 
   ed.paint({ hue: 150 }); ed.coats({ pattern: 'spots' });
   ok(ed.body().hue === 150 && ed.body().pattern === 2, 'paint() and coats() write');
@@ -672,16 +944,81 @@ if (new URLSearchParams(location.search).has('selftest')) {
    * not the editor, and it is worth the reset to keep the check meaningful. */
   ed.loadStyle('grazer');
   selected = null;
-  const fresh = [];
-  for (let y = 40; y < N - 40; y += 10)
-    for (let x = 40; x < N - 40; x += 10)
-      if (ed.surface(x, y)) fresh.push([x, y]);
+  /* Recomputed rather than captured, because the spine block below reshapes
+   * the animal - and a pixel list taken before that is a list of places the
+   * body used to be. That mistake reported a correct refusal ("you cannot move
+   * a part to open water") as the editor failing to follow the pointer. */
+  const bodyPixels = () => {
+    const out = [];
+    for (let y = 40; y < N - 40; y += 10)
+      for (let x = 40; x < N - 40; x += 10)
+        if (ed.surface(x, y)) out.push([x, y]);
+    return out;
+  };
+  let fresh = bodyPixels();
 
-  const evt = (type, x, y, btn = 0) => cv.dispatchEvent(new PointerEvent(type, {
-    clientX: cv.getBoundingClientRect().left + x,
-    clientY: cv.getBoundingClientRect().top + y,
-    button: btn, buttons: btn === 2 ? 2 : 1, pointerId: 1, bubbles: true,
-  }));
+  /* Aimed through clientOf, the exact inverse of xy(), so a test that says
+   * "press pixel 250,240" presses pixel 250,240 rather than its neighbour. */
+  const evt = (type, x, y, btn = 0) => {
+    const [cx, cy] = clientOf(x, y);
+    return cv.dispatchEvent(new PointerEvent(type, {
+      clientX: cx, clientY: cy,
+      button: btn, buttons: btn === 2 ? 2 : 1, pointerId: 1, bubbles: true,
+    }));
+  };
+
+  /* ---- the four things the spine has to do, through real events ----
+   *
+   * Everything above drives the model directly, which proves the C is right
+   * and proves nothing about whether the page calls it. These go through the
+   * same PointerEvents a hand would produce.
+   */
+  {
+    draw(false);   /* loadStyle above changed the body; refill the projection */
+    /* 1. hovering the animal shows the spine */
+    ok(!spineOn, 'the spine is hidden before the pointer arrives');
+    const [hx, hy] = fresh[Math.floor(fresh.length / 2)];
+    evt('pointermove', hx, hy);
+    ok(spineOn && spinePts.length === ed.body().nseg,
+       `hovering the body shows its ${spinePts.length} vertebrae`);
+    cv.dispatchEvent(new PointerEvent('pointerleave', { pointerId: 1, bubbles: true }));
+    ok(!spineOn, 'leaving the viewport takes it away again');
+
+    /* 2. the end arrows grow and shrink the spine */
+    evt('pointermove', hx, hy);
+    const arrows = endArrows();
+    ok(arrows.length === 4, `${arrows.length} end controls, two at each end`);
+    const grow = arrows.find(a => a.kind === 'grow');
+    const n0 = ed.body().nseg;
+    evt('pointerdown', Math.round(grow.x), Math.round(grow.y));
+    evt('pointerup', Math.round(grow.x), Math.round(grow.y));
+    ok(ed.body().nseg === n0 + 1,
+       `pressing the outward arrow grew the spine to ${ed.body().nseg}`);
+
+    evt('pointermove', hx, hy);
+    const shrink = endArrows().find(a => a.kind === 'shrink' && a.front === grow.front);
+    evt('pointerdown', Math.round(shrink.x), Math.round(shrink.y));
+    evt('pointerup', Math.round(shrink.x), Math.round(shrink.y));
+    ok(ed.body().nseg === n0, `pressing the inward arrow took it back to ${n0}`);
+
+    /* 3. press and hold a middle vertebra, and carry it */
+    evt('pointermove', hx, hy);
+    const mid = Math.floor(ed.body().nseg / 2);
+    const p0 = ed.spinePoints()[mid];
+    if (p0 && p0.x > 30 && p0.x < N - 30 && p0.y > 60) {
+      evt('pointerdown', Math.round(p0.x), Math.round(p0.y));
+      ok(drag && drag.kind === 'spine' && drag.vert === mid,
+         `holding vertebra ${mid} picks it up`);
+      const tx = Math.round(p0.x + 45), ty = Math.round(p0.y - 45);
+      evt('pointermove', tx, ty);
+      evt('pointerup', tx, ty);
+      const p1 = ed.spinePoints()[mid];
+      ok(Math.hypot(p1.x - tx, p1.y - ty) < 26,
+         `carrying it moved it to the pointer (${Math.hypot(p1.x - p0.x, p1.y - p0.y).toFixed(0)}px)`);
+    } else {
+      ok(false, 'a middle vertebra was reachable on screen');
+    }
+  }
 
   const azBefore = ed.getView().azimuth;
   evt('pointerdown', 12, 12);            /* backdrop: must orbit, not drop */
@@ -693,12 +1030,20 @@ if (new URLSearchParams(location.search).has('selftest')) {
   /* The palette drag, through the real handlers: press on the button, move
    * over the animal, let go. This is the interaction the editor is for, so it
    * is the one the harness has to prove works end to end. */
+  /* Refilled here, after the orbit above turned the animal by half a radian
+   * and the spine block before it reshaped one. A pixel list is only a list of
+   * places the body is until something moves the body, and using a stale one
+   * reports a correct refusal - "you cannot move a part into open water" - as
+   * the editor failing to follow the pointer. */
+  fresh = bodyPixels();
   const [bx, by] = fresh[Math.floor(fresh.length / 2)];
   const nBefore = ed.parts().length;
   const plateBtn = [...$('palette').children].find(b => b.textContent.startsWith('plate'));
-  const r = cv.getBoundingClientRect();
-  const winMove = (x, y) => dispatchEvent(new PointerEvent('pointermove', {
-    clientX: r.left + x, clientY: r.top + y, pointerId: 2, bubbles: true }));
+  const winMove = (x, y) => {
+    const [cx, cy] = clientOf(x, y);
+    dispatchEvent(new PointerEvent('pointermove', {
+      clientX: cx, clientY: cy, pointerId: 2, bubbles: true }));
+  };
 
   plateBtn.dispatchEvent(new PointerEvent('pointerdown', { pointerId: 2, bubbles: true, cancelable: true }));
   ok(carrying !== null, 'pressing a palette part starts carrying it');
@@ -713,7 +1058,8 @@ if (new URLSearchParams(location.search).has('selftest')) {
   winMove(ox, oy);
   const after = ed.parts().find(p => p.slot === placedSlot);
   ok(before.yaw !== after.yaw || before.seg !== after.seg || before.pitch !== after.pitch,
-     'the carried part follows the pointer');
+     `the carried part follows the pointer `
+     + `(${before.seg}/${before.yaw}/${before.pitch} -> ${after.seg}/${after.yaw}/${after.pitch})`);
   dispatchEvent(new PointerEvent('pointerup', { pointerId: 2, bubbles: true }));
   ok(carrying === null && selected === placedSlot, 'letting go commits it and selects it');
 
@@ -726,16 +1072,31 @@ if (new URLSearchParams(location.search).has('selftest')) {
   ok(ed.parts().find(p => p.slot === placedSlot).scale > sBefore,
      'dragging the ring away from the part grows it');
 
-  /* Right-click where the part actually is now. The first version of this
-   * used the pixel it was first dropped on, which the drag had since moved it
-   * away from - so it right-clicked bare trunk and reported a correct refusal
-   * as a defect. */
+  /* Right-click on a pixel the picker actually reports this part on.
+   *
+   * Two earlier versions of this aimed at a pixel and hoped. The first used
+   * the pixel the part was dropped on, which the drag had since moved it away
+   * from; the second used the part's projected centre, which for a plate lying
+   * flat on the trunk is a point inside the trunk, so the picker answers with
+   * the body and the click correctly removes nothing. Both reported a correct
+   * refusal as a defect. Asking where the part is pickable and clicking there
+   * tests the interaction rather than the aim. */
   const nAfter = ed.parts().length;
-  const hx = Math.round(handles.cx), hy = Math.round(handles.cy);
-  cv.dispatchEvent(new MouseEvent('contextmenu', {
-    clientX: cv.getBoundingClientRect().left + hx,
-    clientY: cv.getBoundingClientRect().top + hy, bubbles: true, cancelable: true }));
-  ok(ed.parts().length < nAfter, 'right-click removes the part under the pointer');
+  const own = [];
+  for (let y = 20; y < N - 20; y += 4)
+    for (let x = 20; x < N - 20; x += 4)
+      if (ed.pick(x, y) === placedSlot) own.push([x, y]);
+  /* The middle of the part's own pixels, not the first one in raster order -
+   * that one is on its silhouette by construction, which is the least stable
+   * pixel on the whole part to aim a test at. */
+  const hit = own.length ? own[Math.floor(own.length / 2)] : null;
+  ok(hit !== null, `the placed part is pickable (${own.length} pixels)`);
+  if (hit) {
+    const [cx, cy] = clientOf(hit[0], hit[1]);
+    cv.dispatchEvent(new MouseEvent('contextmenu', {
+      clientX: cx, clientY: cy, bubbles: true, cancelable: true }));
+    ok(ed.parts().length < nAfter, 'right-click removes the part under the pointer');
+  }
 
   /* How long the page is unable to respond, over one whole drag.
    *

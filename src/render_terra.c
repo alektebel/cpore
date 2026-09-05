@@ -1966,6 +1966,22 @@ struct Cp4Studio {
     Land land;
     int  W, H;          /* output size                                  */
     int  cap;           /* internal pixels allocated (at the finest SS) */
+    /* ---- the frame, held ----
+     *
+     * The camera fits itself to the animal on every call, which is right for a
+     * turntable and wrong for a drag. Pulling a vertebra outward makes the
+     * body bigger; the fit pulls back to keep it in shot; and the vertebra
+     * therefore lands short of the cursor by however much the frame just
+     * shrank - measured on a small body, about a third of the way. Nothing is
+     * broken, and it still reads as the editor refusing to follow the mouse.
+     *
+     * Held, the last fit is reused and the pixel you pressed stays the pixel
+     * you are moving. A front end holds it for the length of a gesture and
+     * lets go at the end, which is also when re-framing is what you want. */
+    int   hold;
+    int   have_fit;
+    V3    fit_aim;
+    float fit_dist;
 };
 
 /* Internal resolution as a multiple of the output, per quality step. The top
@@ -2031,7 +2047,8 @@ static int studio_build(const Cp4Genome *g, float phase, Prim *pr,
  * marooned in the middle of every tile. Taking the real extent perpendicular
  * to the view, and aiming at the middle of what is actually there, fills the
  * frame with the animal whatever shape it turned out to be. */
-static void studio_camera(Land *c, const Cp4View *v, const Prim *pr, int n,
+static void studio_camera(Cp4Studio *s, Land *c, const Cp4View *v,
+                          const Prim *pr, int n,
                           V3 centre, float bound, int W, int H)
 {
     float zoom = v->zoom > 0.05f ? v->zoom : 1.0f;
@@ -2074,6 +2091,11 @@ static void studio_camera(Land *c, const Cp4View *v, const Prim *pr, int n,
     float halftan = 0.5f * (float)(W < H ? W : H) / c->focal;
     float dist = ext / (halftan * 0.84f) + depth;
     if (dist < bound * 0.9f) dist = bound * 0.9f;
+
+    if (s) {
+        if (s->hold && s->have_fit) { aim = s->fit_aim; dist = s->fit_dist; }
+        else { s->fit_aim = aim; s->fit_dist = dist; s->have_fit = 1; }
+    }
 
     c->eye = add(aim, mul(dir, dist / zoom));
     V3 look = norm(sub(aim, c->eye));
@@ -2308,7 +2330,7 @@ void cp4_studio_render(Cp4Studio *s, const Cp4Genome *g, const Cp4View *v,
      * supersampled export. Occlusion and transmission - the two that do most
      * of the reading of the shape - land at q1 and stay. */
     c->detail = q >= 3 ? 2 : (q >= 1 ? 1 : 0);
-    studio_camera(c, v, pr, n, centre, bound, iw, ih);
+    studio_camera(s, c, v, pr, n, centre, bound, iw, ih);
 
     static Contact shadow;
     contact_build(&shadow, c, pr, n, bound, q);
@@ -2390,7 +2412,7 @@ int cp4_studio_pick(Cp4Studio *s, const Cp4Genome *g, const Cp4View *v,
     Land *c = &s->land;
     studio_light(c);
     c->detail = 0;
-    studio_camera(c, v, pr, n, centre, bound, s->W, s->H);
+    studio_camera(s, c, v, pr, n, centre, bound, s->W, s->H);
 
     float sx = ((float)px + 0.5f - c->W * 0.5f) / c->focal;
     float sy = ((float)py + 0.5f - c->H * 0.5f) / c->focal;
@@ -2473,7 +2495,7 @@ int cp4_studio_extent(Cp4Studio *s, const Cp4Genome *g, const Cp4View *v,
     Land *c = &s->land;
     studio_light(c);
     c->detail = 0;
-    studio_camera(c, v, pr, n, centre, bound, s->W, s->H);
+    studio_camera(s, c, v, pr, n, centre, bound, s->W, s->H);
 
     /* The body's own right, so a prim can be told which copy it is. Built the
      * same way the renderer builds it, from the same genome. */
@@ -2657,7 +2679,7 @@ int cp4_studio_surface(Cp4Studio *s, const Cp4Genome *g, const Cp4View *v,
     Land *c = &s->land;
     studio_light(c);
     c->detail = 0;
-    studio_camera(c, v, pr, n, centre, bound, s->W, s->H);
+    studio_camera(s, c, v, pr, n, centre, bound, s->W, s->H);
 
     V3 hit;
     if (!studio_hit(c, pr, n, centre, bound, studio_ray(c, (float)px, (float)py), &hit))
@@ -2698,7 +2720,7 @@ int cp4_studio_spine_pick(Cp4Studio *s, const Cp4Genome *g, const Cp4View *v,
     Land *c = &s->land;
     studio_light(c);
     c->detail = 0;
-    studio_camera(c, v, pr, n, centre, bound, s->W, s->H);
+    studio_camera(s, c, v, pr, n, centre, bound, s->W, s->H);
 
     Cp4Beast b;
     memset(&b, 0, sizeof(b));
@@ -2752,7 +2774,7 @@ int cp4_studio_spine_move(Cp4Studio *s, Cp4Genome *g, const Cp4View *v,
     Land *c = &s->land;
     studio_light(c);
     c->detail = 0;
-    studio_camera(c, v, pr, n, centre, bound, s->W, s->H);
+    studio_camera(s, c, v, pr, n, centre, bound, s->W, s->H);
 
     Cp4Beast b;
     memset(&b, 0, sizeof(b));
@@ -2785,11 +2807,20 @@ int cp4_studio_spine_move(Cp4Studio *s, Cp4Genome *g, const Cp4View *v,
     float ds = dot(delta, sp.right);
     float du = dot(delta, sp.up);
 
-    int along = g->spine[vert].along + (int)(dl / (0.5f * L) * 127.0f);
-    int side  = g->spine[vert].side  + (int)(ds / (R * 1.6f) * 127.0f);
-    int up    = g->spine[vert].up    + (int)(du / (R * 1.6f) * 127.0f);
+    int along = g->spine[vert].along + (int)(dl / (L * CP4_SPINE_ALONG) * 127.0f);
+    int side  = g->spine[vert].side  + (int)(ds / (R * CP4_SPINE_OFF) * 127.0f);
+    int up    = g->spine[vert].up    + (int)(du / (R * CP4_SPINE_OFF) * 127.0f);
     cp4_genome_vertebra(g, vert, along, side, up, g->spine[vert].rad);
     return 1;
+}
+
+/* Hold the framing still for the length of a gesture. See the note on
+ * Cp4Studio for why a drag needs this and a turntable does not. */
+void cp4_studio_frame_hold(Cp4Studio *s, int on)
+{
+    if (!s) return;
+    s->hold = on ? 1 : 0;
+    if (!on) s->have_fit = 0;
 }
 
 /* Fatten or thin one vertebra: the other half of pulling clay about. */
@@ -2821,7 +2852,7 @@ int cp4_studio_spine_points(Cp4Studio *s, const Cp4Genome *g, const Cp4View *v,
     Land *c = &s->land;
     studio_light(c);
     c->detail = 0;
-    studio_camera(c, v, pr, n, centre, bound, s->W, s->H);
+    studio_camera(s, c, v, pr, n, centre, bound, s->W, s->H);
 
     Cp4Beast b;
     memset(&b, 0, sizeof(b));
