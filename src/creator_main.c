@@ -46,6 +46,39 @@ typedef struct {
     float merge_threshold;
 } CreatorState;
 
+/* Mouse ray ∩ plane through plane_p with normal plane_n → world point. */
+static int mouse_hit_plane(Vec3 eye, Vec3 cam_r, Vec3 cam_u, Vec3 cam_f,
+                           float fovy_rad, float aspect,
+                           int mx, int my, int ww, int wh,
+                           Vec3 plane_p, Vec3 plane_n, Vec3 *out) {
+    if (ww < 1 || wh < 1) return 0;
+    float ndc_x = ((float)mx + 0.5f) / (float)ww * 2.0f - 1.0f;
+    float ndc_y = 1.0f - ((float)my + 0.5f) / (float)wh * 2.0f;
+    float th = tanf(fovy_rad * 0.5f);
+    Vec3 dir = v3_norm(v3_add(cam_f,
+                       v3_add(v3_mul(cam_r, ndc_x * th * aspect),
+                              v3_mul(cam_u, ndc_y * th))));
+    float denom = v3_dot(dir, plane_n);
+    if (fabsf(denom) < 1e-5f) return 0;
+    float t = v3_dot(v3_sub(plane_p, eye), plane_n) / denom;
+    if (t < 0.05f) return 0;
+    *out = v3_add(eye, v3_mul(dir, t));
+    return 1;
+}
+
+static void cam_basis(float yaw, float pitch, float dist, float side,
+                      Vec3 *eye, Vec3 *target, Vec3 *right, Vec3 *up, Vec3 *fwd) {
+    float cp = cosf(pitch), sp = sinf(pitch);
+    float cy = cosf(yaw), sy = sinf(yaw);
+    *target = v3(side, 0.4f, 0.0f);
+    *eye = v3_add(*target, v3(sy * cp * dist, sp * dist + 0.8f, cy * cp * dist));
+    *fwd = v3_norm(v3_sub(*target, *eye));
+    *right = v3_norm(v3_cross(*fwd, v3(0, 1, 0)));
+    if (v3_len(v3_cross(*fwd, v3(0, 1, 0))) < 1e-4f)
+        *right = v3(1, 0, 0);
+    *up = v3_norm(v3_cross(*right, *fwd));
+}
+
 static Vec3 stretch_handle_pos(const CreatorState *st, int front) {
     int n = st->spine.count;
     if (n < 1) return v3(0, 0, 0);
@@ -615,8 +648,8 @@ int main(int argc, char **argv) {
 
     printf("Lochner Creature Creator MVP (MIT algorithms)\n");
     printf("  1/2/3     Build / Paint / Test\n");
-    printf("  LMB       drag RED nose / GREEN tail cubes to add columns\n");
-    printf("            click gold bones to bend; empty drag = orbit\n");
+    printf("  LMB       drag RED/GREEN tips — column curves toward mouse & grows\n");
+    printf("            drag gold bones to bend; empty drag = orbit\n");
     printf("  scroll    inflate selected bone (neighbor bleed)\n");
     printf("  = / -     extend / shorten (Shift = front)\n");
     printf("  Tab Q/E   part slot / cycle     C/P paint\n");
@@ -707,52 +740,85 @@ int main(int argc, char **argv) {
                 float dx = (float)e.motion.xrel;
                 float dy = (float)e.motion.yrel;
                 if (stretch_front || stretch_back) {
-                    /* Project drag onto outward spine axis in screen space (Lochner). */
+                    /* Lochner: tip follows mouse on the view plane; far → grow, near → shrink. */
                     int ww, wh; SDL_GetWindowSize(win, &ww, &wh);
-                    Vec3 handle = stretch_handle_pos(&st, stretch_front);
-                    Vec3 tip = stretch_front
-                        ? v3(st.spine.v[0].x, st.spine.v[0].y, st.spine.v[0].z)
-                        : v3(st.spine.v[st.spine.count - 1].x,
-                             st.spine.v[st.spine.count - 1].y,
-                             st.spine.v[st.spine.count - 1].z);
-                    Vec3 outward = v3_norm(v3_sub(handle, tip));
-                    Vec3 along = v3_add(handle, outward);
-                    float hx, hy, ax, ay;
-                    if (m4_project(last_vp, handle, ww, wh, &hx, &hy)
-                        && m4_project(last_vp, along, ww, wh, &ax, &ay)) {
-                        float sx = ax - hx, sy = ay - hy;
-                        float sl = sqrtf(sx * sx + sy * sy);
-                        if (sl > 1e-3f) {
-                            sx /= sl; sy /= sl;
-                            /* Positive = drag outward → extend */
-                            stretch_acc += (dx * sx + dy * sy) * 0.02f;
-                        } else {
-                            stretch_acc += (-dy) * 0.02f;
+                    int mx = e.motion.x, my = e.motion.y;
+                    float side = (st.mode == MODE_BUILD) ? -0.6f : 0.0f;
+                    Vec3 eye, target, cam_r, cam_u, cam_f;
+                    cam_basis(cam_yaw, cam_pitch, cam_dist, side,
+                              &eye, &target, &cam_r, &cam_u, &cam_f);
+                    int tip_i = stretch_front ? 0 : st.spine.count - 1;
+                    int prev_i = stretch_front ? 1 : st.spine.count - 2;
+                    if (prev_i < 0) prev_i = 0;
+                    if (prev_i >= st.spine.count) prev_i = st.spine.count - 1;
+                    Vec3 tip = v3(st.spine.v[tip_i].x, st.spine.v[tip_i].y, st.spine.v[tip_i].z);
+                    Vec3 prev = v3(st.spine.v[prev_i].x, st.spine.v[prev_i].y, st.spine.v[prev_i].z);
+                    float aspect = (wh > 0) ? (float)ww / (float)wh : 1.0f;
+                    float fovy = 50.0f * (float)M_PI / 180.0f;
+                    Vec3 hit;
+                    if (mouse_hit_plane(eye, cam_r, cam_u, cam_f, fovy, aspect,
+                                        mx, my, ww, wh, tip, cam_f, &hit)) {
+                        const float seg = 0.22f;
+                        Vec3 to = v3_sub(hit, prev);
+                        float dist = v3_len(to);
+                        if (dist > 1e-4f) {
+                            Vec3 dir = v3_mul(to, 1.0f / dist);
+                            /* Curve tip toward mouse every frame */
+                            spine_aim_end(&st.spine, stretch_front ? 1 : 0,
+                                          hit.x, hit.y, hit.z, seg);
+                            st.dirty_mesh = 1;
+                            sync_mirrored_limbs(&st);
+
+                            if (dist > seg * 1.45f) {
+                                if (spine_extend_dir(&st.spine, stretch_front ? 1 : 0,
+                                                     dir.x, dir.y, dir.z)) {
+                                    tip_i = stretch_front ? 0 : st.spine.count - 1;
+                                    st.sel_bone = tip_i;
+                                    /* Aim the brand-new tip at the mouse */
+                                    spine_aim_end(&st.spine, stretch_front ? 1 : 0,
+                                                  hit.x, hit.y, hit.z, seg);
+                                    st.cash -= 10;
+                                    st.dirty_mesh = 1;
+                                    sync_mirrored_limbs(&st);
+                                }
+                            } else if (dist < seg * 0.55f) {
+                                if (spine_shorten(&st.spine, stretch_front ? 1 : 0)) {
+                                    if (st.sel_bone >= st.spine.count)
+                                        st.sel_bone = st.spine.count - 1;
+                                    st.cash += 5;
+                                    st.dirty_mesh = 1;
+                                    sync_mirrored_limbs(&st);
+                                }
+                            }
                         }
                     } else {
-                        stretch_acc += (-dy) * 0.02f;
+                        /* Fallback: relative drag if ray miss */
+                        spine_bend(&st.spine, tip_i, dx * 0.004f, -dy * 0.004f, 0);
+                        st.dirty_mesh = 1;
                     }
-                    /* Lower threshold so one clear drag adds a column */
-                    if (stretch_acc > 0.22f) {
-                        if (spine_extend(&st.spine, stretch_front ? 1 : 0)) {
-                            st.sel_bone = stretch_front ? 0 : st.spine.count - 1;
-                            st.cash -= 10;
-                            st.dirty_mesh = 1;
-                            sync_mirrored_limbs(&st);
-                        }
-                        stretch_acc = 0;
-                    } else if (stretch_acc < -0.22f) {
-                        if (spine_shorten(&st.spine, stretch_front ? 1 : 0)) {
-                            if (st.sel_bone >= st.spine.count)
-                                st.sel_bone = st.spine.count - 1;
-                            st.cash += 5;
-                            st.dirty_mesh = 1;
-                            sync_mirrored_limbs(&st);
-                        }
-                        stretch_acc = 0;
-                    }
+                    (void)stretch_acc;
                 } else if (bone_drag && st.mode == MODE_BUILD) {
-                    spine_bend(&st.spine, st.sel_bone, dx * 0.004f, -dy * 0.004f, dy * 0.0015f);
+                    /* Bend selected vertebra toward mouse on the view plane */
+                    int ww, wh; SDL_GetWindowSize(win, &ww, &wh);
+                    int mx = e.motion.x, my = e.motion.y;
+                    float side = -0.6f;
+                    Vec3 eye, target, cam_r, cam_u, cam_f;
+                    cam_basis(cam_yaw, cam_pitch, cam_dist, side,
+                              &eye, &target, &cam_r, &cam_u, &cam_f);
+                    Vec3 bone = v3(st.spine.v[st.sel_bone].x,
+                                   st.spine.v[st.sel_bone].y,
+                                   st.spine.v[st.sel_bone].z);
+                    float aspect = (wh > 0) ? (float)ww / (float)wh : 1.0f;
+                    float fovy = 50.0f * (float)M_PI / 180.0f;
+                    Vec3 hit;
+                    if (mouse_hit_plane(eye, cam_r, cam_u, cam_f, fovy, aspect,
+                                        mx, my, ww, wh, bone, cam_f, &hit)) {
+                        st.spine.v[st.sel_bone].x = clampf(hit.x, -1.8f, 1.8f);
+                        st.spine.v[st.sel_bone].y = clampf(hit.y, -0.8f, 1.4f);
+                        st.spine.v[st.sel_bone].z = clampf(hit.z, -2.2f, 2.2f);
+                    } else {
+                        spine_bend(&st.spine, st.sel_bone, dx * 0.004f, -dy * 0.004f, dy * 0.0015f);
+                    }
                     st.dirty_mesh = 1;
                     sync_mirrored_limbs(&st);
                 } else {
