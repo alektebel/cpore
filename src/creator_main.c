@@ -38,7 +38,51 @@ typedef struct {
     BodyMesh mesh;
     BodyMeshSettings mesh_set;
     float yaw_spin; /* test mode idle turn */
+    /* Lochner mirrored limb sockets: local X offsets; |x|<merge → centered */
+    float limb_x[CREATURE_LEGS];
+    float limb_y[CREATURE_LEGS];
+    float limb_z[CREATURE_LEGS];
+    int limb_bone[CREATURE_LEGS];
+    float merge_threshold;
 } CreatorState;
+
+static int pick_bone(const CreatorState *st, Mat4 vp, int mx, int my, int ww, int wh) {
+    int best = -1;
+    float best_d2 = 26.0f * 26.0f;
+    for (int i = 0; i < st->spine.count; i++) {
+        float sx, sy;
+        Vec3 p = v3(st->spine.v[i].x, st->spine.v[i].y, st->spine.v[i].z);
+        if (!m4_project(vp, p, ww, wh, &sx, &sy)) continue;
+        float dx = sx - (float)mx, dy = sy - (float)my;
+        float d2 = dx * dx + dy * dy;
+        if (d2 < best_d2) { best_d2 = d2; best = i; }
+    }
+    return best;
+}
+
+static void sync_mirrored_limbs(CreatorState *st) {
+    int n = genome_limb_count(&st->genome);
+    int segs = st->spine.count;
+    if (segs < 1) return;
+    for (int i = 0; i < n && i < CREATURE_LEGS; i++) {
+        int vi = st->limb_bone[i];
+        if (vi < 0 || vi >= segs) {
+            vi = segs / 2 + (i - n / 2);
+            if (vi < 0) vi = 0;
+            if (vi >= segs) vi = segs - 1;
+            st->limb_bone[i] = vi;
+        }
+        float r = st->spine.v[vi].radius;
+        float side = (i % 2 == 0) ? -1.0f : 1.0f;
+        if (fabsf(st->limb_x[i]) < 1e-4f)
+            st->limb_x[i] = side * r * 0.95f;
+        /* Lochner merge: near midline → clamp to center (no flip twin) */
+        if (fabsf(st->limb_x[i]) < st->merge_threshold)
+            st->limb_x[i] = 0.0f;
+        st->limb_y[i] = -r * 0.85f;
+        st->limb_z[i] = st->spine.v[vi].z;
+    }
+}
 
 static const char *VERT_SRC =
     "#version 330 core\n"
@@ -155,6 +199,14 @@ static void state_reset(CreatorState *st) {
     st->part_slot = PART_SLOT_MOUTH;
     st->dirty_mesh = 1;
     bodymesh_defaults(&st->mesh_set);
+    st->merge_threshold = 0.08f;
+    for (int i = 0; i < CREATURE_LEGS; i++) {
+        st->limb_x[i] = 0;
+        st->limb_y[i] = 0;
+        st->limb_z[i] = 0;
+        st->limb_bone[i] = -1;
+    }
+    sync_mirrored_limbs(st);
 }
 
 static void rebuild_mesh(CreatorState *st) {
@@ -285,20 +337,21 @@ static void draw_parts_gizmos(CreatorGL *g, const CreatorState *st, Mat4 vp, Vec
     gz[ng++] = (Gizmo){st->spine.v[0].x + er, st->spine.v[0].y + er * 0.4f,
                        st->spine.v[0].z, 0.08f, 0.08f, 0.08f, v3(0.15f, 0.15f, 0.2f)};
 
-    /* Legs — mirrored pairs (Lochner Flipped) snapped to mid vertebrae */
+    /* Legs — Lochner mirrored pairs snapped to vertebrae */
     int nlegs = genome_limb_count(&st->genome);
-    int mid = segs / 2;
     for (int i = 0; i < nlegs && ng < 12; i++) {
-        int vi = mid + (i - nlegs / 2);
-        if (vi < 0) vi = 0;
-        if (vi >= segs) vi = segs - 1;
-        float side = (i % 2 == 0) ? -1.0f : 1.0f;
-        float r = st->spine.v[vi].radius;
-        gz[ng++] = (Gizmo){
-            st->spine.v[vi].x + side * r * 0.95f,
-            st->spine.v[vi].y - r * 0.8f,
-            st->spine.v[vi].z,
-            0.10f, 0.35f, 0.10f, v3(0.35f, 0.55f, 0.85f)};
+        int vi = st->limb_bone[i];
+        if (vi < 0 || vi >= segs) continue;
+        float lx = st->limb_x[i];
+        float ly = st->limb_y[i];
+        float lz = st->limb_z[i];
+        gz[ng++] = (Gizmo){st->spine.v[vi].x + lx, st->spine.v[vi].y + ly, lz,
+                           0.10f, 0.35f, 0.10f, v3(0.35f, 0.55f, 0.85f)};
+        /* Mirrored twin when off midline */
+        if (fabsf(lx) >= st->merge_threshold && ng < 12) {
+            gz[ng++] = (Gizmo){st->spine.v[vi].x - lx, st->spine.v[vi].y + ly, lz,
+                               0.10f, 0.35f, 0.10f, v3(0.45f, 0.65f, 0.90f)};
+        }
     }
 
     /* Detail marker along spine (Lochner nearest-bone attach approximation) */
@@ -470,18 +523,19 @@ int main(int argc, char **argv) {
     float cam_yaw = 0.6f, cam_pitch = 0.35f, cam_dist = 4.5f;
     int running = 1;
     int dragging = 0;
+    int bone_drag = 0;
     int stretch_front = 0, stretch_back = 0;
     float stretch_acc = 0.0f;
+    Mat4 last_vp = m4_id();
 
     printf("Lochner Creature Creator MVP (MIT algorithms)\n");
     printf("  1/2/3     Build / Paint / Test\n");
-    printf("  LMB drag  orbit (or bend selected bone in Build)\n");
-    printf("  [ ]       select bone    scroll = inflate (neighbor bleed)\n");
-    printf("  = / -     extend / shorten spine (front with Shift)\n");
-    printf("  Tab       part slot      Q/E cycle part\n");
-    printf("  C         cycle colors   P cycle pattern\n");
-    printf("  R         reset blob     S save to %s\n", out_path);
-    printf("  Esc       quit\n\n");
+    printf("  LMB       click bone to bend; empty drag = orbit; edges stretch\n");
+    printf("  scroll    inflate selected bone (neighbor bleed)\n");
+    printf("  = / -     extend / shorten (Shift = front)\n");
+    printf("  Tab Q/E   part slot / cycle     C/P paint\n");
+    printf("  R reset   S save to %s\n", out_path);
+    printf("  Esc quit\n\n");
 
     Uint32 last = SDL_GetTicks();
     while (running) {
@@ -540,7 +594,7 @@ int main(int argc, char **argv) {
             }
             if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) {
                 dragging = 1;
-                /* Near screen edges in Build: stretch arrows (Lochner) */
+                bone_drag = 0;
                 int mx = e.button.x, my = e.button.y;
                 int ww, wh; SDL_GetWindowSize(win, &ww, &wh);
                 stretch_front = stretch_back = 0;
@@ -548,11 +602,18 @@ int main(int argc, char **argv) {
                 if (st.mode == MODE_BUILD) {
                     if (mx < ww / 5) stretch_front = 1;
                     else if (mx > 4 * ww / 5) stretch_back = 1;
+                    else {
+                        int hit = pick_bone(&st, last_vp, mx, my, ww, wh);
+                        if (hit >= 0) {
+                            st.sel_bone = hit;
+                            bone_drag = 1;
+                        }
+                    }
                 }
-                (void)my;
             }
             if (e.type == SDL_MOUSEBUTTONUP && e.button.button == SDL_BUTTON_LEFT) {
                 dragging = 0;
+                bone_drag = 0;
                 stretch_front = stretch_back = 0;
             }
             if (e.type == SDL_MOUSEMOTION && dragging) {
@@ -566,15 +627,18 @@ int main(int argc, char **argv) {
                         else spine_extend(&st.spine, 0);
                         stretch_acc = 0;
                         st.dirty_mesh = 1;
+                        sync_mirrored_limbs(&st);
                     } else if (stretch_acc < -0.35f) {
                         if (stretch_front) spine_shorten(&st.spine, 1);
                         else spine_shorten(&st.spine, 0);
                         stretch_acc = 0;
                         st.dirty_mesh = 1;
+                        sync_mirrored_limbs(&st);
                     }
-                } else if (st.mode == MODE_BUILD && (SDL_GetModState() & KMOD_SHIFT)) {
-                    spine_bend(&st.spine, st.sel_bone, dx * 0.004f, -dy * 0.004f, 0);
+                } else if (bone_drag && st.mode == MODE_BUILD) {
+                    spine_bend(&st.spine, st.sel_bone, dx * 0.004f, -dy * 0.004f, dy * 0.0015f);
                     st.dirty_mesh = 1;
+                    sync_mirrored_limbs(&st);
                 } else {
                     cam_yaw += dx * 0.007f;
                     cam_pitch = clampf(cam_pitch + dy * 0.005f, -0.2f, 1.2f);
@@ -619,17 +683,7 @@ int main(int argc, char **argv) {
         Mat4 view = m4_look_at(eye, target, v3(0, 1, 0));
         Mat4 proj = m4_perspective(50.0f * (float)M_PI / 180.0f, aspect, 0.05f, 80.0f);
         Mat4 vp = m4_mul(proj, view);
-
-        /* Pedestal */
-        {
-            float ped[6 * 9];
-            for (int i = 0; i < 6; i++) {
-                float a0 = (float)i / 6.0f * 2.0f * (float)M_PI;
-                float a1 = (float)(i + 1) / 6.0f * 2.0f * (float)M_PI;
-                /* skip full pedestal mesh — just clear is fine for MVP */
-                (void)a0; (void)a1; (void)ped;
-            }
-        }
+        last_vp = vp;
 
         draw_mesh(&gl, &st, vp, eye);
         if (st.mode == MODE_BUILD) {
@@ -637,6 +691,86 @@ int main(int argc, char **argv) {
             draw_parts_gizmos(&gl, &st, vp, eye);
         } else if (st.mode == MODE_TEST) {
             draw_parts_gizmos(&gl, &st, vp, eye);
+        }
+
+        /* Mode tab HUD bars */
+        {
+            Mat4 hud = m4_id();
+            hud.m[0] = 2.0f / (float)ww;
+            hud.m[5] = -2.0f / (float)wh;
+            hud.m[10] = -1.0f;
+            hud.m[12] = -1.0f;
+            hud.m[13] = 1.0f;
+            hud.m[15] = 1.0f;
+            float quad[] = {
+                -0.5f,-0.5f,0, 0.5f,-0.5f,0, 0.5f,0.5f,0,
+                 0.5f,0.5f,0,-0.5f,0.5f,0,-0.5f,-0.5f,0
+            };
+            float inter[6 * 9];
+            for (int i = 0; i < 6; i++) {
+                inter[i * 9] = quad[i * 3];
+                inter[i * 9 + 1] = quad[i * 3 + 1];
+                inter[i * 9 + 2] = 0;
+                inter[i * 9 + 3] = 0; inter[i * 9 + 4] = 0; inter[i * 9 + 5] = 1;
+                inter[i * 9 + 6] = inter[i * 9 + 7] = inter[i * 9 + 8] = 1;
+            }
+            glDisable(GL_DEPTH_TEST);
+            glUseProgram(gl.prog);
+            glUniform1i(gl.u_use_vert_color, 0);
+            glUniform1f(gl.u_alpha, 1.0f);
+            glUniform3f(gl.u_light_dir, 0, 0, 1);
+            glUniform3f(gl.u_cam_pos, 0, 0, 1);
+            glBindVertexArray(gl.bone_vao);
+            glBindBuffer(GL_ARRAY_BUFFER, gl.bone_vbo);
+            glBufferData(GL_ARRAY_BUFFER, sizeof(inter), inter, GL_DYNAMIC_DRAW);
+            glEnableVertexAttribArray(0);
+            glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 9 * sizeof(float), (void *)0);
+            glEnableVertexAttribArray(1);
+            glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 9 * sizeof(float), (void *)(3 * sizeof(float)));
+            glEnableVertexAttribArray(2);
+            glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, 9 * sizeof(float), (void *)(6 * sizeof(float)));
+            for (int m = 0; m < 3; m++) {
+                float x = 74.0f + (float)m * 110.0f;
+                Vec3 col = (st.mode == m) ? v3(0.95f, 0.78f, 0.25f) : v3(0.22f, 0.25f, 0.30f);
+                Mat4 model = m4_mul(m4_translate(v3(x, 32.0f, 0)), m4_scale(v3(100.0f, 28.0f, 1)));
+                Mat4 mvp = m4_mul(hud, model);
+                glUniformMatrix4fv(gl.u_mvp, 1, GL_FALSE, mvp.m);
+                glUniformMatrix4fv(gl.u_model, 1, GL_FALSE, model.m);
+                glUniform3f(gl.u_color, col.x, col.y, col.z);
+                glDrawArrays(GL_TRIANGLES, 0, 6);
+            }
+            {
+                int cx = genome_complexity(&st.genome) + st.spine.count;
+                float fill = clampf((float)cx / (float)COMPLEXITY_MAX, 0, 1);
+                Mat4 model = m4_mul(m4_translate(v3(24.0f + 110.0f * fill, 64.0f, 0)),
+                                    m4_scale(v3(220.0f * fill, 12.0f, 1)));
+                Mat4 mvp = m4_mul(hud, model);
+                glUniformMatrix4fv(gl.u_mvp, 1, GL_FALSE, mvp.m);
+                glUniformMatrix4fv(gl.u_model, 1, GL_FALSE, model.m);
+                glUniform3f(gl.u_color, 0.45f, 0.70f, 0.95f);
+                glDrawArrays(GL_TRIANGLES, 0, 6);
+            }
+            glBindVertexArray(0);
+            glEnable(GL_DEPTH_TEST);
+        }
+
+        {
+            const char *mode = st.mode == MODE_BUILD ? "BUILD"
+                             : st.mode == MODE_PAINT ? "PAINT" : "TEST";
+            int cx = genome_complexity(&st.genome) + st.spine.count;
+            int part_i = st.part_slot == 0 ? st.genome.mouth
+                       : st.part_slot == 1 ? st.genome.legs
+                       : st.part_slot == 2 ? st.genome.weapon
+                       : st.part_slot == 3 ? st.genome.ability
+                       : st.part_slot == 4 ? st.genome.eyes
+                       : st.part_slot == 5 ? st.genome.grasper : st.genome.detail;
+            char title[200];
+            snprintf(title, sizeof(title),
+                     "[%s] %s | bone %d/%d | $%d | cx %d/%d | %s",
+                     mode, st.name, st.sel_bone + 1, st.spine.count,
+                     st.cash, cx, COMPLEXITY_MAX,
+                     unlocks_part_name(st.part_slot, part_i));
+            SDL_SetWindowTitle(win, title);
         }
 
         SDL_GL_SwapWindow(win);
