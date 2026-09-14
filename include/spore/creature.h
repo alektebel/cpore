@@ -138,6 +138,8 @@ int  spine_shorten(SpineColumn *s, int front);  /* -1 if past min */
 void spine_bend(SpineColumn *s, int i, float dx, float dy, float dz);
 /* Aim end vertebra toward a local-space target (Lochner stretch follow). */
 void spine_aim_end(SpineColumn *s, int front, float tx, float ty, float tz, float seg_len);
+/* Spore/Lochner bilateral symmetry: pin vertebrae to the sagittal plane (x=0). */
+void spine_enforce_symmetry(SpineColumn *s);
 void spine_inflate(SpineColumn *s, int i, float delta);
 Vec3 spine_world(const Creature *c, int i);     /* vertebra world position */
 

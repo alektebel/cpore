@@ -219,26 +219,39 @@ static void draw_bones(CreatorGL *g, const CreatorState *st, Mat4 vp, Vec3 eye) 
 }
 
 static void sync_mirrored_limbs(CreatorState *st) {
+    /* Lochner/Spore: limb *pairs* — left (+x) is source, right is exact mirror. */
     int n = genome_limb_count(&st->genome);
     int segs = st->spine.count;
     if (segs < 1) return;
-    for (int i = 0; i < n && i < CREATURE_LEGS; i++) {
-        int vi = st->limb_bone[i];
+    spine_enforce_symmetry(&st->spine);
+    st->genome.asym = ASYM_BALANCED;
+    int pairs = n / 2;
+    if (pairs < 1) pairs = 1;
+    for (int p = 0; p < pairs && (p * 2) < CREATURE_LEGS; p++) {
+        int L = p * 2;
+        int R = L + 1;
+        int vi = st->limb_bone[L];
         if (vi < 0 || vi >= segs) {
-            vi = segs / 2 + (i - n / 2);
-            if (vi < 0) vi = 0;
-            if (vi >= segs) vi = segs - 1;
-            st->limb_bone[i] = vi;
+            /* Spread pairs along spine: front pair near nose, rear near tail */
+            float u = (pairs <= 1) ? 0.45f : (0.25f + 0.50f * (float)p / (float)(pairs - 1));
+            vi = (int)(u * (float)(segs - 1) + 0.5f);
+            st->limb_bone[L] = vi;
         }
         float r = st->spine.v[vi].radius;
-        float side = (i % 2 == 0) ? -1.0f : 1.0f;
-        if (fabsf(st->limb_x[i]) < 1e-4f)
-            st->limb_x[i] = side * r * 0.95f;
-        /* Lochner merge: near midline → clamp to center (no flip twin) */
-        if (fabsf(st->limb_x[i]) < st->merge_threshold)
-            st->limb_x[i] = 0.0f;
-        st->limb_y[i] = -r * 0.85f;
-        st->limb_z[i] = st->spine.v[vi].z;
+        float ox = st->limb_x[L];
+        if (fabsf(ox) < st->merge_threshold)
+            ox = r * 0.95f; /* always off-midline so the flip twin shows */
+        ox = fabsf(ox);
+        st->limb_x[L] = ox;
+        st->limb_y[L] = -r * 0.85f;
+        st->limb_z[L] = st->spine.v[vi].z;
+        st->limb_bone[L] = vi;
+        if (R < CREATURE_LEGS) {
+            st->limb_x[R] = -ox;
+            st->limb_y[R] = st->limb_y[L];
+            st->limb_z[R] = st->limb_z[L];
+            st->limb_bone[R] = vi;
+        }
     }
 }
 
@@ -455,21 +468,25 @@ static void draw_parts_gizmos(CreatorGL *g, const CreatorState *st, Mat4 vp, Vec
     gz[ng++] = (Gizmo){st->spine.v[0].x + er, st->spine.v[0].y + er * 0.4f,
                        st->spine.v[0].z, 0.08f, 0.08f, 0.08f, v3(0.15f, 0.15f, 0.2f)};
 
-    /* Legs — Lochner mirrored pairs snapped to vertebrae */
+    /* Legs — bilateral pairs (left source + right mirror, same vertebra) */
     int nlegs = genome_limb_count(&st->genome);
-    for (int i = 0; i < nlegs && ng < 12; i++) {
-        int vi = st->limb_bone[i];
+    int pairs = nlegs / 2;
+    if (pairs < 1) pairs = 1;
+    for (int p = 0; p < pairs && ng < 11; p++) {
+        int L = p * 2;
+        int vi = st->limb_bone[L];
         if (vi < 0 || vi >= segs) continue;
-        float lx = st->limb_x[i];
-        float ly = st->limb_y[i];
-        float lz = st->limb_z[i];
-        gz[ng++] = (Gizmo){st->spine.v[vi].x + lx, st->spine.v[vi].y + ly, lz,
+        float lx = fabsf(st->limb_x[L]);
+        float ly = st->limb_y[L];
+        float lz = st->limb_z[L];
+        Vec3 base = v3(st->spine.v[vi].x, st->spine.v[vi].y, st->spine.v[vi].z);
+        /* Left */
+        gz[ng++] = (Gizmo){base.x + lx, base.y + ly, lz,
                            0.10f, 0.35f, 0.10f, v3(0.35f, 0.55f, 0.85f)};
-        /* Mirrored twin when off midline */
-        if (fabsf(lx) >= st->merge_threshold && ng < 12) {
-            gz[ng++] = (Gizmo){st->spine.v[vi].x - lx, st->spine.v[vi].y + ly, lz,
+        /* Right mirror (Lochner Flipped) */
+        if (ng < 12)
+            gz[ng++] = (Gizmo){base.x - lx, base.y + ly, lz,
                                0.10f, 0.35f, 0.10f, v3(0.45f, 0.65f, 0.90f)};
-        }
     }
 
     /* Detail marker along spine (Lochner nearest-bone attach approximation) */
@@ -758,14 +775,17 @@ int main(int argc, char **argv) {
                     Vec3 hit;
                     if (mouse_hit_plane(eye, cam_r, cam_u, cam_f, fovy, aspect,
                                         mx, my, ww, wh, tip, cam_f, &hit)) {
+                        hit.x = 0.0f; /* bilateral: sagittal plane only */
                         const float seg = 0.22f;
                         Vec3 to = v3_sub(hit, prev);
+                        to.x = 0.0f;
                         float dist = v3_len(to);
                         if (dist > 1e-4f) {
                             Vec3 dir = v3_mul(to, 1.0f / dist);
                             /* Curve tip toward mouse every frame */
                             spine_aim_end(&st.spine, stretch_front ? 1 : 0,
                                           hit.x, hit.y, hit.z, seg);
+                            spine_enforce_symmetry(&st.spine);
                             st.dirty_mesh = 1;
                             sync_mirrored_limbs(&st);
 
@@ -777,6 +797,7 @@ int main(int argc, char **argv) {
                                     /* Aim the brand-new tip at the mouse */
                                     spine_aim_end(&st.spine, stretch_front ? 1 : 0,
                                                   hit.x, hit.y, hit.z, seg);
+                                    spine_enforce_symmetry(&st.spine);
                                     st.cash -= 10;
                                     st.dirty_mesh = 1;
                                     sync_mirrored_limbs(&st);
@@ -793,19 +814,20 @@ int main(int argc, char **argv) {
                         }
                     } else {
                         /* Fallback: relative drag if ray miss */
-                        spine_bend(&st.spine, tip_i, dx * 0.004f, -dy * 0.004f, 0);
+                        spine_bend(&st.spine, tip_i, 0, -dy * 0.004f, 0);
+                        spine_enforce_symmetry(&st.spine);
                         st.dirty_mesh = 1;
                     }
                     (void)stretch_acc;
                 } else if (bone_drag && st.mode == MODE_BUILD) {
-                    /* Bend selected vertebra toward mouse on the view plane */
+                    /* Bend selected vertebra toward mouse on the sagittal plane */
                     int ww, wh; SDL_GetWindowSize(win, &ww, &wh);
                     int mx = e.motion.x, my = e.motion.y;
                     float side = -0.6f;
                     Vec3 eye, target, cam_r, cam_u, cam_f;
                     cam_basis(cam_yaw, cam_pitch, cam_dist, side,
                               &eye, &target, &cam_r, &cam_u, &cam_f);
-                    Vec3 bone = v3(st.spine.v[st.sel_bone].x,
+                    Vec3 bone = v3(0.0f,
                                    st.spine.v[st.sel_bone].y,
                                    st.spine.v[st.sel_bone].z);
                     float aspect = (wh > 0) ? (float)ww / (float)wh : 1.0f;
@@ -813,12 +835,13 @@ int main(int argc, char **argv) {
                     Vec3 hit;
                     if (mouse_hit_plane(eye, cam_r, cam_u, cam_f, fovy, aspect,
                                         mx, my, ww, wh, bone, cam_f, &hit)) {
-                        st.spine.v[st.sel_bone].x = clampf(hit.x, -1.8f, 1.8f);
+                        st.spine.v[st.sel_bone].x = 0.0f;
                         st.spine.v[st.sel_bone].y = clampf(hit.y, -0.8f, 1.4f);
                         st.spine.v[st.sel_bone].z = clampf(hit.z, -2.2f, 2.2f);
                     } else {
-                        spine_bend(&st.spine, st.sel_bone, dx * 0.004f, -dy * 0.004f, dy * 0.0015f);
+                        spine_bend(&st.spine, st.sel_bone, 0, -dy * 0.004f, dy * 0.0015f);
                     }
+                    spine_enforce_symmetry(&st.spine);
                     st.dirty_mesh = 1;
                     sync_mirrored_limbs(&st);
                 } else {

@@ -558,7 +558,7 @@ void spine_init_blob(SpineColumn *s) {
     memset(s, 0, sizeof(*s));
     s->active = 1;
     s->count = 4;
-    /* Amorphous starter blob — fat middle, nose at +Z, tail at -Z */
+    /* Amorphous starter blob — sagittal midline (x=0), nose at +Z */
     s->v[0] = (Vertebra){ 0.0f, 0.02f,  0.38f, 0.48f };
     s->v[1] = (Vertebra){ 0.0f, 0.05f,  0.12f, 0.58f };
     s->v[2] = (Vertebra){ 0.0f, 0.05f, -0.12f, 0.58f };
@@ -615,33 +615,31 @@ int spine_extend(SpineColumn *s, int front) {
 
 int spine_extend_dir(SpineColumn *s, int front, float dx, float dy, float dz) {
     if (!s->active || s->count >= SPINE_MAX_VERTS) return 0;
-    float len = sqrtf(dx * dx + dy * dy + dz * dz);
+    /* Bilateral: no sideways growth — stay in YZ sagittal plane */
+    dx = 0.0f;
+    float len = sqrtf(dy * dy + dz * dz);
     if (len < 1e-4f) {
         spine_dir_at_end(s, front, &dx, &dy, &dz);
-    } else {
-        dx /= len; dy /= len; dz /= len;
+        dx = 0.0f;
+        len = sqrtf(dy * dy + dz * dz);
+        if (len < 1e-4f) { dy = 0; dz = front ? 1.0f : -1.0f; len = 1.0f; }
     }
+    dy /= len; dz /= len;
     float step = 0.22f;
     if (front) {
         memmove(&s->v[1], &s->v[0], (size_t)s->count * sizeof(Vertebra));
-        s->v[0].x += dx * step;
-        s->v[0].y += dy * step;
-        s->v[0].z += dz * step;
+        s->v[0].x = 0.0f;
+        s->v[0].y = clampf(s->v[0].y + dy * step, -0.8f, 1.4f);
+        s->v[0].z = clampf(s->v[0].z + dz * step, -2.2f, 2.2f);
         s->v[0].radius = s->v[1].radius * 0.92f;
         if (s->v[0].radius < 0.18f) s->v[0].radius = 0.18f;
-        s->v[0].x = clampf(s->v[0].x, -1.8f, 1.8f);
-        s->v[0].y = clampf(s->v[0].y, -0.8f, 1.4f);
-        s->v[0].z = clampf(s->v[0].z, -2.2f, 2.2f);
     } else {
         Vertebra tip = s->v[s->count - 1];
-        tip.x += dx * step;
-        tip.y += dy * step;
-        tip.z += dz * step;
+        tip.x = 0.0f;
+        tip.y = clampf(tip.y + dy * step, -0.8f, 1.4f);
+        tip.z = clampf(tip.z + dz * step, -2.2f, 2.2f);
         tip.radius *= 0.92f;
         if (tip.radius < 0.18f) tip.radius = 0.18f;
-        tip.x = clampf(tip.x, -1.8f, 1.8f);
-        tip.y = clampf(tip.y, -0.8f, 1.4f);
-        tip.z = clampf(tip.z, -2.2f, 2.2f);
         s->v[s->count] = tip;
     }
     s->count++;
@@ -658,7 +656,8 @@ int spine_shorten(SpineColumn *s, int front) {
 
 void spine_bend(SpineColumn *s, int i, float dx, float dy, float dz) {
     if (!s->active || i < 0 || i >= s->count) return;
-    s->v[i].x = clampf(s->v[i].x + dx, -1.8f, 1.8f);
+    (void)dx; /* ignore lateral — bilateral symmetry */
+    s->v[i].x = 0.0f;
     s->v[i].y = clampf(s->v[i].y + dy, -0.8f, 1.4f);
     s->v[i].z = clampf(s->v[i].z + dz, -2.2f, 2.2f);
 }
@@ -668,15 +667,23 @@ void spine_aim_end(SpineColumn *s, int front, float tx, float ty, float tz, floa
     if (seg_len < 0.08f) seg_len = 0.08f;
     int tip_i = front ? 0 : s->count - 1;
     int prev_i = front ? 1 : s->count - 2;
+    /* Project target onto sagittal plane */
+    tx = 0.0f;
     float dx = tx - s->v[prev_i].x;
     float dy = ty - s->v[prev_i].y;
     float dz = tz - s->v[prev_i].z;
     float len = sqrtf(dx * dx + dy * dy + dz * dz);
     if (len < 1e-4f) return;
     dx /= len; dy /= len; dz /= len;
-    s->v[tip_i].x = clampf(s->v[prev_i].x + dx * seg_len, -1.8f, 1.8f);
+    s->v[tip_i].x = 0.0f;
     s->v[tip_i].y = clampf(s->v[prev_i].y + dy * seg_len, -0.8f, 1.4f);
     s->v[tip_i].z = clampf(s->v[prev_i].z + dz * seg_len, -2.2f, 2.2f);
+}
+
+void spine_enforce_symmetry(SpineColumn *s) {
+    if (!s || !s->active) return;
+    for (int i = 0; i < s->count; i++)
+        s->v[i].x = 0.0f;
 }
 
 void spine_inflate(SpineColumn *s, int i, float delta) {
