@@ -46,18 +46,143 @@ typedef struct {
     float merge_threshold;
 } CreatorState;
 
-static int pick_bone(const CreatorState *st, Mat4 vp, int mx, int my, int ww, int wh) {
+static Vec3 stretch_handle_pos(const CreatorState *st, int front) {
+    int n = st->spine.count;
+    if (n < 1) return v3(0, 0, 0);
+    if (front) {
+        Vec3 tip = v3(st->spine.v[0].x, st->spine.v[0].y, st->spine.v[0].z);
+        Vec3 dir = v3(0, 0, 1);
+        if (n >= 2) {
+            dir = v3_norm(v3_sub(tip, v3(st->spine.v[1].x, st->spine.v[1].y, st->spine.v[1].z)));
+        }
+        return v3_add(tip, v3_mul(dir, st->spine.v[0].radius * 0.9f + 0.28f));
+    }
+    Vec3 tip = v3(st->spine.v[n - 1].x, st->spine.v[n - 1].y, st->spine.v[n - 1].z);
+    Vec3 dir = v3(0, 0, -1);
+    if (n >= 2) {
+        dir = v3_norm(v3_sub(tip, v3(st->spine.v[n - 2].x, st->spine.v[n - 2].y, st->spine.v[n - 2].z)));
+    }
+    return v3_add(tip, v3_mul(dir, st->spine.v[n - 1].radius * 0.9f + 0.28f));
+}
+
+/* Returns: >=0 bone index, -2 front stretch, -3 back stretch, -1 miss */
+static int pick_tool(const CreatorState *st, Mat4 vp, int mx, int my, int ww, int wh) {
     int best = -1;
-    float best_d2 = 26.0f * 26.0f;
+    float best_d2 = 36.0f * 36.0f;
+    /* Prefer stretch handles (larger hit) */
+    for (int h = 0; h < 2; h++) {
+        Vec3 p = stretch_handle_pos(st, h == 0);
+        float sx, sy;
+        if (!m4_project(vp, p, ww, wh, &sx, &sy)) continue;
+        float dx = sx - (float)mx, dy = sy - (float)my;
+        float d2 = dx * dx + dy * dy;
+        float rad = 42.0f;
+        if (d2 < rad * rad && d2 < best_d2) {
+            best_d2 = d2;
+            best = (h == 0) ? -2 : -3;
+        }
+    }
     for (int i = 0; i < st->spine.count; i++) {
         float sx, sy;
         Vec3 p = v3(st->spine.v[i].x, st->spine.v[i].y, st->spine.v[i].z);
         if (!m4_project(vp, p, ww, wh, &sx, &sy)) continue;
         float dx = sx - (float)mx, dy = sy - (float)my;
         float d2 = dx * dx + dy * dy;
-        if (d2 < best_d2) { best_d2 = d2; best = i; }
+        if (d2 < 28.0f * 28.0f && d2 < best_d2) {
+            best_d2 = d2;
+            best = i;
+        }
     }
     return best;
+}
+
+static void upload_unit_cube(CreatorGL *g) {
+    static const float cube_pos[] = {
+        -0.5f,-0.5f,-0.5f,  0.5f,-0.5f,-0.5f,  0.5f,0.5f,-0.5f,
+         0.5f,0.5f,-0.5f, -0.5f,0.5f,-0.5f, -0.5f,-0.5f,-0.5f,
+        -0.5f,-0.5f, 0.5f,  0.5f,0.5f, 0.5f,  0.5f,-0.5f, 0.5f,
+        -0.5f,-0.5f, 0.5f, -0.5f,0.5f, 0.5f,  0.5f,0.5f, 0.5f,
+         0.5f,-0.5f,-0.5f,  0.5f,-0.5f, 0.5f,  0.5f,0.5f, 0.5f,
+         0.5f,0.5f, 0.5f,  0.5f,0.5f,-0.5f,  0.5f,-0.5f,-0.5f,
+        -0.5f,-0.5f,-0.5f, -0.5f,0.5f,-0.5f, -0.5f,0.5f, 0.5f,
+        -0.5f,0.5f, 0.5f, -0.5f,-0.5f, 0.5f, -0.5f,-0.5f,-0.5f,
+        -0.5f,0.5f,-0.5f,  0.5f,0.5f,-0.5f,  0.5f,0.5f, 0.5f,
+         0.5f,0.5f, 0.5f, -0.5f,0.5f, 0.5f, -0.5f,0.5f,-0.5f,
+        -0.5f,-0.5f,-0.5f, -0.5f,-0.5f, 0.5f,  0.5f,-0.5f, 0.5f,
+         0.5f,-0.5f, 0.5f,  0.5f,-0.5f,-0.5f, -0.5f,-0.5f,-0.5f,
+    };
+    float inter[36 * 9];
+    for (int i = 0; i < 36; i++) {
+        inter[i * 9 + 0] = cube_pos[i * 3 + 0];
+        inter[i * 9 + 1] = cube_pos[i * 3 + 1];
+        inter[i * 9 + 2] = cube_pos[i * 3 + 2];
+        inter[i * 9 + 3] = 0; inter[i * 9 + 4] = 1; inter[i * 9 + 5] = 0;
+        inter[i * 9 + 6] = inter[i * 9 + 7] = inter[i * 9 + 8] = 1;
+    }
+    glBindVertexArray(g->bone_vao);
+    glBindBuffer(GL_ARRAY_BUFFER, g->bone_vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(inter), inter, GL_DYNAMIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 9 * sizeof(float), (void *)0);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 9 * sizeof(float), (void *)(3 * sizeof(float)));
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, 9 * sizeof(float), (void *)(6 * sizeof(float)));
+}
+
+static void draw_cube_gizmo(CreatorGL *g, Mat4 vp, Vec3 eye, Vec3 pos, Vec3 size, Vec3 col) {
+    Mat4 model = m4_mul(m4_translate(pos), m4_scale(size));
+    Mat4 mvp = m4_mul(vp, model);
+    glUniformMatrix4fv(g->u_mvp, 1, GL_FALSE, mvp.m);
+    glUniformMatrix4fv(g->u_model, 1, GL_FALSE, model.m);
+    glUniform3f(g->u_color, col.x, col.y, col.z);
+    glUniform3f(g->u_light_dir, 0.35f, 0.9f, 0.25f);
+    glUniform3f(g->u_cam_pos, eye.x, eye.y, eye.z);
+    glUniform1i(g->u_use_vert_color, 0);
+    glUniform1f(g->u_alpha, 1.0f);
+    glDrawArrays(GL_TRIANGLES, 0, 36);
+}
+
+static void draw_bones(CreatorGL *g, const CreatorState *st, Mat4 vp, Vec3 eye) {
+    if (st->mode != MODE_BUILD || !st->spine.active) return;
+    glDisable(GL_CULL_FACE);
+    glUseProgram(g->prog);
+    upload_unit_cube(g);
+
+    int n = st->spine.count;
+    /* Vertebra cubes (Core GL — GL_POINTS often invisible) */
+    for (int i = 0; i < n; i++) {
+        Vec3 p = v3(st->spine.v[i].x, st->spine.v[i].y, st->spine.v[i].z);
+        float rad = 0.11f + st->spine.v[i].radius * 0.08f;
+        int sel = (i == st->sel_bone);
+        Vec3 col = sel ? v3(1.0f, 0.92f, 0.20f) : v3(0.95f, 0.75f, 0.25f);
+        draw_cube_gizmo(g, vp, eye, p, v3(rad, rad, rad), col);
+        /* connector toward next */
+        if (i + 1 < n) {
+            Vec3 nxt = v3(st->spine.v[i + 1].x, st->spine.v[i + 1].y, st->spine.v[i + 1].z);
+            Vec3 mid = v3_lerp(p, nxt, 0.5f);
+            draw_cube_gizmo(g, vp, eye, mid, v3(0.04f, 0.04f, 0.04f), v3(0.7f, 0.55f, 0.2f));
+        }
+    }
+
+    /* Lochner stretch arrows — bright red (nose) / green (tail) */
+    {
+        Vec3 front = stretch_handle_pos(st, 1);
+        Vec3 back = stretch_handle_pos(st, 0);
+        Vec3 nose = v3(st->spine.v[0].x, st->spine.v[0].y, st->spine.v[0].z);
+        Vec3 tail = v3(st->spine.v[n - 1].x, st->spine.v[n - 1].y, st->spine.v[n - 1].z);
+        Vec3 fd = v3_norm(v3_sub(front, nose));
+        Vec3 bd = v3_norm(v3_sub(back, tail));
+        draw_cube_gizmo(g, vp, eye, front, v3(0.18f, 0.18f, 0.18f), v3(1.0f, 0.22f, 0.15f));
+        draw_cube_gizmo(g, vp, eye, v3_add(front, v3_mul(fd, 0.16f)),
+                        v3(0.26f, 0.26f, 0.14f), v3(1.0f, 0.50f, 0.22f));
+        draw_cube_gizmo(g, vp, eye, back, v3(0.18f, 0.18f, 0.18f), v3(0.20f, 0.95f, 0.35f));
+        draw_cube_gizmo(g, vp, eye, v3_add(back, v3_mul(bd, 0.16f)),
+                        v3(0.26f, 0.26f, 0.14f), v3(0.40f, 1.0f, 0.50f));
+    }
+
+    glBindVertexArray(0);
+    glEnable(GL_CULL_FACE);
 }
 
 static void sync_mirrored_limbs(CreatorState *st) {
@@ -276,46 +401,6 @@ static void draw_mesh(CreatorGL *g, const CreatorState *st, Mat4 vp, Vec3 eye) {
     glBindVertexArray(0);
 }
 
-static void draw_bones(CreatorGL *g, const CreatorState *st, Mat4 vp, Vec3 eye) {
-    if (st->mode != MODE_BUILD || !st->spine.active) return;
-    /* Simple point-ish cubes via lines strip of bone centres */
-    float pts[SPINE_MAX_VERTS * 6];
-    int n = st->spine.count;
-    for (int i = 0; i < n; i++) {
-        pts[i * 6 + 0] = st->spine.v[i].x;
-        pts[i * 6 + 1] = st->spine.v[i].y;
-        pts[i * 6 + 2] = st->spine.v[i].z;
-        int sel = (i == st->sel_bone);
-        pts[i * 6 + 3] = sel ? 1.0f : 0.2f;
-        pts[i * 6 + 4] = sel ? 0.9f : 0.85f;
-        pts[i * 6 + 5] = sel ? 0.2f : 0.3f;
-    }
-    glDisable(GL_CULL_FACE);
-    glUseProgram(g->prog);
-    Mat4 model = m4_id();
-    Mat4 mvp = m4_mul(vp, model);
-    glUniformMatrix4fv(g->u_mvp, 1, GL_FALSE, mvp.m);
-    glUniformMatrix4fv(g->u_model, 1, GL_FALSE, model.m);
-    glUniform3f(g->u_light_dir, 0.2f, 1.0f, 0.2f);
-    glUniform3f(g->u_cam_pos, eye.x, eye.y, eye.z);
-    glUniform1i(g->u_use_vert_color, 1);
-    glUniform1f(g->u_alpha, 1.0f);
-    glPointSize(14.0f);
-    glBindVertexArray(g->bone_vao);
-    glBindBuffer(GL_ARRAY_BUFFER, g->bone_vbo);
-    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(n * 6 * (int)sizeof(float)), pts, GL_DYNAMIC_DRAW);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void *)0);
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void *)(3 * sizeof(float)));
-    glEnableVertexAttribArray(2);
-    glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void *)(3 * sizeof(float)));
-    glDrawArrays(GL_POINTS, 0, n);
-    if (n >= 2) glDrawArrays(GL_LINE_STRIP, 0, n);
-    glBindVertexArray(0);
-    glEnable(GL_CULL_FACE);
-}
-
 static void draw_parts_gizmos(CreatorGL *g, const CreatorState *st, Mat4 vp, Vec3 eye) {
     /* Place simple marker cubes at mouth / eye / limb sockets on spine */
     if (st->mode == MODE_PAINT) return;
@@ -326,10 +411,10 @@ static void draw_parts_gizmos(CreatorGL *g, const CreatorState *st, Mat4 vp, Vec
     Gizmo gz[12];
     int ng = 0;
 
-    /* Mouth at nose */
-    gz[ng++] = (Gizmo){st->spine.v[0].x, st->spine.v[0].y,
-                       st->spine.v[0].z + st->spine.v[0].radius * 0.6f,
-                       0.18f, 0.12f, 0.14f, v3(0.9f, 0.3f, 0.25f)};
+    /* Mouth — offset below nose so it doesn't steal the red stretch handle */
+    gz[ng++] = (Gizmo){st->spine.v[0].x, st->spine.v[0].y - st->spine.v[0].radius * 0.55f,
+                       st->spine.v[0].z + st->spine.v[0].radius * 0.15f,
+                       0.14f, 0.10f, 0.12f, v3(0.85f, 0.45f, 0.35f)};
     /* Eyes */
     float er = st->spine.v[0].radius * 0.55f;
     gz[ng++] = (Gizmo){st->spine.v[0].x - er, st->spine.v[0].y + er * 0.4f,
@@ -530,7 +615,8 @@ int main(int argc, char **argv) {
 
     printf("Lochner Creature Creator MVP (MIT algorithms)\n");
     printf("  1/2/3     Build / Paint / Test\n");
-    printf("  LMB       click bone to bend; empty drag = orbit; edges stretch\n");
+    printf("  LMB       drag RED nose / GREEN tail cubes to add columns\n");
+    printf("            click gold bones to bend; empty drag = orbit\n");
     printf("  scroll    inflate selected bone (neighbor bleed)\n");
     printf("  = / -     extend / shorten (Shift = front)\n");
     printf("  Tab Q/E   part slot / cycle     C/P paint\n");
@@ -600,14 +686,14 @@ int main(int argc, char **argv) {
                 stretch_front = stretch_back = 0;
                 stretch_acc = 0;
                 if (st.mode == MODE_BUILD) {
-                    if (mx < ww / 5) stretch_front = 1;
-                    else if (mx > 4 * ww / 5) stretch_back = 1;
-                    else {
-                        int hit = pick_bone(&st, last_vp, mx, my, ww, wh);
-                        if (hit >= 0) {
-                            st.sel_bone = hit;
-                            bone_drag = 1;
-                        }
+                    int hit = pick_tool(&st, last_vp, mx, my, ww, wh);
+                    if (hit == -2) {
+                        stretch_front = 1;
+                    } else if (hit == -3) {
+                        stretch_back = 1;
+                    } else if (hit >= 0) {
+                        st.sel_bone = hit;
+                        bone_drag = 1;
                     }
                 }
             }
@@ -615,25 +701,55 @@ int main(int argc, char **argv) {
                 dragging = 0;
                 bone_drag = 0;
                 stretch_front = stretch_back = 0;
+                stretch_acc = 0;
             }
             if (e.type == SDL_MOUSEMOTION && dragging) {
                 float dx = (float)e.motion.xrel;
                 float dy = (float)e.motion.yrel;
                 if (stretch_front || stretch_back) {
-                    /* Lochner: drag past length threshold → add/remove bone */
-                    stretch_acc += dy * 0.01f;
-                    if (stretch_acc > 0.35f) {
-                        if (stretch_front) spine_extend(&st.spine, 1);
-                        else spine_extend(&st.spine, 0);
+                    /* Project drag onto outward spine axis in screen space (Lochner). */
+                    int ww, wh; SDL_GetWindowSize(win, &ww, &wh);
+                    Vec3 handle = stretch_handle_pos(&st, stretch_front);
+                    Vec3 tip = stretch_front
+                        ? v3(st.spine.v[0].x, st.spine.v[0].y, st.spine.v[0].z)
+                        : v3(st.spine.v[st.spine.count - 1].x,
+                             st.spine.v[st.spine.count - 1].y,
+                             st.spine.v[st.spine.count - 1].z);
+                    Vec3 outward = v3_norm(v3_sub(handle, tip));
+                    Vec3 along = v3_add(handle, outward);
+                    float hx, hy, ax, ay;
+                    if (m4_project(last_vp, handle, ww, wh, &hx, &hy)
+                        && m4_project(last_vp, along, ww, wh, &ax, &ay)) {
+                        float sx = ax - hx, sy = ay - hy;
+                        float sl = sqrtf(sx * sx + sy * sy);
+                        if (sl > 1e-3f) {
+                            sx /= sl; sy /= sl;
+                            /* Positive = drag outward → extend */
+                            stretch_acc += (dx * sx + dy * sy) * 0.02f;
+                        } else {
+                            stretch_acc += (-dy) * 0.02f;
+                        }
+                    } else {
+                        stretch_acc += (-dy) * 0.02f;
+                    }
+                    /* Lower threshold so one clear drag adds a column */
+                    if (stretch_acc > 0.22f) {
+                        if (spine_extend(&st.spine, stretch_front ? 1 : 0)) {
+                            st.sel_bone = stretch_front ? 0 : st.spine.count - 1;
+                            st.cash -= 10;
+                            st.dirty_mesh = 1;
+                            sync_mirrored_limbs(&st);
+                        }
                         stretch_acc = 0;
-                        st.dirty_mesh = 1;
-                        sync_mirrored_limbs(&st);
-                    } else if (stretch_acc < -0.35f) {
-                        if (stretch_front) spine_shorten(&st.spine, 1);
-                        else spine_shorten(&st.spine, 0);
+                    } else if (stretch_acc < -0.22f) {
+                        if (spine_shorten(&st.spine, stretch_front ? 1 : 0)) {
+                            if (st.sel_bone >= st.spine.count)
+                                st.sel_bone = st.spine.count - 1;
+                            st.cash += 5;
+                            st.dirty_mesh = 1;
+                            sync_mirrored_limbs(&st);
+                        }
                         stretch_acc = 0;
-                        st.dirty_mesh = 1;
-                        sync_mirrored_limbs(&st);
                     }
                 } else if (bone_drag && st.mode == MODE_BUILD) {
                     spine_bend(&st.spine, st.sel_bone, dx * 0.004f, -dy * 0.004f, dy * 0.0015f);
