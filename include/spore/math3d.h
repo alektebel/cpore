@@ -81,6 +81,14 @@ static inline Mat4 m4_scale(Vec3 s) {
     return r;
 }
 
+static inline Mat4 m4_rotate_y(float a) {
+    float c = cosf(a), s = sinf(a);
+    Mat4 r = m4_id();
+    r.m[0] = c;  r.m[2] = -s;
+    r.m[8] = s;  r.m[10] = c;
+    return r;
+}
+
 static inline Mat4 m4_look_at(Vec3 eye, Vec3 target, Vec3 up) {
     Vec3 f = v3_norm(v3_sub(target, eye));
     Vec3 s = v3_norm(v3_cross(f, up));

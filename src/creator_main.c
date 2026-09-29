@@ -37,13 +37,16 @@ typedef struct {
     int dirty_mesh;
     BodyMesh mesh;
     BodyMeshSettings mesh_set;
-    float yaw_spin; /* test mode idle turn */
     /* Lochner mirrored limb sockets: local X offsets; |x|<merge → centered */
     float limb_x[CREATURE_LEGS];
     float limb_y[CREATURE_LEGS];
     float limb_z[CREATURE_LEGS];
     int limb_bone[CREATURE_LEGS];
     float merge_threshold;
+    /* Test mode: a real Creature driven on a Terrain */
+    Terrain terrain;
+    Creature testc;
+    int test_live;
 } CreatorState;
 
 /* Mouse ray ∩ plane through plane_p with normal plane_n → world point. */
@@ -144,12 +147,20 @@ static void upload_unit_cube(CreatorGL *g) {
         -0.5f,-0.5f,-0.5f, -0.5f,-0.5f, 0.5f,  0.5f,-0.5f, 0.5f,
          0.5f,-0.5f, 0.5f,  0.5f,-0.5f,-0.5f, -0.5f,-0.5f,-0.5f,
     };
+    /* one outward normal per face (6 verts each): -Z, +Z, +X, -X, +Y, -Y */
+    static const float face_nrm[6][3] = {
+        { 0, 0,-1 }, { 0, 0, 1 }, { 1, 0, 0 },
+        { -1, 0, 0 }, { 0, 1, 0 }, { 0,-1, 0 },
+    };
     float inter[36 * 9];
     for (int i = 0; i < 36; i++) {
+        int face = i / 6;
         inter[i * 9 + 0] = cube_pos[i * 3 + 0];
         inter[i * 9 + 1] = cube_pos[i * 3 + 1];
         inter[i * 9 + 2] = cube_pos[i * 3 + 2];
-        inter[i * 9 + 3] = 0; inter[i * 9 + 4] = 1; inter[i * 9 + 5] = 0;
+        inter[i * 9 + 3] = face_nrm[face][0];
+        inter[i * 9 + 4] = face_nrm[face][1];
+        inter[i * 9 + 5] = face_nrm[face][2];
         inter[i * 9 + 6] = inter[i * 9 + 7] = inter[i * 9 + 8] = 1;
     }
     glBindVertexArray(g->bone_vao);
@@ -163,8 +174,7 @@ static void upload_unit_cube(CreatorGL *g) {
     glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, 9 * sizeof(float), (void *)(6 * sizeof(float)));
 }
 
-static void draw_cube_gizmo(CreatorGL *g, Mat4 vp, Vec3 eye, Vec3 pos, Vec3 size, Vec3 col) {
-    Mat4 model = m4_mul(m4_translate(pos), m4_scale(size));
+static void draw_cube_model(CreatorGL *g, Mat4 vp, Vec3 eye, Mat4 model, Vec3 col) {
     Mat4 mvp = m4_mul(vp, model);
     glUniformMatrix4fv(g->u_mvp, 1, GL_FALSE, mvp.m);
     glUniformMatrix4fv(g->u_model, 1, GL_FALSE, model.m);
@@ -174,6 +184,29 @@ static void draw_cube_gizmo(CreatorGL *g, Mat4 vp, Vec3 eye, Vec3 pos, Vec3 size
     glUniform1i(g->u_use_vert_color, 0);
     glUniform1f(g->u_alpha, 1.0f);
     glDrawArrays(GL_TRIANGLES, 0, 36);
+}
+
+static void draw_cube_gizmo(CreatorGL *g, Mat4 vp, Vec3 eye, Vec3 pos, Vec3 size, Vec3 col) {
+    draw_cube_model(g, vp, eye, m4_mul(m4_translate(pos), m4_scale(size)), col);
+}
+
+/* A box from a to b with cross-section radius r — an oriented limb bone. */
+static void draw_box_seg(CreatorGL *g, Mat4 vp, Vec3 eye, Vec3 a, Vec3 b,
+                         float r, Vec3 col) {
+    Vec3 d = v3_sub(b, a);
+    float len = v3_len(d);
+    if (len < 1e-4f) return;
+    Vec3 dir = v3_mul(d, 1.0f / len);
+    Vec3 up = fabsf(dir.y) > 0.98f ? v3(1, 0, 0) : v3(0, 1, 0);
+    Vec3 right = v3_norm(v3_cross(up, dir));
+    Vec3 fwd = v3_cross(right, dir);   /* right-handed, so normals face out */
+    Mat4 R = m4_id();
+    R.m[0] = right.x; R.m[1] = right.y; R.m[2] = right.z;
+    R.m[4] = dir.x;   R.m[5] = dir.y;   R.m[6] = dir.z;
+    R.m[8] = fwd.x;   R.m[9] = fwd.y;   R.m[10] = fwd.z;
+    Mat4 model = m4_mul(m4_translate(v3_lerp(a, b, 0.5f)),
+                        m4_mul(R, m4_scale(v3(r, len, r))));
+    draw_cube_model(g, vp, eye, model, col);
 }
 
 static void draw_bones(CreatorGL *g, const CreatorState *st, Mat4 vp, Vec3 eye) {
@@ -289,10 +322,11 @@ static const char *FRAG_SRC =
     "  vec3 l = normalize(u_light_dir);\n"
     "  float diff = max(dot(n,l), 0.0);\n"
     "  vec3 view = normalize(u_cam_pos - v_world);\n"
+    "  float fill = max(dot(n, view), 0.0) * 0.35;   /* headlight, keeps thin parts lit */\n"
     "  vec3 h = normalize(l + view);\n"
     "  float spec = pow(max(dot(n,h),0.0), 28.0) * 0.18;\n"
     "  vec3 base = (u_use_vert_color != 0) ? v_col : u_color;\n"
-    "  frag = vec4(base * (0.30 + diff) + vec3(spec), u_alpha);\n"
+    "  frag = vec4(base * (0.30 + diff + fill) + vec3(spec), u_alpha);\n"
     "}\n";
 
 static unsigned compile_shader(GLenum type, const char *src) {
@@ -378,6 +412,34 @@ static void state_reset(CreatorState *st) {
         st->limb_bone[i] = -1;
     }
     sync_mirrored_limbs(st);
+    terrain_init(&st->terrain, 256.0f, -0.35f, 1234u);
+    st->test_live = 0;
+}
+
+/* Drop the current build onto the terrain as a living creature the Test tab
+ * can drive. The sculpted column is handed to it verbatim, so what you walk
+ * is exactly what you built - not a genome approximation of it. */
+static void enter_test(CreatorState *st) {
+    Genome g = st->genome;
+    genome_clamp(&g);
+    creature_init(&st->testc, &st->terrain,
+                  v3(st->terrain.world_size * 0.5f, 0.0f,
+                     st->terrain.world_size * 0.5f),
+                  g, st->color, st->scale, 1);
+    if (st->spine.active && st->spine.count >= SPINE_MIN_VERTS) {
+        st->testc.spine = st->spine;
+        spine_sync_anchors(&st->testc);
+    } else {
+        spine_ensure_blob(&st->testc);
+    }
+    st->test_live = 1;
+}
+
+static void set_mode(CreatorState *st, int mode) {
+    if (mode == st->mode) return;
+    st->mode = mode;
+    if (mode == MODE_TEST) enter_test(st);
+    else st->test_live = 0;
 }
 
 static void rebuild_mesh(CreatorState *st) {
@@ -430,9 +492,9 @@ static void upload_mesh(CreatorGL *g, const CreatorState *st) {
     free(inter);
 }
 
-static void draw_mesh(CreatorGL *g, const CreatorState *st, Mat4 vp, Vec3 eye) {
+static void draw_mesh(CreatorGL *g, const CreatorState *st, Mat4 vp, Vec3 eye,
+                      Mat4 model) {
     if (st->mesh.count < 3) return;
-    Mat4 model = m4_id();
     Mat4 mvp = m4_mul(vp, model);
     glUseProgram(g->prog);
     glUniformMatrix4fv(g->u_mvp, 1, GL_FALSE, mvp.m);
@@ -468,26 +530,7 @@ static void draw_parts_gizmos(CreatorGL *g, const CreatorState *st, Mat4 vp, Vec
     gz[ng++] = (Gizmo){st->spine.v[0].x + er, st->spine.v[0].y + er * 0.4f,
                        st->spine.v[0].z, 0.08f, 0.08f, 0.08f, v3(0.15f, 0.15f, 0.2f)};
 
-    /* Legs — bilateral pairs (left source + right mirror, same vertebra) */
-    int nlegs = genome_limb_count(&st->genome);
-    int pairs = nlegs / 2;
-    if (pairs < 1) pairs = 1;
-    for (int p = 0; p < pairs && ng < 11; p++) {
-        int L = p * 2;
-        int vi = st->limb_bone[L];
-        if (vi < 0 || vi >= segs) continue;
-        float lx = fabsf(st->limb_x[L]);
-        float ly = st->limb_y[L];
-        float lz = st->limb_z[L];
-        Vec3 base = v3(st->spine.v[vi].x, st->spine.v[vi].y, st->spine.v[vi].z);
-        /* Left */
-        gz[ng++] = (Gizmo){base.x + lx, base.y + ly, lz,
-                           0.10f, 0.35f, 0.10f, v3(0.35f, 0.55f, 0.85f)};
-        /* Right mirror (Lochner Flipped) */
-        if (ng < 12)
-            gz[ng++] = (Gizmo){base.x - lx, base.y + ly, lz,
-                               0.10f, 0.35f, 0.10f, v3(0.45f, 0.65f, 0.90f)};
-    }
+    /* Legs are drawn as actual bones now (see draw_limbs), not markers. */
 
     /* Detail marker along spine (Lochner nearest-bone attach approximation) */
     if (st->genome.detail != DETAIL_NONE) {
@@ -518,12 +561,20 @@ static void draw_parts_gizmos(CreatorGL *g, const CreatorState *st, Mat4 vp, Vec
         /* -Y */ -0.5f,-0.5f,-0.5f, -0.5f,-0.5f, 0.5f,  0.5f,-0.5f, 0.5f,
                   0.5f,-0.5f, 0.5f,  0.5f,-0.5f,-0.5f, -0.5f,-0.5f,-0.5f,
     };
+    /* one outward normal per face (6 verts each): -Z, +Z, +X, -X, +Y, -Y */
+    static const float face_nrm[6][3] = {
+        { 0, 0,-1 }, { 0, 0, 1 }, { 1, 0, 0 },
+        { -1, 0, 0 }, { 0, 1, 0 }, { 0,-1, 0 },
+    };
     float inter[36 * 9];
     for (int i = 0; i < 36; i++) {
+        int face = i / 6;
         inter[i * 9 + 0] = cube_pos[i * 3 + 0];
         inter[i * 9 + 1] = cube_pos[i * 3 + 1];
         inter[i * 9 + 2] = cube_pos[i * 3 + 2];
-        inter[i * 9 + 3] = 0; inter[i * 9 + 4] = 1; inter[i * 9 + 5] = 0;
+        inter[i * 9 + 3] = face_nrm[face][0];
+        inter[i * 9 + 4] = face_nrm[face][1];
+        inter[i * 9 + 5] = face_nrm[face][2];
         inter[i * 9 + 6] = inter[i * 9 + 7] = inter[i * 9 + 8] = 1;
     }
     glBindVertexArray(g->bone_vao);
@@ -549,6 +600,134 @@ static void draw_parts_gizmos(CreatorGL *g, const CreatorState *st, Mat4 vp, Vec
     glBindVertexArray(0);
 }
 
+/* Limbs as tapered bones. In Build/Paint the sockets are body-local; in Test
+ * the creature has already solved its own IK in world space. */
+static void draw_limbs(CreatorGL *g, const CreatorState *st, Mat4 vp, Vec3 eye) {
+    glDisable(GL_CULL_FACE);
+    glUseProgram(g->prog);
+    upload_unit_cube(g);
+
+    Vec3 col = v3(0.80f, 0.76f, 0.68f);
+    Vec3 col2 = v3(0.68f, 0.64f, 0.57f);
+    if (st->mode == MODE_TEST && st->test_live) {
+        const Creature *c = &st->testc;
+        int legs = genome_limb_count(&c->genome);
+        float s = c->scale;
+        for (int i = 0; i < legs && i < CREATURE_LEGS; i++) {
+            const Leg *L = &c->legs[i];
+            draw_box_seg(g, vp, eye, L->hip, L->knee, 0.060f * s, col);
+            draw_box_seg(g, vp, eye, L->knee, L->foot, 0.048f * s, col2);
+        }
+    } else {
+        int legs = genome_limb_count(&st->genome);
+        int segs = st->spine.count;
+        int pairs = legs / 2;
+        if (pairs < 1) pairs = 1;
+        for (int p = 0; p < pairs && p * 2 < CREATURE_LEGS; p++) {
+            int idx = p * 2;
+            int vi = st->limb_bone[idx];
+            if (vi < 0 || vi >= segs) continue;
+            Vec3 base = v3(st->spine.v[vi].x, st->spine.v[vi].y, st->spine.v[vi].z);
+            float lx = fabsf(st->limb_x[idx]);
+            float ly = st->limb_y[idx];
+            float lz = st->limb_z[idx];
+            Vec3 hips[2] = { v3(base.x + lx, base.y + ly, lz),
+                             v3(base.x - lx, base.y + ly, lz) };
+            for (int k = 0; k < 2; k++) {
+                Vec3 hip = hips[k];
+                Vec3 foot = v3(hip.x, hip.y - 0.62f, hip.z);
+                Vec3 knee = ik_2bone(hip, foot, 0.34f, 0.34f,
+                                     v3(hip.x, hip.y - 1.0f, hip.z));
+                draw_box_seg(g, vp, eye, hip, knee, 0.060f, col);
+                draw_box_seg(g, vp, eye, knee, foot, 0.048f, col2);
+            }
+        }
+    }
+    glBindVertexArray(0);
+    glEnable(GL_CULL_FACE);
+}
+
+/* A wire ground sampled from the same height field the creature walks. */
+static void draw_ground(CreatorGL *g, const CreatorState *st, Mat4 vp, Vec3 eye,
+                        Vec3 center) {
+    const int N = 12;
+    const float step = 3.0f;
+    int lines = 2 * N + 1;
+    int maxv = lines * (2 * N) * 2 * 2;
+    float *buf = malloc((size_t)maxv * 9 * sizeof(float));
+    if (!buf) return;
+    int vi = 0;
+    for (int dir = 0; dir < 2; dir++) {
+        for (int li = -N; li <= N; li++) {
+            float fixed = (dir == 0 ? center.x : center.z) + (float)li * step;
+            Vec3 prev = v3(0, 0, 0);
+            for (int s = -N; s <= N; s++) {
+                float t = (dir == 0 ? center.z : center.x) + (float)s * step;
+                Vec3 p = dir == 0 ? v3(fixed, 0, t) : v3(t, 0, fixed);
+                p.y = terrain_height(&st->terrain, p.x, p.z) + 0.01f;
+                if (s > -N && vi + 2 <= maxv) {
+                    float *a = &buf[(size_t)vi * 9];
+                    a[0] = prev.x; a[1] = prev.y; a[2] = prev.z;
+                    a[3] = 0; a[4] = 1; a[5] = 0; a[6] = a[7] = a[8] = 1;
+                    vi++;
+                    float *b = &buf[(size_t)vi * 9];
+                    b[0] = p.x; b[1] = p.y; b[2] = p.z;
+                    b[3] = 0; b[4] = 1; b[5] = 0; b[6] = b[7] = b[8] = 1;
+                    vi++;
+                }
+                prev = p;
+            }
+        }
+    }
+    glUseProgram(g->prog);
+    glUniformMatrix4fv(g->u_mvp, 1, GL_FALSE, vp.m);
+    glUniformMatrix4fv(g->u_model, 1, GL_FALSE, m4_id().m);
+    glUniform3f(g->u_color, 0.16f, 0.22f, 0.16f);
+    glUniform3f(g->u_light_dir, 0.35f, 0.9f, 0.25f);
+    glUniform3f(g->u_cam_pos, eye.x, eye.y, eye.z);
+    glUniform1i(g->u_use_vert_color, 0);
+    glUniform1f(g->u_alpha, 1.0f);
+    glBindVertexArray(g->bone_vao);
+    glBindBuffer(GL_ARRAY_BUFFER, g->bone_vbo);
+    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)((size_t)vi * 9 * sizeof(float)),
+                 buf, GL_DYNAMIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 9 * sizeof(float), (void *)0);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 9 * sizeof(float), (void *)(3 * sizeof(float)));
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, 9 * sizeof(float), (void *)(6 * sizeof(float)));
+    glDrawArrays(GL_LINES, 0, vi);
+    glBindVertexArray(0);
+    free(buf);
+}
+
+/* Weapon and detail sit where the simulation would put them, so the parts you
+ * paid for are visible on the test drive. */
+static void draw_test_markers(CreatorGL *g, const CreatorState *st, Mat4 vp, Vec3 eye) {
+    if (st->mode != MODE_TEST || !st->test_live) return;
+    const Creature *c = &st->testc;
+    if (c->genome.weapon == WEAPON_NONE && c->genome.detail == DETAIL_NONE) return;
+    float s = c->scale;
+    glDisable(GL_CULL_FACE);
+    glUseProgram(g->prog);
+    upload_unit_cube(g);
+    if (c->genome.weapon != WEAPON_NONE) {
+        Vec3 p = creature_weapon_anchor(c);
+        draw_cube_model(g, vp, eye,
+                        m4_mul(m4_translate(p), m4_scale(v3(0.14f * s, 0.14f * s, 0.22f * s))),
+                        v3(0.85f, 0.45f, 0.30f));
+    }
+    if (c->genome.detail != DETAIL_NONE) {
+        Vec3 p = creature_detail_anchor(c);
+        draw_cube_model(g, vp, eye,
+                        m4_mul(m4_translate(p), m4_scale(v3(0.18f * s, 0.10f * s, 0.30f * s))),
+                        v3(0.40f, 0.70f, 0.45f));
+    }
+    glBindVertexArray(0);
+    glEnable(GL_CULL_FACE);
+}
+
 static int save_creature(const CreatorState *st, const char *path) {
     CreatureDesc d;
     desc_defaults(&d);
@@ -558,7 +737,8 @@ static int save_creature(const CreatorState *st, const char *path) {
     d.color2 = st->color2;
     d.pattern = st->pattern;
     d.scale = st->scale;
-    /* Encode spine into limb/hips lightly; genome spine enum from length */
+    d.spine = st->spine;               /* the sculpted column is the creature */
+    /* Keep the genome's spine morph in step with the column's length. */
     float span = 0.0f;
     if (st->spine.count >= 2)
         span = fabsf(st->spine.v[0].z - st->spine.v[st->spine.count - 1].z);
@@ -567,6 +747,30 @@ static int save_creature(const CreatorState *st, const char *path) {
     else if (span < 0.7f) d.genome.spine = SPINE_COMPACT;
     else d.genome.spine = SPINE_STANDARD;
     return desc_save(&d, path);
+}
+
+static int load_creature(CreatorState *st, const char *path) {
+    CreatureDesc d;
+    if (!desc_load(&d, path)) return 0;
+    st->genome = d.genome;
+    st->color = d.color;
+    st->color2 = d.color2;
+    st->pattern = d.pattern;
+    st->scale = d.scale;
+    snprintf(st->name, sizeof(st->name), "%s", d.name);
+    if (d.spine.active && d.spine.count >= SPINE_MIN_VERTS) {
+        st->spine = d.spine;
+        if (st->sel_bone >= st->spine.count) st->sel_bone = st->spine.count - 1;
+        if (st->sel_bone < 0) st->sel_bone = 0;
+    } else {
+        spine_init_blob(&st->spine);
+        st->sel_bone = 1;
+    }
+    sync_mirrored_limbs(st);
+    st->dirty_mesh = 1;
+    st->test_live = 0;
+    if (st->mode == MODE_TEST) enter_test(st);
+    return 1;
 }
 
 static void print_hud(const CreatorState *st) {
@@ -625,9 +829,37 @@ static void cycle_part(CreatorState *st, int dir) {
     genome_clamp(&st->genome);
 }
 
+/* --- headless still export: render a frame, read it back, write a PPM --- */
+static void write_ppm(const char *path, int w, int h) {
+    unsigned char *px = malloc((size_t)w * (size_t)h * 3);
+    if (!px) return;
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, px);
+    FILE *f = fopen(path, "wb");
+    if (f) {
+        fprintf(f, "P6\n%d %d\n255\n", w, h);
+        for (int y = h - 1; y >= 0; y--)   /* GL origin is bottom-left */
+            fwrite(px + (size_t)y * (size_t)w * 3, 1, (size_t)w * 3, f);
+        fclose(f);
+    }
+    free(px);
+}
+
 int main(int argc, char **argv) {
     const char *out_path = "data/creatures/creator_mvp.creature";
-    if (argc > 1) out_path = argv[1];
+    const char *shot_path = NULL;
+    int start_mode = MODE_BUILD;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--shot") == 0 && i + 1 < argc) {
+            shot_path = argv[++i];
+        } else if (strcmp(argv[i], "--mode") == 0 && i + 1 < argc) {
+            const char *m = argv[++i];
+            start_mode = strcmp(m, "paint") == 0 ? MODE_PAINT
+                       : strcmp(m, "test") == 0 ? MODE_TEST : MODE_BUILD;
+        } else {
+            out_path = argv[i];
+        }
+    }
 
     if (SDL_Init(SDL_INIT_VIDEO) != 0) {
         fprintf(stderr, "SDL: %s\n", SDL_GetError());
@@ -654,9 +886,11 @@ int main(int argc, char **argv) {
     state_reset(&st);
     rebuild_mesh(&st);
     upload_mesh(&gl, &st);
+    set_mode(&st, start_mode);
 
     float cam_yaw = 0.6f, cam_pitch = 0.35f, cam_dist = 4.5f;
     int running = 1;
+    int shot_done = 0;
     int dragging = 0;
     int bone_drag = 0;
     int stretch_front = 0, stretch_back = 0;
@@ -670,7 +904,8 @@ int main(int argc, char **argv) {
     printf("  scroll    inflate selected bone (neighbor bleed)\n");
     printf("  = / -     extend / shorten (Shift = front)\n");
     printf("  Tab Q/E   part slot / cycle     C/P paint\n");
-    printf("  R reset   S save to %s\n", out_path);
+    printf("  TEST: WASD walk, Space jump\n");
+    printf("  R reset   S save   L load   (%s)\n", out_path);
     printf("  Esc quit\n\n");
 
     Uint32 last = SDL_GetTicks();
@@ -687,13 +922,22 @@ int main(int argc, char **argv) {
                 SDL_Keycode k = e.key.keysym.sym;
                 int sh = (e.key.keysym.mod & KMOD_SHIFT) != 0;
                 if (k == SDLK_ESCAPE) running = 0;
-                else if (k == SDLK_1) st.mode = MODE_BUILD;
-                else if (k == SDLK_2) st.mode = MODE_PAINT;
-                else if (k == SDLK_3) st.mode = MODE_TEST;
-                else if (k == SDLK_r) { state_reset(&st); st.dirty_mesh = 1; }
-                else if (k == SDLK_s) {
+                else if (k == SDLK_1) set_mode(&st, MODE_BUILD);
+                else if (k == SDLK_2) set_mode(&st, MODE_PAINT);
+                else if (k == SDLK_3) set_mode(&st, MODE_TEST);
+                else if (k == SDLK_r) {
+                    int was = st.mode;
+                    state_reset(&st);
+                    st.dirty_mesh = 1;
+                    if (was != st.mode) set_mode(&st, was);
+                } else if (k == SDLK_s) {
                     if (save_creature(&st, out_path))
                         printf("\nsaved %s\n", out_path);
+                } else if (k == SDLK_l) {
+                    if (load_creature(&st, out_path))
+                        printf("\nloaded %s\n", out_path);
+                    else
+                        printf("\ncould not load %s\n", out_path);
                 } else if (k == SDLK_LEFTBRACKET) {
                     if (st.sel_bone > 0) st.sel_bone--;
                 } else if (k == SDLK_RIGHTBRACKET) {
@@ -861,8 +1105,21 @@ int main(int argc, char **argv) {
             }
         }
 
-        if (st.mode == MODE_TEST)
-            st.yaw_spin += dt * 0.7f;
+        if (st.mode == MODE_TEST && st.test_live) {
+            const Uint8 *ks = SDL_GetKeyboardState(NULL);
+            float fwd_in = 0.0f, side_in = 0.0f;
+            if (ks[SDL_SCANCODE_W]) fwd_in += 1.0f;
+            if (ks[SDL_SCANCODE_S]) fwd_in -= 1.0f;
+            if (ks[SDL_SCANCODE_A]) side_in -= 1.0f;
+            if (ks[SDL_SCANCODE_D]) side_in += 1.0f;
+            float cyw = cosf(cam_yaw), syw = sinf(cam_yaw);
+            Vec3 fdir = v3(-syw, 0.0f, -cyw);   /* where the camera looks, on the ground */
+            Vec3 rdir = v3(cyw, 0.0f, -syw);
+            Vec3 wish = v3_add(v3_mul(fdir, fwd_in), v3_mul(rdir, side_in));
+            creature_update_locomotion(&st.testc, &st.terrain, dt,
+                                       wish.x, wish.z,
+                                       ks[SDL_SCANCODE_SPACE] ? 1 : 0);
+        }
 
         if (st.dirty_mesh) {
             rebuild_mesh(&st);
@@ -874,28 +1131,44 @@ int main(int argc, char **argv) {
         glViewport(0, 0, ww, wh);
         glClearColor(0.12f, 0.14f, 0.18f, 1.0f);
         if (st.mode == MODE_PAINT) glClearColor(0.18f, 0.16f, 0.14f, 1.0f);
-        if (st.mode == MODE_TEST) glClearColor(0.10f, 0.16f, 0.12f, 1.0f);
+        if (st.mode == MODE_TEST) glClearColor(0.32f, 0.42f, 0.55f, 1.0f); /* sky */
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
         float aspect = (wh > 0) ? (float)ww / (float)wh : 1.0f;
-        float yaw = cam_yaw + (st.mode == MODE_TEST ? st.yaw_spin : 0.0f);
-        /* Lochner Build offsets camera slightly left */
-        float side = (st.mode == MODE_BUILD) ? -0.6f : (st.mode == MODE_PAINT ? 0.6f : 0.0f);
         float cp = cosf(cam_pitch), sp = sinf(cam_pitch);
-        float cy = cosf(yaw), sy = sinf(yaw);
-        Vec3 target = v3(side, 0.4f, 0.0f);
+        float cy = cosf(cam_yaw), sy = sinf(cam_yaw);
+        Vec3 target;
+        if (st.mode == MODE_TEST && st.test_live) {
+            target = st.testc.body;
+            target.y += 0.15f;
+        } else {
+            /* Lochner Build offsets the camera slightly left */
+            float side = (st.mode == MODE_BUILD) ? -0.6f
+                       : (st.mode == MODE_PAINT ? 0.6f : 0.0f);
+            target = v3(side, 0.4f, 0.0f);
+        }
         Vec3 eye = v3_add(target, v3(sy * cp * cam_dist, sp * cam_dist + 0.8f, cy * cp * cam_dist));
         Mat4 view = m4_look_at(eye, target, v3(0, 1, 0));
         Mat4 proj = m4_perspective(50.0f * (float)M_PI / 180.0f, aspect, 0.05f, 80.0f);
         Mat4 vp = m4_mul(proj, view);
         last_vp = vp;
 
-        draw_mesh(&gl, &st, vp, eye);
+        Mat4 mesh_model = m4_id();
+        if (st.mode == MODE_TEST && st.test_live) {
+            const Creature *c = &st.testc;
+            mesh_model = m4_mul(m4_translate(c->body),
+                         m4_mul(m4_rotate_y(c->yaw),
+                                m4_scale(v3(c->scale, c->scale, c->scale))));
+            draw_ground(&gl, &st, vp, eye, st.testc.body);
+        }
+        draw_mesh(&gl, &st, vp, eye, mesh_model);
         if (st.mode == MODE_BUILD) {
             draw_bones(&gl, &st, vp, eye);
+            draw_limbs(&gl, &st, vp, eye);
             draw_parts_gizmos(&gl, &st, vp, eye);
         } else if (st.mode == MODE_TEST) {
-            draw_parts_gizmos(&gl, &st, vp, eye);
+            draw_limbs(&gl, &st, vp, eye);
+            draw_test_markers(&gl, &st, vp, eye);
         }
 
         /* Mode tab HUD bars */
@@ -976,6 +1249,13 @@ int main(int argc, char **argv) {
                      st.cash, cx, COMPLEXITY_MAX,
                      unlocks_part_name(st.part_slot, part_i));
             SDL_SetWindowTitle(win, title);
+        }
+
+        if (shot_path && !shot_done) {
+            write_ppm(shot_path, ww, wh);
+            printf("\nwrote %s (%dx%d)\n", shot_path, ww, wh);
+            shot_done = 1;
+            running = 0;
         }
 
         SDL_GL_SwapWindow(win);

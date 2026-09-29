@@ -11,8 +11,12 @@ ported from Daniel Lochner's *Creature Creator* — see
 ```
 sudo apt install libsdl2-dev libepoxy-dev
 make
-./creator                          # save goes to data/creatures/creator_mvp.creature
-./creator path/to/my.creature      # or choose the output file
+./creator                          # save/load goes to data/creatures/creator_mvp.creature
+./creator path/to/my.creature      # or choose the file
+
+# offscreen stills (headless; renders a frame and writes a PPM)
+./creator --mode test --shot shot.ppm
+./creator --mode paint --shot paint.ppm
 ```
 
 Header-only 3D math, a small part catalogue and a sum-of-sines height field;
@@ -30,9 +34,15 @@ nothing else is linked in.
   Tab         part slot       Q / E   cycle part
   C / P       paint / pattern (Paint mode)
   [ / ]       select bone
-  R           reset           S       save
+  WASD        walk (Test mode)   Space  jump
+  R           reset           S       save       L   load
   Esc         quit
 ```
+
+The save file records the whole creature — genome, colours, scale and the
+sculpted spine column — so `L` restores exactly what you built. In **Test**
+the studio hands that same column to the locomotion model and drops you on the
+terrain: walk with `WASD`, jump with `Space`, and orbit with the mouse.
 
 ## Layout
 

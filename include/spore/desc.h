@@ -15,9 +15,11 @@ typedef struct {
     Vec3  color2;
     int   pattern;
     float scale;
+    SpineColumn spine;   /* the sculpted column, so a save round-trips exactly */
 } CreatureDesc;
 
 void desc_defaults(CreatureDesc *d);
 int  desc_save(const CreatureDesc *d, const char *path);
+int  desc_load(CreatureDesc *d, const char *path);
 
 #endif
