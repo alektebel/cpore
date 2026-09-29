@@ -431,14 +431,21 @@ function buildBodyPanel() {
   body.innerHTML = "";
   refreshers.length = 0;
   const g = () => geneBytes();
-  refreshers.push(slider(body, "segments", 2, 6,
+  refreshers.push(slider(body, "segments", 2, 16,
     () => g()[G.NSEG], (v) => { g()[G.NSEG] = v; M._cpw_normalise(budget); }));
   refreshers.push(slider(body, "girth", 40, 255,
     () => g()[G.GIRTH], (v) => { g()[G.GIRTH] = v; }));
-  refreshers.push(slider(body, "arch", -127, 127,
-    () => s8(g()[G.ARCH]), (v) => { g()[G.ARCH] = v & 0xff; }));
-  refreshers.push(slider(body, "sweep", -127, 127,
-    () => s8(g()[G.SWEEP]), (v) => { g()[G.SWEEP] = v & 0xff; }));
+  /* The spine is sixteen points now, not one arch and one sweep. A slider is
+   * the wrong control for a vertebra you are meant to grab in the viewport,
+   * but the middle point's rise is the one shape a slider still reads as, so
+   * keep that much and drop the curve genes it replaced. */
+  const midVert = () => {
+    const n = g()[G.NSEG];
+    return Math.min(Math.max(Math.floor(n / 2), 0), 15);
+  };
+  refreshers.push(slider(body, "hump", -127, 127,
+    () => s8(g()[G.SPINE + midVert() * G.SPINE_STRIDE + 2]),
+    (v) => { g()[G.SPINE + midVert() * G.SPINE_STRIDE + 2] = v & 0xff; }));
 
   const paint = document.getElementById("paint");
   paint.innerHTML = "";

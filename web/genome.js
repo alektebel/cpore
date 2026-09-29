@@ -15,11 +15,12 @@
 
 const G = {
   PART: 0, PART_STRIDE: 8,
-  NSEG: 128, GIRTH: 129, PROF: 130, LUMP: 134, RISE: 140,
-  ARCH: 146, SWEEP: 147,
-  HUE: 148, HUE2: 149, HUE3: 150, SAT: 151, VAL: 152,
-  PATTERN: 153, PSCALE: 154, PATTERN2: 155, PSCALE2: 156,
-  BYTES: 157,
+  NSEG: 128, GIRTH: 129,
+  /* sixteen control points, four signed/unsigned bytes each: along, side, up, rad */
+  SPINE: 130, SPINE_STRIDE: 4,
+  HUE: 194, HUE2: 195, HUE3: 196, SAT: 197, VAL: 198,
+  PATTERN: 199, PSCALE: 200, PATTERN2: 201, PSCALE2: 202,
+  BYTES: 203,
 };
 const P = { TYPE: 0, SEG: 1, YAW: 2, PITCH: 3, SCALE: 4, MIRROR: 5, LEN: 6, BEND: 7 };
 const MAX_PARTS = 16;

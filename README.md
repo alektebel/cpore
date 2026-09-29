@@ -34,6 +34,7 @@ make && make test && make bench
 ./build/cpore_tribe --table --seeds 30              # the tribe fork in numbers
 ./build/cpore_space --table                         # the galactic fork in numbers
 ./build/cpore_shot --vis abyss --out pixels.png     # the original pixel look
+./build/cpore_stl --out docs/stl                    # every part as STL
 ```
 
 ![a quieter frame](docs/cell_drop.png)
@@ -316,9 +317,29 @@ the world was the same leg at a different scale.
 | **19 part types** | arms and tails join the original seventeen |
 | **16 slots** | up from twelve |
 | **jointed limbs** | legs, arms and tails are multi-link chains with per-part reach and fold |
-| **spine** | segment count, girth, a four-point profile, per-segment lumps *and* per-segment rise, plus arch and sweep |
+| **spine** | sixteen control points you drag — along, side, up and a thickness at each, so a neck, a hump and a tail root are three separate gestures rather than one arch |
 | **three coats** | base, marking and detail, each with its own pattern and scale — Spore's paint mode |
 | **design head** | six numbers a part in the action vector, up from four |
+
+The spine used to be a formula: one `arch`, one `sweep`, a per-segment rise and
+a four-station thickness curve, all evaluated when the body was drawn. That is
+a fine way to *generate* an animal and an impossible way to edit one, because
+"drag this vertebra wherever you like" has nowhere to write the answer down.
+The curve is gone and the sixteen points are the spine: the genome stores
+`along`, `side`, `up` and a radius per vertebra, the renderer and the picker
+read those points directly, and the profile asks them for their own thickness —
+so what the editor edits and what the world draws cannot disagree. A creature
+starts as a blob and the body is pulled out of it, the way Spore opens: a nose
+to stretch, a back to hump, a tail to lift.
+
+The same points drive a mesh exporter, for the tools that only speak
+triangles — the field stays the source of truth and the mesh is derived from
+it, so there is nothing to keep in sync:
+
+```
+./build/cpore_stl --out docs/stl     # every part, plus a creature, as STL
+./build/cpore_stl --part horn --out .  # just one
+```
 
 **Arms** are a leg that does not have to reach the ground, and that one
 difference is what makes them worth having as a separate part: freed from the
@@ -837,6 +858,7 @@ src/sdfbody.h           the shared SDF body: round cones under a smooth minimum
 src/render3d.c          sphere-impostor z-buffer renderer for stage 2
 src/render_land.c       ray-marched heightfield, sky and creatures for stage 3
 src/render_civ.c        orthographic map, territory and borders for stage 4
+src/stl.c               binary STL exporter, meshing the same distance fields
 src/png.c               PNG + DEFLATE encoder
 python/cpore/           ctypes binding, puffer.py, campaign.py, textgym.py
 apps/                   shots per stage, cpore_game (native play), cpore_bench
