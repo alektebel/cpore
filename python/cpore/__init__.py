@@ -43,16 +43,25 @@ from .env import (
     BACK,
     LEFT,
 )
-from .puffer import (
-    CporePuffer,
-    CellPuffer,
-    AquaPuffer,
-    LandPuffer,
-    TribePuffer,
-    CivPuffer,
-    SpacePuffer,
-    make_puffer_env,
-)
+try:
+    # The vectorised envs need numpy, the one optional training dependency.
+    # Everything else here is pure ctypes, so keep numpy optional end to end:
+    # the studio and the raw envs must import on a box that only has libc.
+    from .puffer import (
+        CporePuffer,
+        CellPuffer,
+        AquaPuffer,
+        LandPuffer,
+        TribePuffer,
+        CivPuffer,
+        SpacePuffer,
+        make_puffer_env,
+    )
+    _PUFFER_EXPORTS = ["CporePuffer", "CellPuffer", "AquaPuffer", "LandPuffer",
+                       "TribePuffer", "CivPuffer", "SpacePuffer",
+                       "make_puffer_env"]
+except ImportError:                                    # pragma: no cover
+    _PUFFER_EXPORTS = []
 from .campaign import Campaign, STAGES
 from .textgym import TextLand
 
@@ -68,6 +77,4 @@ __all__ = ["CporeEnv", "AquaEnv", "aqua_genome", "aqua_genome_from_code",
            "PART", "PART_NAMES", "PART_COST", "GEN_BUDGET", "CELL_STYLES", "STATUS",
            "VIS", "VIS_STYLES", "DEFAULT_VIS", "LAND_VIS",
            "FRONT", "RIGHT", "BACK", "LEFT",
-           "CporePuffer", "CellPuffer", "AquaPuffer", "LandPuffer",
-           "TribePuffer", "CivPuffer", "SpacePuffer", "make_puffer_env",
-           "Campaign", "STAGES", "TextLand"]
+           "Campaign", "STAGES", "TextLand"] + _PUFFER_EXPORTS

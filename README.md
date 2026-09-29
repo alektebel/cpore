@@ -908,7 +908,7 @@ print(game.act("move NE 2"))           # bite | sing | flee | dig | nest | ...
 Any genome is a pasteable string — Spore's pollination without a server:
 
 ```python
-code = land.share_code()               # "CP4-AQAAQI... (215 chars)"
+code = land.share_code()               # "CP4-AQAAQI... (276 chars)"
 land2.apply_code(code)                 # byte-exact, checksum-checked
 tribe = TribeEnv(seed=7, genome=land_genome_from_code(code))
 ```

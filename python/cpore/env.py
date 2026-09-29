@@ -437,7 +437,7 @@ def aqua_genome_from_code(code):
 
 def land_genome_from_code(code):
     """Decode a CP4- share string to a genome dict for LandEnv.reset."""
-    raw = _b64check("CP4-", code, 157)
+    raw = _b64check("CP4-", code, 203)
     parts = []
     o = 0
     for _ in range(16):
@@ -1110,8 +1110,9 @@ class LandEnv:
         return int(self._lib.cp4_env_apply_code(self._h, code.encode())) == 0
 
     def share_code(self) -> str:
-        buf = ctypes.create_string_buffer(256)
-        if int(self._lib.cp4_env_share_code(self._h, buf, 256)) != 0:
+        # CP_CODEC_LAND_STR is 276 now that the code carries the 16-point spine
+        buf = ctypes.create_string_buffer(512)
+        if int(self._lib.cp4_env_share_code(self._h, buf, len(buf))) != 0:
             raise RuntimeError("share_code failed")
         return buf.value.decode()
 

@@ -96,29 +96,36 @@ dt = time.time() - t0
 print(f"        ctypes vec throughput: {N * 16 / dt:,.0f} steps/s (16 envs)")
 vec.close()
 
-# puffer path: one FFI call per step for all lanes
-from cpore import LandPuffer, TribeEnv, LandEnv
+from cpore import TribeEnv, LandEnv
 from cpore import land_genome_from_code
 
-penv = LandPuffer(num_envs=16, seed=7)
-obs, infos = penv.reset()
-check(obs.shape == (16, penv.single_obs_dim), "puffer reset returns (N, obs) batch")
-o, r, te, tr, infos = penv.step(penv.greedy_actions())
-check(len(r) == 16 and hasattr(penv, "observations"),
-      "puffer step writes straight into numpy buffers")
-t0 = time.time()
-M = 300
-for _ in range(M):
-    penv.step(penv.greedy_actions())
-dt = time.time() - t0
-print(f"        puffer vec throughput: {M * 16 / dt:,.0f} steps/s (16 land envs)")
-penv.close()
+# puffer path (needs numpy): one FFI call per step for all lanes
+try:
+    from cpore import LandPuffer
+except ImportError:
+    print("        puffer path skipped: numpy not installed "
+          "(pip install numpy to run the vectorised envs)")
+else:
+    penv = LandPuffer(num_envs=16, seed=7)
+    obs, infos = penv.reset()
+    check(obs.shape == (16, penv.single_obs_dim),
+          "puffer reset returns (N, obs) batch")
+    o, r, te, tr, infos = penv.step(penv.greedy_actions())
+    check(len(r) == 16 and hasattr(penv, "observations"),
+          "puffer step writes straight into numpy buffers")
+    t0 = time.time()
+    M = 300
+    for _ in range(M):
+        penv.step(penv.greedy_actions())
+    dt = time.time() - t0
+    print(f"        puffer vec throughput: {M * 16 / dt:,.0f} steps/s (16 land envs)")
+    penv.close()
 
 # share codes round-trip across the binding
 le = LandEnv(seed=11)
 le.reset()
 code = le.share_code()
-check(code.startswith("CP4-") and len(code) == 215, f"land share code ({len(code)} chars)")
+check(code.startswith("CP4-") and len(code) == 276, f"land share code ({len(code)} chars)")
 le.redesign("predator")
 check(le.share_code() != code, "redesign rebuilds the live genome")
 le2 = LandEnv(seed=99)
