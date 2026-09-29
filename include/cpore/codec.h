@@ -26,12 +26,15 @@ extern "C" {
 /* canonical byte lengths (prefix and checksum excluded) */
 #define CP_CODEC_CELL_LEN 24
 #define CP_CODEC_AQUA_LEN 80
-#define CP_CODEC_LAND_LEN 157
+/* 16 parts x 8 bytes + (nseg, girth) + 16 spine points x 4 + five colour
+ * bytes + four coat bytes. The spine is the points themselves now, so the
+ * code carries along/side/up/rad per vertebra rather than a curve. */
+#define CP_CODEC_LAND_LEN 203
 
 /* encoded string lengths incl. prefix, excl. NUL (b64 of len+1 checksum) */
 #define CP_CODEC_CELL_STR 38
 #define CP_CODEC_AQUA_STR 112
-#define CP_CODEC_LAND_STR 215
+#define CP_CODEC_LAND_STR 276
 
 /* encode into out (caller provides >= STR+1 bytes). Returns strlen, or 0. */
 int cp_codec_cell(const CpGenome *g, char *out, size_t cap);

@@ -40,9 +40,10 @@ def body_pixels(ed, step, top=0.0, bottom=1.0):
 def main(prefix="creature"):
     ed = CreatureEditor(SIZE, SIZE)
 
-    # A jaw on a five-vertebra spine with a bit of arch in it, and nothing else.
+    # A jaw on a five-vertebra spine and nothing else. The arch that used to be
+    # set here is a gesture now rather than a gene: the hump further down is
+    # what puts a curve in this animal.
     ed.load({"parts": [(2, 0, 0, 0, 128, 0, 128, 0)], "nseg": 5, "girth": 175})
-    ed.spine(arch=45)
     print("start: %d of %d DNA" % (ed.cost, ed.budget))
 
     # Drop parts where the body is. Legs go on the underside, plates and horns
@@ -73,7 +74,7 @@ def main(prefix="creature"):
         for x in range(0, SIZE, 4):
             v = ed.spine_pick(x, y, grab=9.0)
             if v is not None and 0 < v < 4:
-                ed.spine_drag(v, x, y - 60)
+                ed.spine_move(v, x, y - 60)
                 ed.spine_girth(v, 0.55)
                 hump = v
                 break

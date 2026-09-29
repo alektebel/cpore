@@ -128,14 +128,31 @@ static float smin(float a, float b, float k)
  * a genome piles on. */
 static float creature_sdf(const Prim *pr, int n, V3 q, V3 *col, float *em, float *bodyw)
 {
-    float d = 1e9f, dmin = 1e9f, kmax = 0.0f;
+    /* The accumulator starts at the first primitive's distance, not at a large
+     * sentinel, and that is a correctness fix rather than a tidy-up.
+     *
+     * smin computes `a + (b - a) * h`. Seeded with 1e9f, the first iteration
+     * evaluates that with a = 1e9 in float32, where the ulp is about 64 - so
+     * `b - a` rounds to exactly -1e9 and the sum is exactly zero, whatever the
+     * real distance was. The union of one primitive came back as 0 everywhere:
+     * a body with a single lobe had no interior at all.
+     *
+     * It survived because nothing asked. Every rendered creature has several
+     * primitives, and from the second iteration onward the accumulator holds a
+     * normal-magnitude number and behaves; the floor clamp below then pulls the
+     * result back to within a fillet of the true minimum, so the surface looked
+     * right. It took meshing a single horn - where n really is 1 - for the
+     * field to return 0.0000 over the whole of its own bounding box.
+     *
+     * The smooth minimum of one thing is that thing. */
+    float d = 0.0f, dmin = 1e9f, kmax = 0.0f;
     V3 c = v3(0, 0, 0);
     float e = 0.0f, bw = 0.0f, wsum = 1e-6f;
     for (int i = 0; i < n; i++) {
         float di = sd_cone(q, &pr[i]);
         if (di < dmin) dmin = di;
         if (pr[i].k > kmax) kmax = pr[i].k;
-        d = smin(d, di, pr[i].k);
+        d = (i == 0) ? di : smin(d, di, pr[i].k);
         if (col) {
             float w = expf(-di * 0.30f);
             c = add(c, mul(pr[i].col, w));

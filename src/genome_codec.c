@@ -229,10 +229,12 @@ int cp_codec_land(const Cp4Genome *g, char *out, size_t cap)
         raw[o++] = (uint8_t)(g->part[i].bend + 128);
     }
     raw[o++] = g->nseg; raw[o++] = g->girth;
-    for (i = 0; i < 4; i++) raw[o++] = g->prof[i];
-    for (i = 0; i < CP4_MAX_SEG; i++) raw[o++] = (uint8_t)(g->lump[i] + 128);
-    for (i = 0; i < CP4_MAX_SEG; i++) raw[o++] = (uint8_t)(g->rise[i] + 128);
-    raw[o++] = (uint8_t)(g->arch + 128); raw[o++] = (uint8_t)(g->sweep + 128);
+    for (i = 0; i < CP4_MAX_SEG; i++) {
+        raw[o++] = (uint8_t)g->spine[i].along;
+        raw[o++] = (uint8_t)g->spine[i].side;
+        raw[o++] = (uint8_t)g->spine[i].up;
+        raw[o++] = g->spine[i].rad;
+    }
     raw[o++] = g->hue; raw[o++] = g->hue2; raw[o++] = g->hue3;
     raw[o++] = g->sat; raw[o++] = g->val;
     raw[o++] = g->pattern; raw[o++] = g->pscale;
@@ -274,11 +276,12 @@ int cp_decode_land(const char *s, Cp4Genome *g)
         g->nseg = (uint8_t)ns;
     }
     g->girth = raw[o + 1]; o += 2;
-    for (i = 0; i < 4; i++) g->prof[i] = raw[o++];
-    for (i = 0; i < CP4_MAX_SEG; i++) g->lump[i] = (int8_t)(raw[o++] - 128);
-    for (i = 0; i < CP4_MAX_SEG; i++) g->rise[i] = (int8_t)(raw[o++] - 128);
-    g->arch = (int8_t)(raw[o++] - 128);
-    g->sweep = (int8_t)(raw[o++] - 128);
+    for (i = 0; i < CP4_MAX_SEG; i++) {
+        g->spine[i].along = (int8_t)raw[o++];
+        g->spine[i].side  = (int8_t)raw[o++];
+        g->spine[i].up    = (int8_t)raw[o++];
+        g->spine[i].rad   = raw[o++];
+    }
     g->hue = raw[o++]; g->hue2 = raw[o++]; g->hue3 = raw[o++];
     g->sat = raw[o++]; g->val = raw[o++];
     g->pattern = (uint8_t)(raw[o++] % CP4_PAT_COUNT);
