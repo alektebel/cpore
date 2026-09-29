@@ -1,145 +1,29 @@
-CC      ?= cc
-CFLAGS  ?= -O2 -std=c99 -Wall -Wextra -Wno-unused-parameter
-CFLAGS  += -Iinclude -D_POSIX_C_SOURCE=200809L
-LDLIBS   = -lm
-
-BUILD := build
-LIB_SRC := src/rng.c src/genome.c src/world.c src/policy.c src/env.c \
-           src/aqua_genome.c src/aqua.c src/aqua_env.c \
-           src/land_genome.c src/land.c src/land_env.c \
-           src/civ.c src/civ_env.c src/lineage.c \
-           src/tribe.c src/space.c src/space_env.c \
-           src/vec.c src/genome_codec.c src/codex.c
-# The editor session lives here and not in LIB_SRC: it drives the studio,
-# so it belongs to the half of the project a training build drops.
-VIS_SRC := src/render.c src/render_cell.c src/render_pond.c src/play.c src/render3d.c src/render_land.c \
-           src/render_terra.c src/render_civ.c src/land_edit.c src/stl.c src/png.c
-LIB_OBJ := $(LIB_SRC:%.c=$(BUILD)/%.o)
-VIS_OBJ := $(VIS_SRC:%.c=$(BUILD)/%.o)
-
-.PHONY: all clean test bench shot aqua land civ tribe space stl play play-cell game game-tribe lib wasm
-all: $(BUILD)/cpore_shot $(BUILD)/cpore_aqua $(BUILD)/cpore_land \
-     $(BUILD)/cpore_civ $(BUILD)/cpore_tribe $(BUILD)/cpore_space \
-     $(BUILD)/cpore_stl \
-     $(BUILD)/cpore_play $(BUILD)/cpore_game \
-     $(BUILD)/cpore_bench $(BUILD)/cpore_test $(BUILD)/libcpore.so
-
-HDRS := $(wildcard include/cpore/*.h) $(wildcard src/*.h)
-
-$(BUILD)/%.o: %.c $(HDRS)
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -fPIC -c $< -o $@
-
-$(BUILD)/libcpore.a: $(LIB_OBJ) $(VIS_OBJ)
-	ar rcs $@ $^
-
-# shared object is what the python/ctypes binding loads
-$(BUILD)/libcpore.so: $(LIB_OBJ) $(VIS_OBJ)
-	$(CC) -shared -o $@ $^ $(LDLIBS)
-
-$(BUILD)/cpore_shot: apps/shot.c $(HDRS) $(BUILD)/libcpore.a
-	$(CC) $(CFLAGS) $< $(BUILD)/libcpore.a -o $@ $(LDLIBS)
-
-$(BUILD)/cpore_aqua: apps/aqua_shot.c $(HDRS) $(BUILD)/libcpore.a
-	$(CC) $(CFLAGS) $< $(BUILD)/libcpore.a -o $@ $(LDLIBS)
-
-$(BUILD)/cpore_land: apps/land_shot.c $(HDRS) $(BUILD)/libcpore.a
-	$(CC) $(CFLAGS) $< $(BUILD)/libcpore.a -o $@ $(LDLIBS)
-
-$(BUILD)/cpore_civ: apps/civ_shot.c $(HDRS) $(BUILD)/libcpore.a
-	$(CC) $(CFLAGS) $< $(BUILD)/libcpore.a -o $@ $(LDLIBS)
-
-$(BUILD)/cpore_tribe: apps/tribe_shot.c $(HDRS) $(BUILD)/libcpore.a
-	$(CC) $(CFLAGS) $< $(BUILD)/libcpore.a -o $@ $(LDLIBS)
-
-$(BUILD)/cpore_space: apps/space_shot.c $(HDRS) $(BUILD)/libcpore.a
-	$(CC) $(CFLAGS) $< $(BUILD)/libcpore.a -o $@ $(LDLIBS)
-
-# The mesh exporter: the SDF stays the source of truth, this writes the
-# triangles a viewer or slicer speaks. Built from the same libcpore as the
-# stills so the mesh and the render cannot disagree.
-$(BUILD)/cpore_stl: apps/stl_dump.c $(HDRS) $(BUILD)/libcpore.a
-	$(CC) $(CFLAGS) -Iinclude $< $(BUILD)/libcpore.a -lm -o $@
-
-$(BUILD)/cpore_play: apps/play.c $(HDRS) $(BUILD)/libcpore.a
-	$(CC) $(CFLAGS) $< $(BUILD)/libcpore.a -o $@ $(LDLIBS)
-
-# ---- the native game: X11 + GLX + fixed-function GL present path ----
-# glview.c is NOT part of libcpore: the sim core stays libc+libm only, and
-# only the game shell links the GPU/windowing system. Needs the stock system
-# headers (X11/Xlib.h, GL/glx.h) - no SDL, no extra packages.
-$(BUILD)/cpore_game: apps/cpore_game.c src/glview.c $(HDRS) $(BUILD)/libcpore.a
-	$(CC) $(CFLAGS) apps/cpore_game.c src/glview.c $(BUILD)/libcpore.a -o $@ $(LDLIBS) -lGL -lX11
-
-$(BUILD)/cpore_bench: apps/bench.c $(HDRS) $(BUILD)/libcpore.a
-	$(CC) $(CFLAGS) $< $(BUILD)/libcpore.a -o $@ $(LDLIBS)
-
-$(BUILD)/cpore_test: tests/test_core.c $(HDRS) $(BUILD)/libcpore.a
-	$(CC) $(CFLAGS) $< $(BUILD)/libcpore.a -o $@ $(LDLIBS)
-
-lib: $(BUILD)/libcpore.so
-test: $(BUILD)/cpore_test ; @./$(BUILD)/cpore_test
-bench: $(BUILD)/cpore_bench ; @./$(BUILD)/cpore_bench
-shot: $(BUILD)/cpore_shot ; @./$(BUILD)/cpore_shot --seed 7 --steps 900 --out $(BUILD)/shot.png
-aqua: $(BUILD)/cpore_aqua ; @./$(BUILD)/cpore_aqua --seed 3 --steps 2400 --out $(BUILD)/aqua.png
-land: $(BUILD)/cpore_land ; @./$(BUILD)/cpore_land --seed 5 --steps 2400 --out $(BUILD)/land.png
-civ: $(BUILD)/cpore_civ ; @./$(BUILD)/cpore_civ --seed 4 --out $(BUILD)/civ.png
-tribe: $(BUILD)/cpore_tribe ; @./$(BUILD)/cpore_tribe --seed 5 --out $(BUILD)/tribe.png
-space: $(BUILD)/cpore_space ; @./$(BUILD)/cpore_space --seed 4 --out $(BUILD)/space.png
-stl: $(BUILD)/cpore_stl ; @./$(BUILD)/cpore_stl --out $(BUILD)
-play-cell: $(BUILD)/cpore_play ; @./$(BUILD)/cpore_play --seed 23
-game: $(BUILD)/cpore_game ; @./$(BUILD)/cpore_game --seed 7 --stage land
-game-tribe: $(BUILD)/cpore_game ; @./$(BUILD)/cpore_game --seed 7 --stage tribe
-
-# ---- WebAssembly ----
+# spore — Creature Creator (SDL2 + OpenGL)
 #
-# No Emscripten. clang has had a wasm32 target for years and wasm-ld ships
-# with lld, so the only thing missing is a C runtime - and the parts of one
-# this program actually uses are an allocator, five memory functions and the
-# transcendentals. wasm/shim.c is the first two; the third are left undefined
-# so the linker turns them into imports and the browser's own Math supplies
-# them. Taking on a toolchain that brings its own libc, in order to prove the
-# project does not need one, would have been a strange trade.
-WASM_SRC := src/rng.c src/genome.c src/land_genome.c src/land.c \
-            src/land_edit.c src/render_terra.c wasm/shim.c
-WASM_OBJ := $(WASM_SRC:%.c=$(BUILD)/wasm/%.o)
-WASM_CF  := --target=wasm32 -O2 -std=c99 -nostdlib -ffunction-sections \
-            -fdata-sections -Wall -Wextra -Wno-unused-parameter \
-            -Iwasm/include -Iinclude -D_POSIX_C_SOURCE=200809L
-WASM_EXPORTS := $(shell grep -oE '\bcp4_edit_[a-z_]+' include/cpore/land.h \
-                        | sort -u | sed 's/^/--export=/')
+# One binary: the Lochner-style creature creator (Build / Paint / Test). SDL2
+# for the window and input, epoxy for the GL 3.3 core calls, libm for the
+# maths. No engine, no asset pipeline, no Emscripten.
+CC      ?= gcc
+CFLAGS  ?= -std=c11 -Wall -Wextra -O2 -Iinclude $(shell pkg-config --cflags sdl2)
+LDFLAGS ?=
+LIBS    := $(shell pkg-config --libs sdl2) -lepoxy -lm -lGL
 
-$(BUILD)/wasm/%.o: %.c $(HDRS)
-	@mkdir -p $(dir $@)
-	clang $(WASM_CF) -c $< -o $@
+CREATOR_SRCS := src/creator_main.c src/bodymesh.c src/creature.c \
+                src/genome.c src/desc.c src/terrain.c
+CREATOR_OBJS := $(CREATOR_SRCS:.c=.o)
 
-wasm/cpore.wasm: $(WASM_OBJ)
-	wasm-ld --no-entry --gc-sections --import-undefined \
-	  --export=cp_wasm_alloc --export=cp_wasm_free --export=__heap_base \
-	  --initial-memory=33554432 --max-memory=536870912 \
-	  $(WASM_EXPORTS) -o $@ $(WASM_OBJ)
-	@ls -l $@ | awk '{print "  " $$5 " bytes"}'
+.PHONY: all clean run
 
-# The playable cell stage. Same toolchain, a different set of objects: the
-# stage-1 simulation and both of its continuous-tone renderers, behind the flat
-# play ABI. Nothing here is shared with the editor build except the shim.
-CELL_WASM_SRC := src/rng.c src/genome.c src/world.c src/policy.c src/render.c \
-                 src/render_cell.c src/render_pond.c src/play.c wasm/shim.c
-CELL_WASM_OBJ := $(CELL_WASM_SRC:%.c=$(BUILD)/wasm/%.o)
-CELL_EXPORTS  := $(shell grep -oE '\bcp_play_[a-z_]+' include/cpore/cpore.h \
-                         | sort -u | sed 's/^/--export=/')
+all: creator
 
-wasm/cell.wasm: $(CELL_WASM_OBJ)
-	wasm-ld --no-entry --gc-sections --import-undefined \
-	  --export=cp_wasm_alloc --export=cp_wasm_free --export=__heap_base \
-	  --initial-memory=33554432 --max-memory=536870912 \
-	  $(CELL_EXPORTS) -o $@ $(CELL_WASM_OBJ)
-	@ls -l $@ | awk '{print "  " $$5 " bytes"}'
+creator: $(CREATOR_OBJS)
+	$(CC) $(LDFLAGS) -o $@ $(CREATOR_OBJS) $(LIBS)
 
-.PHONY: wasm serve play
-wasm: wasm/cpore.wasm wasm/cell.wasm
-play: wasm/cell.wasm ; @echo "http://127.0.0.1:8732/play.html" && cd wasm && python3 -m http.server 8732
-# the page is ES modules and fetches the .wasm, so it needs an origin
-serve: wasm ; @echo "http://127.0.0.1:8731/editor.html" && cd wasm && python3 -m http.server 8731
+src/%.o: src/%.c
+	$(CC) $(CFLAGS) -c -o $@ $<
 
-clean: ; rm -rf $(BUILD) wasm/cpore.wasm wasm/cell.wasm
+run: creator
+	./creator
+
+clean:
+	rm -f $(CREATOR_OBJS) creator

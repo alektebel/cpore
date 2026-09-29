@@ -1,304 +1,226 @@
-#include "cpore/cpore.h"
-#include <string.h>
+#include "spore/genome.h"
+
 #include <math.h>
+#include <string.h>
 
-/* The creature editor, as an action space.
- *
- * A genome is up to 12 parts, each with a type and a body-relative mounting
- * angle. Placement is load-bearing: spikes and jaws only reach through the
- * arc they point down, jets only push you forward if they are mounted behind
- * you. Parts are bought with DNA out of a per-generation budget, so a build
- * is a set of things given up as much as a set of things acquired. */
+/* --- morph tables ------------------------------------------------------ */
 
-const int CP_GEN_BUDGET[CP_GENERATIONS] = { 30, 55, 85, 125 };
-
-static const struct { const char *name; int cost; } PARTS[CP_PART_COUNT] = {
-    { "-",          0 },
-    { "filter",     5 },
-    { "jaw",       10 },
-    { "proboscis", 16 },
-    { "cilia",      5 },
-    { "flagella",  10 },
-    { "jet",       16 },
-    { "spike",      9 },
-    { "electric",  20 },
-    { "poison",    14 },
-    { "eye",        6 },
+const SpineMorph SPINES[SPINE_MORPH_COUNT] = {
+    { "compact",     0.70f, 4 },
+    { "standard",    1.00f, 6 },
+    { "long",        1.35f, 9 },
+    { "serpentine",  1.80f, 16 },
 };
 
-const char *cp_part_name(int t)
-{
-    return (t >= 0 && t < CP_PART_COUNT) ? PARTS[t].name : "?";
-}
+const NeckMorph NECKS[NECK_MORPH_COUNT] = {
+    { "short",    0.55f },
+    { "standard", 0.80f },
+    { "crane",    1.25f },
+};
 
-int cp_part_cost(int t)
-{
-    return (t >= 0 && t < CP_PART_COUNT) ? PARTS[t].cost : 0;
-}
+const ReachMorph REACHES[REACH_MORPH_COUNT] = {
+    { "stubby", 0.70f, 0.85f },
+    { "mid",    1.00f, 1.00f },
+    { "lanky",  1.30f, 1.18f },
+};
 
-void cp_genome_clear(CpGenome *g)
-{
-    memset(g, 0, sizeof(*g));
-}
+const StanceMorph STANCES[STANCE_MORPH_COUNT] = {
+    { "quad",  1.00f },
+    { "biped", 1.22f },
+};
 
-int cp_genome_cost(const CpGenome *g)
-{
-    int c = 0;
-    for (int i = 0; i < CP_MAX_PARTS; i++) c += cp_part_cost(g->part[i].type);
-    return c;
-}
+/* --- part catalogue ---------------------------------------------------- */
 
-static int genome_count(const CpGenome *g, int type)
-{
-    int n = 0;
-    for (int i = 0; i < CP_MAX_PARTS; i++) if (g->part[i].type == type) n++;
-    return n;
-}
+static const char *const MOUTH_NAMES[MOUTH_COUNT] =
+    { "none", "jaw", "beak", "proboscis", "sucker" };
+static const char *const LEGS_NAMES[LEGS_COUNT] =
+    { "none", "stub", "sprint", "jump", "climb", "flipper" };
+static const char *const WEAPON_NAMES[WEAPON_COUNT] =
+    { "none", "horn", "club", "poison" };
+static const char *const ABILITY_NAMES[ABILITY_COUNT] =
+    { "none", "sing", "charge", "roar" };
+static const char *const EYES_NAMES[EYES_COUNT] =
+    { "none", "small", "large", "stalk" };
+static const char *const GRASPER_NAMES[GRASPER_COUNT] =
+    { "none", "hands", "claws" };
+static const char *const DETAIL_NAMES[DETAIL_COUNT] =
+    { "none", "fin", "wing", "quills" };
 
-/* the gen-0 cell: one mouth, two cilia, nothing else - same as Spore's */
-void cp_genome_starter(CpGenome *g)
-{
-    cp_genome_clear(g);
-    g->part[0].type = CP_PART_FILTER;   g->part[0].angle = 0;
-    g->part[1].type = CP_PART_CILIA;    g->part[1].angle = 96;
-    g->part[2].type = CP_PART_CILIA;    g->part[2].angle = 160;
-}
-
-void cp_genome_normalise(CpGenome *g, int budget)
-{
-    /* compact: push live parts to the front so slot index means nothing */
-    CpPart tmp[CP_MAX_PARTS];
-    int n = 0;
-    for (int i = 0; i < CP_MAX_PARTS; i++)
-        if (g->part[i].type > CP_PART_NONE && g->part[i].type < CP_PART_COUNT)
-            tmp[n++] = g->part[i];
-    memset(g, 0, sizeof(*g));
-    for (int i = 0; i < n; i++) g->part[i] = tmp[i];
-
-    /* a cell with no mouth cannot eat; grant the cheapest one before budgeting
-     * so the trim below accounts for its cost */
-    if (genome_count(g, CP_PART_FILTER) == 0 &&
-        genome_count(g, CP_PART_JAW) == 0 &&
-        genome_count(g, CP_PART_PROBOSCIS) == 0) {
-        int slot = (n < CP_MAX_PARTS) ? n++ : CP_MAX_PARTS - 1;
-        g->part[slot].type = CP_PART_FILTER;
-    }
-
-    /* spend down to budget, dropping the most expensive part first so a build
-     * loses its luxuries rather than its whole identity - never the last mouth */
-    while (cp_genome_cost(g) > budget) {
-        int worst = -1;
-        for (int i = 0; i < CP_MAX_PARTS; i++) {
-            int t = g->part[i].type;
-            if (t == CP_PART_NONE) continue;
-            int is_mouth = (t == CP_PART_FILTER || t == CP_PART_JAW || t == CP_PART_PROBOSCIS);
-            if (is_mouth) {
-                int mouths = genome_count(g, CP_PART_FILTER) + genome_count(g, CP_PART_JAW)
-                           + genome_count(g, CP_PART_PROBOSCIS);
-                if (mouths <= 1) continue;
-            }
-            if (worst < 0 || cp_part_cost(t) > cp_part_cost(g->part[worst].type)) worst = i;
-        }
-        if (worst < 0) break;
-        g->part[worst].type = CP_PART_NONE;
-        cp_genome_normalise(g, budget);      /* re-compact, then re-check */
-        return;
+static const char *const *slot_names(int slot, int *count) {
+    switch (slot) {
+    case PART_SLOT_MOUTH:   *count = MOUTH_COUNT;   return MOUTH_NAMES;
+    case PART_SLOT_LEGS:    *count = LEGS_COUNT;    return LEGS_NAMES;
+    case PART_SLOT_WEAPON:  *count = WEAPON_COUNT;  return WEAPON_NAMES;
+    case PART_SLOT_ABILITY: *count = ABILITY_COUNT; return ABILITY_NAMES;
+    case PART_SLOT_EYES:    *count = EYES_COUNT;    return EYES_NAMES;
+    case PART_SLOT_GRASPER: *count = GRASPER_COUNT; return GRASPER_NAMES;
+    case PART_SLOT_DETAIL:  *count = DETAIL_COUNT;  return DETAIL_NAMES;
+    default: *count = 0; return NULL;
     }
 }
 
-void cp_genome_random(CpGenome *g, CpRng *r, int budget)
-{
-    cp_genome_clear(g);
-    for (int i = 0; i < CP_MAX_PARTS; i++) {
-        if (cp_rng_f(r) < 0.25f) continue;
-        g->part[i].type = (uint8_t)(1 + cp_rng_int(r, CP_PART_COUNT - 1));
-        g->part[i].angle = (uint8_t)cp_rng_int(r, 256);
-    }
-    cp_genome_normalise(g, budget);
+void unlocks_grant(PartUnlocks *u, int slot, int part) {
+    if (!u || slot < 0 || slot >= PART_SLOT_COUNT) return;
+    int count = 0;
+    slot_names(slot, &count);
+    if (part < 0 || part >= count || part >= 32) return;
+    u->mask[slot] |= (1u << part);
 }
 
-/* action head -> genome. Each slot is two floats in [-1,1]: type index and
- * mounting angle. Values outside the valid range clamp rather than wrap, so a
- * saturated policy output means "empty slot" instead of an aliased part. */
-void cp_genome_from_action(CpGenome *g, const float *design, int budget)
-{
-    cp_genome_clear(g);
-    for (int i = 0; i < CP_MAX_PARTS; i++) {
-        float tv = design[i * 2];
-        float av = design[i * 2 + 1];
-        if (tv < -1.0f) tv = -1.0f;
-        if (tv > 1.0f) tv = 1.0f;
-        int t = (int)((tv + 1.0f) * 0.5f * (float)(CP_PART_COUNT - 1) + 0.5f);
-        if (t < 0) t = 0;
-        if (t >= CP_PART_COUNT) t = CP_PART_COUNT - 1;
-        g->part[i].type = (uint8_t)t;
-
-        if (av < -1.0f) av = -1.0f;
-        if (av > 1.0f) av = 1.0f;
-        int a = (int)((av + 1.0f) * 0.5f * 255.0f + 0.5f);
-        g->part[i].angle = (uint8_t)(a < 0 ? 0 : (a > 255 ? 255 : a));
+int unlocks_cycle(const PartUnlocks *u, int slot, int cur) {
+    int count = 0;
+    slot_names(slot, &count);
+    if (!u || count <= 1) return cur;
+    for (int step = 1; step <= count; step++) {
+        int p = (cur + step) % count;
+        if (p < 32 && (u->mask[slot] & (1u << p)))
+            return p;
     }
-    cp_genome_normalise(g, budget);
+    return cur;
 }
 
-/* ---- scripted designer ----
- * Buys a coherent build for the given budget and places parts where they
- * work: weapons forward, propulsion aft, eyes on the flanks. */
-void cp_genome_autodesign(CpGenome *g, CpRng *r, int budget, int style)
-{
-    cp_genome_clear(g);
-    int slot = 0, spent = 0;
-
-    /* front is angle 0, rear is 128 */
-    #define BUY(TYPE, ANGLE)                                                  \
-        do {                                                                  \
-            if (slot < CP_MAX_PARTS && spent + cp_part_cost(TYPE) <= budget) { \
-                g->part[slot].type = (uint8_t)(TYPE);                         \
-                g->part[slot].angle = (uint8_t)(ANGLE);                       \
-                spent += cp_part_cost(TYPE);                                  \
-                slot++;                                                       \
-            }                                                                 \
-        } while (0)
-
-    switch (style % CP_STYLE_COUNT) {
-    case CP_STYLE_HUNTER:
-        BUY(CP_PART_JAW, 0);
-        BUY(CP_PART_CILIA, 112);
-        BUY(CP_PART_CILIA, 144);
-        BUY(CP_PART_SPIKE, 16);
-        BUY(CP_PART_SPIKE, 240);
-        BUY(CP_PART_EYE, 32);
-        BUY(CP_PART_JET, 128);
-        BUY(CP_PART_JAW, 224);
-        BUY(CP_PART_SPIKE, 48);
-        BUY(CP_PART_FLAGELLA, 128);
-        BUY(CP_PART_SPIKE, 208);
-        BUY(CP_PART_POISON, 128);
-        break;
-    case CP_STYLE_TANK:
-        /* Buy order is not cosmetic: the gen-0 budget is 30 DNA, so a style
-         * that reaches for its signature part first ends up with no cilia and
-         * dies to the first thing that chases it. Mobility comes first. */
-        BUY(CP_PART_FILTER, 0);
-        BUY(CP_PART_CILIA, 112);
-        BUY(CP_PART_CILIA, 144);
-        BUY(CP_PART_SPIKE, 128);        /* armour aft: it expects to be chased */
-        BUY(CP_PART_SPIKE, 96);
-        BUY(CP_PART_SPIKE, 160);
-        BUY(CP_PART_POISON, 128);
-        BUY(CP_PART_JAW, 0);
-        BUY(CP_PART_ELECTRIC, 0);
-        BUY(CP_PART_EYE, 32);
-        BUY(CP_PART_SPIKE, 32);
-        BUY(CP_PART_POISON, 96);
-        break;
-    case CP_STYLE_SCOUT:
-        BUY(CP_PART_FILTER, 0);
-        BUY(CP_PART_CILIA, 112);
-        BUY(CP_PART_CILIA, 144);
-        BUY(CP_PART_EYE, 32);
-        BUY(CP_PART_EYE, 224);
-        BUY(CP_PART_JET, 128);          /* jets only pay off mounted aft */
-        BUY(CP_PART_PROBOSCIS, 8);
-        BUY(CP_PART_FLAGELLA, 128);
-        BUY(CP_PART_EYE, 128);
-        BUY(CP_PART_SPIKE, 0);
-        BUY(CP_PART_EYE, 64);
-        BUY(CP_PART_JET, 144);
-        break;
-    default: /* grazer */
-        BUY(CP_PART_FILTER, 0);
-        BUY(CP_PART_CILIA, 104);
-        BUY(CP_PART_CILIA, 152);
-        BUY(CP_PART_FLAGELLA, 128);
-        BUY(CP_PART_FILTER, 16);
-        BUY(CP_PART_EYE, 32);
-        BUY(CP_PART_CILIA, 80);
-        BUY(CP_PART_SPIKE, 192);
-        BUY(CP_PART_JET, 128);
-        BUY(CP_PART_CILIA, 176);
-        BUY(CP_PART_PROBOSCIS, 8);
-        BUY(CP_PART_ELECTRIC, 240);
-        break;
-    }
-    #undef BUY
-
-    /* jitter placement slightly so generations are not carbon copies */
-    if (r) {
-        for (int i = 0; i < CP_MAX_PARTS; i++)
-            if (g->part[i].type != CP_PART_NONE)
-                g->part[i].angle = (uint8_t)((g->part[i].angle + cp_rng_int(r, 9) - 4) & 0xFF);
-    }
-    cp_genome_normalise(g, budget);
+const char *unlocks_part_name(int slot, int part) {
+    int count = 0;
+    const char *const *names = slot_names(slot, &count);
+    if (!names || count == 0) return "?";
+    if (part < 0) part = 0;
+    if (part >= count) part = count - 1;
+    return names[part];
 }
 
-/* ---- genome -> stats ---- */
+/* --- genome ------------------------------------------------------------ */
 
-void cp_genome_stats(const CpGenome *g, CpStats *o)
-{
-    memset(o, 0, sizeof(*o));
-    for (int i = 0; i < CP_MAX_PARTS; i++) {
-        int t = g->part[i].type;
-        if (t > CP_PART_NONE && t < CP_PART_COUNT) { o->n[t]++; o->n_parts++; }
+Genome genome_starter(void) {
+    Genome g;
+    memset(&g, 0, sizeof(g));
+    g.mouth = MOUTH_JAW;
+    g.legs = LEGS_STUB;
+    g.weapon = WEAPON_NONE;
+    g.ability = ABILITY_NONE;
+    g.eyes = EYES_SMALL;
+    g.grasper = GRASPER_NONE;
+    g.detail = DETAIL_NONE;
+    g.spine = SPINE_STANDARD;
+    g.neck = NECK_STANDARD;
+    g.asym = ASYM_BALANCED;
+    g.stance = STANCE_QUAD;
+    g.wpn_sock = WSOCK_FLANK;
+    g.dtl_sock = DSOCK_BACK;
+    g.reach = REACH_MID;
+    g.limbs = 4;
+    g.wpn_slide = SLIDE_COUNT / 2;
+    g.dtl_slide = SLIDE_COUNT / 2;
+    return g;
+}
+
+static int clamp_index(int v, int count) {
+    if (v < 0) return 0;
+    if (v >= count) return count - 1;
+    return v;
+}
+
+void genome_clamp(Genome *g) {
+    if (!g) return;
+    g->mouth = clamp_index(g->mouth, MOUTH_COUNT);
+    g->legs = clamp_index(g->legs, LEGS_COUNT);
+    g->weapon = clamp_index(g->weapon, WEAPON_COUNT);
+    g->ability = clamp_index(g->ability, ABILITY_COUNT);
+    g->eyes = clamp_index(g->eyes, EYES_COUNT);
+    g->grasper = clamp_index(g->grasper, GRASPER_COUNT);
+    g->detail = clamp_index(g->detail, DETAIL_COUNT);
+    g->spine = clamp_index(g->spine, SPINE_MORPH_COUNT);
+    g->neck = clamp_index(g->neck, NECK_MORPH_COUNT);
+    g->asym = clamp_index(g->asym, ASYM_COUNT);
+    g->stance = clamp_index(g->stance, STANCE_MORPH_COUNT);
+    g->wpn_sock = clamp_index(g->wpn_sock, WSOCK_COUNT);
+    g->dtl_sock = clamp_index(g->dtl_sock, DSOCK_COUNT);
+    g->reach = clamp_index(g->reach, REACH_MORPH_COUNT);
+    if (g->limbs < 0) g->limbs = 0;
+    if (g->limbs > CREATURE_LEGS) g->limbs = CREATURE_LEGS;
+    g->limbs &= ~1; /* even: limbs come in pairs */
+    g->wpn_slide = clamp_index(g->wpn_slide, SLIDE_COUNT);
+    g->dtl_slide = clamp_index(g->dtl_slide, SLIDE_COUNT);
+}
+
+int genome_complexity(const Genome *g) {
+    if (!g) return 0;
+    int cx = 0;
+    if (g->mouth != MOUTH_NONE) cx++;
+    if (g->legs != LEGS_NONE) cx++;
+    if (g->weapon != WEAPON_NONE) cx += 2;
+    if (g->ability != ABILITY_NONE) cx += 2;
+    if (g->eyes != EYES_NONE) cx++;
+    if (g->grasper != GRASPER_NONE) cx++;
+    if (g->detail != DETAIL_NONE) cx++;
+    if (g->spine != SPINE_STANDARD) cx += 3;
+    if (g->neck != NECK_STANDARD) cx += 2;
+    if (g->reach != REACH_MID) cx += 2;
+    if (g->stance != STANCE_QUAD) cx += 3;
+    if (g->asym != ASYM_BALANCED) cx += 2;
+    cx += g->limbs;
+    if (cx > COMPLEXITY_MAX) cx = COMPLEXITY_MAX;
+    return cx;
+}
+
+int genome_limb_count(const Genome *g) {
+    if (!g || g->legs == LEGS_NONE) return 0;
+    int n = g->limbs;
+    if (n < 2) n = 2;
+    if (n > CREATURE_LEGS) n = CREATURE_LEGS;
+    return n & ~1;
+}
+
+void genome_apply(Creature *c) {
+    if (!c) return;
+    Genome g = c->genome;
+    genome_clamp(&g);
+    c->genome = g;
+
+    const SpineMorph *sp = &SPINES[g.spine];
+    const ReachMorph *rc = &REACHES[g.reach];
+
+    float leg;
+    switch (g.legs) {
+    case LEGS_SPRINT:  leg = 1.45f; break;
+    case LEGS_JUMP:    leg = 1.15f; break;
+    case LEGS_CLIMB:   leg = 1.05f; break;
+    case LEGS_FLIPPER: leg = 0.85f; break;
+    case LEGS_STUB:    leg = 0.72f; break;
+    default:           leg = 0.50f; break;
     }
-    o->cost = (int16_t)cp_genome_cost(g);
+    c->max_speed = 2.60f * leg * rc->limb * (0.85f + 0.15f * sp->length);
 
-    const uint8_t *n = o->n;
+    c->jump_power = (g.legs == LEGS_JUMP) ? 8.5f
+                  : (g.legs == LEGS_CLIMB) ? 6.0f
+                  : (g.legs == LEGS_SPRINT) ? 5.4f : 4.8f;
 
-    /* --- feeding --- */
-    o->herb_eff = 0.70f * n[CP_PART_FILTER] + 0.48f * n[CP_PART_PROBOSCIS];
-    o->carn_eff = 0.75f * n[CP_PART_JAW]    + 0.48f * n[CP_PART_PROBOSCIS];
+    c->attack_power = (g.weapon == WEAPON_CLUB) ? 19.0f
+                    : (g.weapon == WEAPON_HORN) ? 16.0f
+                    : (g.weapon == WEAPON_POISON) ? 12.0f : 6.0f;
 
-    /* --- locomotion --- */
-    o->max_speed = 150.0f + 40.0f * n[CP_PART_CILIA]
-                          + 18.0f * n[CP_PART_FLAGELLA]
-                          + 30.0f * n[CP_PART_JET];
-    o->accel     = 600.0f + 80.0f * n[CP_PART_CILIA]
-                          + 230.0f * n[CP_PART_FLAGELLA]
-                          + 90.0f * n[CP_PART_JET];
-    o->drag      = 2.6f;
+    c->armor = (g.detail == DETAIL_QUILLS) ? 0.28f
+             : (g.detail == DETAIL_FIN) ? 0.10f : 0.0f;
 
-    /* A jet pushes you along the axis it points down, so only its rearward
-     * component does anything useful. Mounted at the front it is dead weight
-     * you paid 16 DNA for. */
-    o->jet_thrust = 0.0f;
-    for (int i = 0; i < CP_MAX_PARTS; i++) {
-        if (g->part[i].type != CP_PART_JET) continue;
-        float a = (float)g->part[i].angle * (2.0f * 3.14159265f / 256.0f);
-        float rearward = -cosf(a);
-        if (rearward > 0.0f) o->jet_thrust += 165.0f * rearward;
+    c->sight_range = (g.eyes == EYES_STALK) ? 22.0f
+                   : (g.eyes == EYES_LARGE) ? 18.0f
+                   : (g.eyes == EYES_SMALL) ? 10.0f : 6.0f;
+
+    c->gather_range = (g.grasper != GRASPER_NONE) ? 3.0f : 1.2f;
+    c->scent_range = 7.0f;
+
+    /* Hip sockets, body-local; body_to_world applies scale plus yaw. */
+    for (int i = 0; i < CREATURE_LEGS; i++)
+        c->hip_local[i] = v3(0.0f, 0.0f, 0.0f);
+
+    int nlegs = genome_limb_count(&g);
+    int pairs = nlegs / 2;
+    if (pairs < 1) pairs = 1;
+    for (int p = 0; p < pairs && (p * 2 + 1) < CREATURE_LEGS; p++) {
+        float u = (pairs <= 1) ? 0.5f : (float)p / (float)(pairs - 1);
+        float z = 0.35f - 0.70f * u; /* front (+Z) to rear (-Z) */
+        float x = 0.30f * (g.asym == ASYM_LEFT ? 1.08f
+                         : g.asym == ASYM_RIGHT ? 0.92f : 1.0f);
+        c->hip_local[p * 2]     = v3(x, -0.10f, z);
+        c->hip_local[p * 2 + 1] = v3(-x, -0.10f, z);
     }
-
-    /* mass costs mobility - a heavily built cell is a slow cell */
-    float mass = 1.0f + 0.055f * o->n_parts
-                      + 0.03f * n[CP_PART_SPIKE]
-                      + 0.03f * n[CP_PART_JAW];
-    o->max_speed /= mass;
-    o->accel     /= mass;
-
-    /* --- durability --- */
-    o->hp_max = 100.0f + 12.0f * n[CP_PART_SPIKE]
-                       + 8.0f * n[CP_PART_JAW]
-                       + 14.0f * n[CP_PART_POISON];
-    o->armor  = 0.075f * n[CP_PART_SPIKE] + 0.05f * n[CP_PART_POISON];
-    if (o->armor > 0.60f) o->armor = 0.60f;
-
-    /* --- weapons. Per-part, because the sim applies them through a facing
-     *     arc: two spikes on the same side are not two spikes of coverage. --- */
-    o->spike_dmg = n[CP_PART_SPIKE] ? 30.0f : 0.0f;
-    o->jaw_dmg   = n[CP_PART_JAW]   ? 21.0f : 0.0f;
-    o->poison_dmg = 9.0f * n[CP_PART_POISON];
-
-    o->elec_dmg    = 22.0f * n[CP_PART_ELECTRIC];
-    o->elec_radius = n[CP_PART_ELECTRIC] ? (58.0f + 16.0f * n[CP_PART_ELECTRIC]) : 0.0f;
-    o->elec_cost   = 4.0f;
-    o->elec_cd     = 1.6f;
-
-    /* --- senses --- */
-    o->percep = 210.0f + 95.0f * n[CP_PART_EYE];
-    if (o->percep > 620.0f) o->percep = 620.0f;
-
-    /* --- body --- */
-    o->radius0 = 14.0f + 0.75f * o->n_parts;
-    o->upkeep  = 0.26f + 0.115f * o->n_parts;
 }
