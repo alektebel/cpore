@@ -89,8 +89,8 @@ The repo's selling point is libc+libm and nothing else, and training happens
 natively — so the game is native too: `apps/cpore_game.c` over `src/glview.c`
 (X11+GLX from stock headers, no engine, no SDL). The sim core never links
 windowing or GL; the shell maps input onto the action vectors the RL loop
-already drives. The emscripten target still builds for link-sharing, but it
-is not the path anything depends on.
+already drives. The browser shell is clang's wasm32 target (`make wasm`),
+built without Emscripten, and is not the path anything depends on.
 
 Where the code goes:
 
@@ -99,7 +99,7 @@ Where the code goes:
 | native game shell: input → action vector, HUD, map view | `apps/cpore_game.c` |
 | GPU present path: GLX context, integer-scale blit, FPS | `src/glview.c` (never in libcpore) |
 | interactive render tiers | map view in the shell now; shader-quantise + GPU terrain next, behind the `cp_vis_palette` / `cp4_pose_prims` contract |
-| legacy browser shell | `web/` (`make wasm`) |
+| browser shell: editor and playable cell | `wasm/` (`make serve`) |
 
 ### The render budget, honestly
 
@@ -136,7 +136,7 @@ four-view render, the biome and medium it was found in, its diet and
 disposition, and a name. The player can rename it; the discovery counter
 becomes a collection. Where: `src/codex.c`, a pure function of genomes
 encountered, its records POD inside the world struct so snapshots stay a
-`memcpy`; the card UI lives in `web/`. Crucially the codex count is already
+`memcpy`; the card UI lives in `wasm/`. Crucially the codex count is already
 in the observation (`discovered`), so the same mechanism is an exploration
 reward for the lab.
 
@@ -161,7 +161,7 @@ Distant species call (an ear/voice readout pointing off-screen), tracks hash
 out of the ground cell like flora does, and the overhead `--map` becomes an
 in-game map revealed by where you have actually walked (a coarse visited-cell
 trail, ring-buffered, POD). Where: `src/land.c` for hearing and tracks,
-`web/` for the map screen reusing the existing map render path.
+`wasm/` for the map screen reusing the existing map render path.
 
 **5. Weather and seasons** (roadmap 12, unchanged priority). Rain that cuts
 sight the way night does, wind that pushes fliers along the gust field the
@@ -185,7 +185,7 @@ segment, yaw, pitch, scale, mirror, length and fold, spine profile, three
 coats. What's missing is hands.
 
 **The editor is a frontend over the genome, not a new system.** A screen in
-`web/`: parts palette on the left with live DNA prices, the creature centre
+`wasm/editor.html`: parts palette on the left with live DNA prices, the creature centre
 via the existing SDF four-view path (creature-only rendering skips the
 terrain marcher entirely, so per-edit refresh is cheap), stat block right —
 the one `--creature` already prints, which is the editor's honesty: every
@@ -318,7 +318,7 @@ species memory already works. Vibration and electroreception are new terms
 in the existing perception resolve in `src/land.c`; echolocation is an
 action bit plus a broadcast event, shaped like the song mechanic that
 already exists. The observation grows one block per sense, and the HUD in
-`web/` shows *only the senses the build owns* — the umwelt made literal: a
+`wasm/` shows *only the senses the build owns* — the umwelt made literal: a
 different creature's screen is a different world.
 
 For the lab this roster is a gift: it makes partial observability a design

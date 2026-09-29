@@ -1,9 +1,8 @@
 # Creating a creature: the minimal steps
 
 The shortest path from a clean checkout to a creature of your own design.
-Two doors: play it live in the native game, or build it in Python. (The
-drag-and-drop browser editor is still planned — see [PLAN.md](PLAN.md);
-until it lands, the game keys plus the Python API are the creator.)
+Three doors: play it live in the native game, build it in Python, or drag it
+in the browser editor.
 
 ## 0. Play it (native, no browser)
 
@@ -13,8 +12,19 @@ make game   # ./build/cpore_game --stage land --seed 7
 
 WASD moves, SPACE bites, E sings, **N rebuilds you toward the next
 archetype** at the current budget, **C prints your share code**, F takes a
-full-quality still. Keys 1–5 switch cell/aqua/creature/tribe/civ live, and
-the tribe founds from whatever genome you are driving.
+full-quality still. Keys 1–6 switch cell/aqua/creature/tribe/civ/space live,
+and the tribe founds from whatever genome you are driving.
+
+## 0b. Drag it (browser, no Emscripten)
+
+```
+make wasm && make serve   # then open http://127.0.0.1:8731/editor.html
+```
+
+Every shape is made by dragging: a part comes off the palette under the
+cursor, a placed part is dragged to move, its ring to resize and its tip to
+lengthen, a vertebra dragged up to hump and sideways to widen. `?selftest=1`
+drives the lot through the real pointer handlers.
 
 ## 1. Build
 
@@ -32,7 +42,7 @@ shared library the Python binding loads.
 ```
 
 19 part types with their DNA prices. A body is up to 16 parts on a spine of
-2–6 segments, bought out of a budget (82 DNA at generation 0). Mouths gate
+2–16 points, bought out of a budget (82 DNA at generation 0). Mouths gate
 what you can eat, legs/fins/wings/diggers gate where you can go, eyes and
 ears are how much of the world you get told about.
 

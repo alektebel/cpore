@@ -17,7 +17,7 @@ VIS_SRC := src/render.c src/render_cell.c src/render_pond.c src/play.c src/rende
 LIB_OBJ := $(LIB_SRC:%.c=$(BUILD)/%.o)
 VIS_OBJ := $(VIS_SRC:%.c=$(BUILD)/%.o)
 
-.PHONY: all clean test bench shot aqua land civ tribe space stl play play-cell game game-tribe lib wasm web
+.PHONY: all clean test bench shot aqua land civ tribe space stl play play-cell game game-tribe lib wasm
 all: $(BUILD)/cpore_shot $(BUILD)/cpore_aqua $(BUILD)/cpore_land \
      $(BUILD)/cpore_civ $(BUILD)/cpore_tribe $(BUILD)/cpore_space \
      $(BUILD)/cpore_stl \
@@ -136,7 +136,7 @@ wasm/cell.wasm: $(CELL_WASM_OBJ)
 	  $(CELL_EXPORTS) -o $@ $(CELL_WASM_OBJ)
 	@ls -l $@ | awk '{print "  " $$5 " bytes"}'
 
-.PHONY: wasm serve play web
+.PHONY: wasm serve play
 wasm: wasm/cpore.wasm wasm/cell.wasm
 play: wasm/cell.wasm ; @echo "http://127.0.0.1:8732/play.html" && cd wasm && python3 -m http.server 8732
 # the page is ES modules and fetches the .wasm, so it needs an origin

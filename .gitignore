@@ -9,8 +9,8 @@ build/
 gmon.out
 __pycache__/
 *.pyc
-spore_save.txt
 wasm/cpore.wasm
+wasm/cell.wasm
 wasm/editor-standalone.html
 wasm/editor-fragment.html
 docs/creature-creator-artifact.html

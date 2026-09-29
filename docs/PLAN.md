@@ -40,10 +40,11 @@ Real-time, natively. `make game` builds `apps/cpore_game.c`: an X11+GLX
 shell (stock system headers, no SDL) that maps keyboard onto the existing
 action vectors and presents frames on the GPU at an integer pixel scale,
 with the codex, editor-lite, share codes and photo stills built in. The
-emscripten target still builds for link-sharing but is no longer the plan's
+browser build (`make wasm`, clang's wasm32 target, no Emscripten) still exists
+for link-sharing but is no longer the plan's
 centre. Sim ticks fixed at ~15 steps/s, so an episode is a ten-minute
 session and a day/night cycle passes every ~2¼ minutes. (Status: DONE —
-`cpore_game` plays all five stages; the interactive first-person marcher
+`cpore_game` plays all six stages; the interactive first-person marcher
 remains the photo tier, the map view is the play tier.)
 
 *Code:* `apps/cpore_game.c`, `src/glview.c`, map-view tier in the shell.
@@ -60,7 +61,7 @@ intersections. Discovery count already sits in the observation, so the same
 work is an exploration reward for the lab.
 
 *Code:* `src/codex.c` (POD records inside the world struct), seeding in
-`src/land.c`, card UI in `web/`.
+`src/land.c`, card UI in `wasm/`.
 *Done when:* a cold ten-minute session yields ≥5 codex entries and ≥1 rare;
 sightings feel like events, not counter increments.
 
@@ -127,7 +128,7 @@ electroreception in water, echolocation as the one sense that spends energy
 and stealth to perceive. HUD shows only the senses the build owns.
 
 *Code:* perception resolve in `src/land.c`, scent ring buffer on the world
-struct, HUD in `web/`.
+struct, HUD in `wasm/`.
 *Done when:* a blind build with good ears and nose is genuinely playable at
 night, and the table proves it.
 
@@ -136,7 +137,7 @@ night, and the table proves it.
 Procedural audio (WebAudio: wind, calls, footsteps by medium), photo mode,
 APNG export for sharing clips. The stage that makes people *post* it.
 
-*Code:* `web/audio.js`, APNG in `src/png.c` (a short step from the existing
+*Code:* `wasm/audio.js`, APNG in `src/png.c` (a short step from the existing
 DEFLATE encoder).
 *Done when:* a session recording gets shared unprompted.
 
@@ -157,7 +158,7 @@ you whether their design is thriving in your biomes or already extinct.
 Multiple codes seed multiple rival dynasties.
 
 *Code:* `cp4_env_reset` already accepts genomes; this is plumbing imported
-genomes into rival-nest founding in `src/land.c` plus a paste box in `web/`.
+genomes into rival-nest founding in `src/land.c` plus a paste box in `wasm/`.
 *Done when:* two people can trade codes and truthfully argue about whose
 creature outlasted whose.
 
@@ -183,7 +184,7 @@ of the week" — so a fresh player's planet is already populated by other
 people's imaginations. This is Spore's pollination feeling, delivered as a
 JSON file of share codes.
 
-*Code:* `web/packs/`, loaded by the shell at world creation.
+*Code:* `wasm/packs/`, loaded by the shell at world creation.
 *Done when:* a new player meets a stranger's creature in their first
 session without pasting anything.
 
